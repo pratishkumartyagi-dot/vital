@@ -10,6 +10,12 @@ late List<CameraDescription> _cameras;
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  // Set up global error handler to see any startup errors
+  FlutterError.onError = (FlutterErrorDetails details) {
+    print('Flutter error: ${details.exception}');
+    print('Stack trace: ${details.stack}');
+  };
+  
   // Initialize cameras with timeout to prevent hanging
   try {
     _cameras = await availableCameras().timeout(
@@ -132,6 +138,17 @@ class _VitalSignPageState extends State<VitalSignPage> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
+          // Debug: always-visible startup indicator
+          const Positioned(
+            top: 60,
+            left: 0,
+            right: 0,
+            child: Text(
+              'PPG Vital Monitor - Starting...',
+              style: TextStyle(color: Colors.red, fontSize: 22),
+              textAlign: TextAlign.center,
+            ),
+          ),
           // Camera preview or placeholder
           _isInitialized && _cameras.isNotEmpty
               ? CameraPreview(_controller)
