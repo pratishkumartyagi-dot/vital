@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'zero_allocation_extractor.dart';
 import 'ppg_signal_engine.dart';
-import 'dart:math';
+import 'dart:math' as math;
 import 'dart:async';
 
 enum TrackingState { baseline, profiling, complete, rejected }
