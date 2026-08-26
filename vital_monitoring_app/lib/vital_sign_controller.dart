@@ -48,6 +48,12 @@ class VitalSignController extends ChangeNotifier {
     _waveformBuffer.clear();
   }
 
+  void enableLiveMode() {
+    if (!_isDemoMode) return;
+    _disableDemoMode();
+    notifyListeners();
+  }
+
   void _startDemoTimer() {
     _demoTimer?.cancel();
     _demoTimer = Timer.periodic(const Duration(milliseconds: 33), (timer) { // ~30fps
@@ -221,5 +227,16 @@ class VitalSignController extends ChangeNotifier {
   void dispose() {
     _stopDemoTimer();
     super.dispose();
+  }
+
+  void reset() {
+    _currentState = TrackingState.baseline;
+    _gatheringProgress = 0.0;
+    _toastPrompt = "Align your finger over the camera lens and flash.";
+    _heartRate = 0.0;
+    _liveGreenBuffer.clear();
+    _waveformBuffer.clear();
+    _enableDemoMode();
+    notifyListeners();
   }
 }

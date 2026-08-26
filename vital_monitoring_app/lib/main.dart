@@ -12,36 +12,24 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   FlutterError.onError = (FlutterErrorDetails details) {
-    print('Flutter error: ${details.exception}');
-    print('Stack trace: ${details.stack}');
+    debugPrint('Flutter error: ${details.exception}');
+    debugPrint('Stack trace: ${details.stack}');
   };
 
   try {
     _cameras = await availableCameras().timeout(
       const Duration(seconds: 5),
       onTimeout: () {
-        print('Camera initialization timed out - using demo mode');
+        debugPrint('Camera initialization timed out - using demo mode');
         return <CameraDescription>[];
       },
     );
   } catch (e) {
-    print('Error getting cameras: $e');
+    debugPrint('Error getting cameras: $e');
     _cameras = [];
   }
 
   runApp(const VitalMonitoringApp());
-
-  try {
-    await NativeHardwareBridge.lockHardwareISP().timeout(
-      const Duration(seconds: 2),
-      onTimeout: () {
-        print('Hardware ISP lock timed out - continuing without lock');
-        return null;
-      },
-    );
-  } catch (e) {
-    print('Hardware ISP lock failed: $e');
-  }
 }
 
 class VitalMonitoringApp extends StatelessWidget {
@@ -53,6 +41,7 @@ class VitalMonitoringApp extends StatelessWidget {
       create: (_) => VitalSignController(),
       child: MaterialApp(
         title: 'PPG Vital Signs Monitor - Research Tool',
+        debugShowCheckedModeBanner: false,
         theme: ThemeData(
           primarySwatch: Colors.red,
           brightness: Brightness.dark,
@@ -70,8 +59,8 @@ class VitalSignPage extends StatefulWidget {
   State<VitalSignPage> createState() => _VitalSignPageState();
 }
 
-class _VitalSignPageState extends State<VitalSignPage> {
-  late CameraController _controller;
+class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserver {
+  CameraController? _controller;
   bool _isInitialized = false;
   bool _showInfoOverlay = true;
   String? _cameraError;
@@ -79,7 +68,26 @@ class _VitalSignPageState extends State<VitalSignPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    
+    if (state == AppLifecycleState.inactive) {
+      _controller?.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
   }
 
   Future<void> _initializeCamera() async {
@@ -98,9 +106,10 @@ class _VitalSignPageState extends State<VitalSignPage> {
         _cameras.first,
         ResolutionPreset.medium,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
-      await _controller.initialize().timeout(
+      await _controller!.initialize().timeout(
         const Duration(seconds: 10),
         onTimeout: () {
           throw Exception('Camera initialization timed out');
@@ -108,13 +117,26 @@ class _VitalSignPageState extends State<VitalSignPage> {
       );
 
       if (!mounted) return;
+      
+      try {
+        await NativeHardwareBridge.lockHardwareISP().timeout(
+          const Duration(seconds: 2),
+          onTimeout: () {
+            debugPrint('Hardware ISP lock timed out - continuing without lock');
+          },
+        );
+      } catch (e) {
+        debugPrint('Hardware ISP lock failed: $e');
+      }
+
       setState(() {
         _isInitialized = true;
       });
 
       final vitalSignController =
           Provider.of<VitalSignController>(context, listen: false);
-      vitalSignController.attachStreamPipeline(_controller);
+      vitalSignController.enableLiveMode();
+      vitalSignController.attachStreamPipeline(_controller!);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -122,16 +144,8 @@ class _VitalSignPageState extends State<VitalSignPage> {
           _cameraError = e.toString();
         });
       }
-      print('Camera initialization error: $e');
+      debugPrint('Camera initialization error: $e');
     }
-  }
-
-  @override
-  void dispose() {
-    if (_isInitialized && _cameras.isNotEmpty) {
-      _controller.dispose();
-    }
-    super.dispose();
   }
 
   void _toggleInfoOverlay() {
@@ -140,292 +154,300 @@ class _VitalSignPageState extends State<VitalSignPage> {
     });
   }
 
+  void _resetMeasurement() {
+    final vitalSignController =
+        Provider.of<VitalSignController>(context, listen: false);
+    vitalSignController.reset();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Measurement reset - place finger over camera to start'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = Provider.of<VitalSignController>(context);
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // Always-visible startup indicator
-          const Positioned(
-            top: 60,
-            left: 0,
-            right: 0,
-            child: Text(
-              'PPG Vital Monitor',
-              style: TextStyle(color: Colors.red, fontSize: 22),
-              textAlign: TextAlign.center,
-            ),
-          ),
-
-          // Camera preview or fallback placeholder
-          if (_isInitialized && _cameras.isNotEmpty && _cameraError == null)
-            CameraPreview(_controller)
-          else
-            Positioned.fill(
-              child: Container(
-                color: Colors.black,
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.videocam,
-                        size: 48,
-                        color: Colors.grey,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        _cameraError != null
-                            ? 'Camera Error\nRunning in Demo Mode\n\n$_cameraError'
-                            : 'Camera Not Available\nRunning in Demo Mode',
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 16,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                const SizedBox(height: 8),
+                const Text(
+                  'PPG Vital Monitor',
+                  style: TextStyle(
+                    color: Colors.red,
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ClipRect(
+                    child: _buildCameraPreview(),
                   ),
                 ),
-              ),
+                _buildWaveformSection(controller),
+                _buildStatusSection(controller),
+                const SizedBox(height: 60),
+              ],
             ),
-
-          // Overlay UI
-          Positioned.fill(
-            child: Container(
-              color: Colors.black54,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  // Waveform visualization
-                  Container(
-                    height: 120,
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                    child: WaveformChart(
-                      data: controller.waveformData,
-                      color: Colors.redAccent,
-                      label: 'PPG Signal',
-                    ),
-                  ),
-
-                  // Status and prompts
-                  Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Text(
-                      controller.toastPrompt,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-
-                  // Progress indicator during profiling
-                  if (controller.currentState == TrackingState.profiling)
-                    LinearProgressIndicator(
-                      value: controller.gatheringProgress,
-                      backgroundColor: Colors.grey[800],
-                      valueColor: const AlwaysStoppedAnimation<Color>(Colors.red),
-                    ),
-
-                  // Heart rate display when measurement is complete
-                  if (controller.currentState == TrackingState.complete)
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Text(
-                        'Heart Rate: ${controller.heartRate.toStringAsFixed(1)} BPM',
-                        style: const TextStyle(
-                          color: Colors.green,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-
-                  // Demo mode indicator
-                  if (controller.isDemoMode)
-                    Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12.0, vertical: 6.0),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.7),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Text(
-                          'DEMO MODE',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-
-                  const SizedBox(height: 20),
-
-                  // Info toggle button
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        GestureDetector(
-                          onTap: _toggleInfoOverlay,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12.0, vertical: 6.0),
-                            decoration: BoxDecoration(
-                              color: Colors.blue.withOpacity(0.5),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              _showInfoOverlay ? 'Hide Info' : 'Show Info',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                              ),
-                            ),
-                          ),
-                        ),
-                        Text(
-                          'PPG Vital Monitor v1.0\nResearch Tool for Photoplethysmography',
-                          style: const TextStyle(
-                            color: Colors.grey,
-                            fontSize: 12,
-                          ),
-                          textAlign: TextAlign.right,
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 10),
-                ],
-              ),
-            ),
-          ),
-
-          // Info overlay
-          if (_showInfoOverlay)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black87,
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'PPG Vital Signs Monitor',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'What this app does:',
-                        style: TextStyle(
-                          color: Colors.lightGreen,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        '• Uses smartphone camera to detect PPG signals from fingertip\n'
-                        '• Measures heart rate by analyzing blood volume changes\n'
-                        '• Displays real-time PPG waveform for signal quality assessment\n'
-                        '• Applies hardware locks to disable auto white balance/exposure\n'
-                        '• Uses zero-allocation processing for efficient operation\n'
-                        '• Implements research-grade signal processing pipeline\n'
-                        '• Includes Leave-One-Subject-Out validation framework\n',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 14,
-                          height: 1.4,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'How to use for research:',
-                        style: TextStyle(
-                          color: Colors.lightGreen,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        '1. Place fingertip firmly over camera lens and flash\n'
-                        '2. Hold steady and wait for signal acquisition\n'
-                        '3. Monitor waveform quality - look for clear pulsatile signal\n'
-                        '4. Wait for measurement to complete (progress bar fills)\n'
-                        '5. Record the displayed heart rate value\n'
-                        '6. Repeat measurements for data collection\n'
-                        '7. Use demo mode for testing without camera access\n'
-                        '8. Export data using the validation script for LOSO analysis\n',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 14,
-                          height: 1.4,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'Technical Notes:',
-                        style: TextStyle(
-                          color: Colors.lightGreen,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        '• Sampling rate: ~30 FPS from camera preview\n'
-                        '• Bandpass filter: 0.5-3.5 Hz (40-210 BPM range)\n'
-                        '• Perfusion index threshold: 0.5% for signal quality\n'
-                        '• Uses 4th-order Butterworth zero-phase filtering\n'
-                        '• Spatial downsampling reduces processing load\n'
-                        '• Native Android hardware ISP locking via MethodChannel\n'
-                        '• Zero-allocation frame processing prevents GC pressure\n'
-                        '• Peak detection algorithm for heart rate calculation\n',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-        ],
+            if (_showInfoOverlay) _buildInfoOverlay(),
+          ],
+        ),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          final vitalSignController =
-              Provider.of<VitalSignController>(context, listen: false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Measurement reset - place finger over camera to start'),
-              duration: Duration(seconds: 2),
-            ),
-          );
-        },
+        onPressed: _resetMeasurement,
         label: const Text('Reset'),
         icon: const Icon(Icons.refresh),
         backgroundColor: Colors.red,
       ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+    );
+  }
+
+  Widget _buildCameraPreview() {
+    if (!_isInitialized || _cameras.isEmpty || _cameraError != null) {
+      return Container(
+        color: Colors.black,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.videocam,
+                size: 64,
+                color: Colors.grey,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _cameraError != null
+                    ? 'Camera Error\nRunning in Demo Mode\n\n$_cameraError'
+                    : 'Camera Not Available\nRunning in Demo Mode',
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 16,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_controller == null || !_controller!.value.isInitialized) {
+      return Container(
+        color: Colors.black,
+        child: const Center(
+          child: CircularProgressIndicator(color: Colors.red),
+        ),
+      );
+    }
+
+    return Center(
+      child: AspectRatio(
+        aspectRatio: 1.0 / _controller!.value.aspectRatio,
+        child: CameraPreview(_controller!),
+      ),
+    );
+  }
+
+  Widget _buildWaveformSection(VitalSignController controller) {
+    return Container(
+      height: 100,
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.red.withOpacity(0.3)),
+      ),
+      child: WaveformChart(
+        data: controller.waveformData,
+        color: Colors.redAccent,
+        label: 'PPG Signal',
+      ),
+    );
+  }
+
+  Widget _buildStatusSection(VitalSignController controller) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        children: [
+          Text(
+            controller.toastPrompt,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          if (controller.currentState == TrackingState.profiling)
+            LinearProgressIndicator(
+              value: controller.gatheringProgress,
+              backgroundColor: Colors.grey[800],
+              valueColor: const AlwaysStoppedAnimation<Color>(Colors.red),
+            ),
+          if (controller.currentState == TrackingState.complete)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Heart Rate: ${controller.heartRate.toStringAsFixed(1)} BPM',
+                style: const TextStyle(
+                  color: Colors.green,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          if (controller.isDemoMode)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.7),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'DEMO MODE',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              GestureDetector(
+                onTap: _toggleInfoOverlay,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    _showInfoOverlay ? 'Hide Info' : 'Show Info',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                ),
+              ),
+              const Text(
+                'PPG Vital Monitor v1.0\nResearch Tool',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+                textAlign: TextAlign.right,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoOverlay() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black87,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'PPG Vital Signs Monitor',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: _toggleInfoOverlay,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildInfoSection('What this app does:', [
+                'Uses smartphone camera to detect PPG signals from fingertip',
+                'Measures heart rate by analyzing blood volume changes',
+                'Displays real-time PPG waveform for signal quality assessment',
+                'Applies hardware locks to disable auto white balance/exposure',
+                'Uses zero-allocation processing for efficient operation',
+                'Implements research-grade signal processing pipeline',
+                'Includes Leave-One-Subject-Out validation framework',
+              ]),
+              const SizedBox(height: 16),
+              _buildInfoSection('How to use for research:', [
+                'Place fingertip firmly over camera lens and flash',
+                'Hold steady and wait for signal acquisition',
+                'Monitor waveform quality - look for clear pulsatile signal',
+                'Wait for measurement to complete (progress bar fills)',
+                'Record the displayed heart rate value',
+                'Repeat measurements for data collection',
+                'Use demo mode for testing without camera access',
+                'Export data using the validation script for LOSO analysis',
+              ]),
+              const SizedBox(height: 16),
+              _buildInfoSection('Technical Notes:', [
+                'Sampling rate: ~30 FPS from camera preview',
+                'Bandpass filter: 0.5-3.5 Hz (40-210 BPM range)',
+                'Perfusion index threshold: 0.5% for signal quality',
+                'Uses 4th-order Butterworth zero-phase filtering',
+                'Spatial downsampling reduces processing load',
+                'Native Android hardware ISP locking via MethodChannel',
+                'Zero-allocation frame processing prevents GC pressure',
+                'Peak detection algorithm for heart rate calculation',
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoSection(String title, List<String> items) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.lightGreen,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        ...items.map((item) => Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(
+            '• $item',
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 14,
+              height: 1.4,
+            ),
+          ),
+        )),
+      ],
     );
   }
 }
