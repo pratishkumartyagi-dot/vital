@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'native_hardware_bridge.dart';
@@ -9,14 +10,12 @@ late List<CameraDescription> _cameras;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Set up global error handler to see any startup errors
+
   FlutterError.onError = (FlutterErrorDetails details) {
     print('Flutter error: ${details.exception}');
     print('Stack trace: ${details.stack}');
   };
-  
-  // Initialize cameras with timeout to prevent hanging
+
   try {
     _cameras = await availableCameras().timeout(
       const Duration(seconds: 5),
@@ -29,11 +28,9 @@ Future<void> main() async {
     print('Error getting cameras: $e');
     _cameras = [];
   }
-  
-  // Start the app IMMEDIATELY - don't wait for hardware operations
+
   runApp(const VitalMonitoringApp());
-  
-  // Lock hardware ISP in the background (non-blocking)
+
   try {
     await NativeHardwareBridge.lockHardwareISP().timeout(
       const Duration(seconds: 2),
@@ -77,6 +74,7 @@ class _VitalSignPageState extends State<VitalSignPage> {
   late CameraController _controller;
   bool _isInitialized = false;
   bool _showInfoOverlay = true;
+  String? _cameraError;
 
   @override
   void initState() {
@@ -89,38 +87,50 @@ class _VitalSignPageState extends State<VitalSignPage> {
       if (mounted) {
         setState(() {
           _isInitialized = true;
+          _cameraError = 'No cameras found';
         });
       }
       return;
     }
 
-    _controller = CameraController(
-      _cameras.first,
-      ResolutionPreset.medium,
-      enableAudio: false,
-    );
+    try {
+      _controller = CameraController(
+        _cameras.first,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
 
-    _controller.initialize().then((_) {
+      await _controller.initialize().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          throw Exception('Camera initialization timed out');
+        },
+      );
+
       if (!mounted) return;
       setState(() {
         _isInitialized = true;
       });
+
       final vitalSignController =
           Provider.of<VitalSignController>(context, listen: false);
       vitalSignController.attachStreamPipeline(_controller);
-    }).catchError((Object e) {
+    } catch (e) {
       if (mounted) {
         setState(() {
           _isInitialized = true;
+          _cameraError = e.toString();
         });
       }
       print('Camera initialization error: $e');
-    });
+    }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    if (_isInitialized && _cameras.isNotEmpty) {
+      _controller.dispose();
+    }
     super.dispose();
   }
 
@@ -138,46 +148,52 @@ class _VitalSignPageState extends State<VitalSignPage> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Debug: always-visible startup indicator
+          // Always-visible startup indicator
           const Positioned(
             top: 60,
             left: 0,
             right: 0,
             child: Text(
-              'PPG Vital Monitor - Starting...',
+              'PPG Vital Monitor',
               style: TextStyle(color: Colors.red, fontSize: 22),
               textAlign: TextAlign.center,
             ),
           ),
-          // Camera preview or placeholder
-          _isInitialized && _cameras.isNotEmpty
-              ? CameraPreview(_controller)
-              : Container(
-                  color: Colors.black,
-                  child: const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.videocam,
-                          size: 48,
+
+          // Camera preview or fallback placeholder
+          if (_isInitialized && _cameras.isNotEmpty && _cameraError == null)
+            CameraPreview(_controller)
+          else
+            Positioned.fill(
+              child: Container(
+                color: Colors.black,
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.videocam,
+                        size: 48,
+                        color: Colors.grey,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        _cameraError != null
+                            ? 'Camera Error\nRunning in Demo Mode\n\n$_cameraError'
+                            : 'Camera Not Available\nRunning in Demo Mode',
+                        style: const TextStyle(
                           color: Colors.grey,
+                          fontSize: 16,
                         ),
-                        SizedBox(height: 16),
-                        Text(
-                          'Camera Not Available\nRunning in Demo Mode',
-                          style: TextStyle(
-                            color: Colors.grey,
-                            fontSize: 16,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
                   ),
                 ),
+              ),
+            ),
 
-          // Overlay UI - FIXED: Use Positioned.fill to cover entire screen
+          // Overlay UI
           Positioned.fill(
             child: Container(
               color: Colors.black54,
@@ -296,7 +312,7 @@ class _VitalSignPageState extends State<VitalSignPage> {
             ),
           ),
 
-          // Info overlay - FIXED: Use Positioned.fill to cover entire screen
+          // Info overlay
           if (_showInfoOverlay)
             Positioned.fill(
               child: Container(
