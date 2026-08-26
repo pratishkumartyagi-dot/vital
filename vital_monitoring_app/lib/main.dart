@@ -9,15 +9,36 @@ late List<CameraDescription> _cameras;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize cameras with timeout to prevent hanging
   try {
-    _cameras = await availableCameras();
-  } on CameraException catch (e) {
+    _cameras = await availableCameras().timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        print('Camera initialization timed out - using demo mode');
+        return <CameraDescription>[];
+      },
+    );
+  } catch (e) {
     print('Error getting cameras: $e');
     _cameras = [];
   }
-  // Lock hardware ISP before starting the app
-  await NativeHardwareBridge.lockHardwareISP();
+  
+  // Start the app IMMEDIATELY - don't wait for hardware operations
   runApp(const VitalMonitoringApp());
+  
+  // Lock hardware ISP in the background (non-blocking)
+  try {
+    await NativeHardwareBridge.lockHardwareISP().timeout(
+      const Duration(seconds: 2),
+      onTimeout: () {
+        print('Hardware ISP lock timed out - continuing without lock');
+        return null;
+      },
+    );
+  } catch (e) {
+    print('Hardware ISP lock failed: $e');
+  }
 }
 
 class VitalMonitoringApp extends StatelessWidget {

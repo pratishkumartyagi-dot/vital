@@ -57,13 +57,13 @@ class VitalSignController extends ChangeNotifier {
         final double time = _demoFrameCount * 0.033; // 33ms per frame
         // Base signal with noise
         final double baseSignal = 100 + 
-            20 * sin(2 * pi * 1.2 * time) + // ~72 BPM (1.2 Hz)
-            5 * sin(2 * pi * 2.5 * time) +   // Harmonics
-            (Random().nextDouble() - 0.5) * 2; // Noise
+            20 * math.sin(2 * math.pi * 1.2 * time) + // ~72 BPM (1.2 Hz)
+            5 * math.sin(2 * math.pi * 2.5 * time) +   // Harmonics
+            (math.Random().nextDouble() - 0.5) * 2; // Noise
         
         // Add occasional motion artifacts
         if (_demoFrameCount % 200 == 0) {
-          _liveGreenBuffer.add(baseSignal + (Random().nextDouble() - 0.5) * 30);
+          _liveGreenBuffer.add(baseSignal + (math.Random().nextDouble() - 0.5) * 30);
         } else {
           _liveGreenBuffer.add(baseSignal);
         }
