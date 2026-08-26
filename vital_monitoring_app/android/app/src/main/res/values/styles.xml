@@ -1,0 +1,7 @@
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Device.NoTitleBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+    <style name="NormalTheme" parent="flutter/material.DarkTheme">
+    </style>
+</resources>
