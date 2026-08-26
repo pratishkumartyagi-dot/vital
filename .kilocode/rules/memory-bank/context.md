@@ -2,9 +2,9 @@
 
 ## Current State
 
-**Project Status**: ✅ Core implementation completed
+**Project Status**: ✅ Core implementation completed with enhanced UI visualization
 
-The project is a research-grade PPG Vital Signs application built with Flutter that accesses native Android hardware for high-fidelity photoplethysmography (PPG) signal processing. It implements hardware-level camera controls, real-time signal processing, and a state machine for guided measurements.
+The project is a research-grade PPG Vital Signs application built with Flutter that accesses native Android hardware for high-fidelity photoplethysmography (PPG) signal processing. It implements hardware-level camera controls, real-time signal processing, a state machine for guided measurements, and enhanced UI with real-time waveform visualization.
 
 ## Recently Completed
 
@@ -16,6 +16,10 @@ The project is a research-grade PPG Vital Signs application built with Flutter t
 - [x] State machine for measurement guidance (baseline, profiling, complete, rejected states)
 - [x] Flutter UI with camera preview and real-time feedback prompts
 - [x] Python validation script for Leave-One-Subject-Out (LOSO) clinical cross-validation
+- [x] Enhanced UI with real-time PPG waveform visualization
+- [x] Custom waveform painter widget for displaying PPG signals
+- [x] Heart rate display when measurement completes
+- [x] Display buffer management for smooth waveform rendering
 
 ## Current Structure
 
@@ -28,20 +32,23 @@ The project is a research-grade PPG Vital Signs application built with Flutter t
 | `lib/native_hardware_bridge.dart` | Flutter interface to native hardware locks | ✅ Ready |
 | `lib/zero_allocation_extractor.dart` | Zero-allocation YUV to RGB conversion | ✅ Ready |
 | `lib/ppg_signal_engine.dart` | Butterworth filtering and perfusion index calculation | ✅ Ready |
-| `lib/vital_sign_controller.dart` | State machine and stream processing logic | ✅ Ready |
-| `lib/main.dart` | Main application with camera integration and UI | ✅ Ready |
+| `lib/vital_sign_controller.dart` | State machine, stream processing, and waveform buffer management | ✅ Ready |
+| `lib/waveform_chart.dart` | Custom waveform visualization widget | ✅ Ready |
+| `lib/main.dart` | Main application with camera integration, UI, and waveform display | ✅ Ready |
 | `validation_script.py` | LOSO validation for clinical analysis | ✅ Ready |
 
 ## Current Focus
 
-The core vital monitoring functionality is implemented. Next steps could include:
+The core vital monitoring functionality is implemented with enhanced visualization. Next steps could include:
 
-1. Enhancing the UI to display real-time waveforms and vital signs
-2. Adding data persistence to store measurement sessions
-3. Implementing export functionality for recorded PPG signals
-4. Adding unit tests for signal processing components
-5. Refining the state machine with additional states for different measurement types
-6. Optimizing performance for lower-end devices
+1. Adding data persistence to store measurement sessions
+2. Implementing export functionality for recorded PPG signals and measurements
+3. Adding more detailed vital signs display (SpO2 estimates, etc.)
+4. Implementing unit tests for signal processing components
+5. Refining the peak detection algorithm for more accurate heart rate calculation
+6. Adding signal quality indicators beyond perfusion index
+7. Implementing configurable measurement durations
+8. Adding ability to review past measurements
 
 ## Session History
 
@@ -49,6 +56,7 @@ The core vital monitoring functionality is implemented. Next steps could include
 |------|---------|
 | Initial | Next.js 16 starter template |
 | 2026-08-26 | Complete rebuild as Flutter Vital Monitoring App with native hardware integration, signal processing, and state machine |
+| 2026-08-26 (Continued) | Enhanced UI with real-time PPG waveform visualization, custom waveform painter, and heart rate display |
 
 ## Quick Start Guide
 
@@ -65,7 +73,9 @@ The core vital monitoring functionality is implemented. Next steps could include
 ### To adjust signal processing:
 - Modify filter coefficients in `ppg_signal_engine.dart` for different sampling rates or frequency bands
 - Adjust the perfusion index calculation or downsampling factors in `zero_allocation_extractor.dart`
+- Tune peak detection parameters in `vital_sign_controller.dart` for heart rate calculation
 
 ### To change UI behavior:
 - Update `vital_sign_controller.dart` to modify state transitions and timing
 - Edit `main.dart` to change the visual layout or feedback mechanisms
+- Modify `waveform_chart.dart` to change waveform appearance (color, thickness, etc.)

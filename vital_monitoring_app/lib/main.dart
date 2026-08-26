@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'native_hardware_bridge.dart';
 import 'vital_sign_controller.dart';
+import 'waveform_chart.dart';
 import 'package:provider/provider.dart';
 
 late List<CameraDescription> _cameras;
@@ -102,6 +103,18 @@ class _VitalSignPageState extends State<VitalSignPage> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
+                  // Waveform visualization
+                  Container(
+                    height: 120,
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                    child: WaveformChart(
+                      data: controller.waveformData,
+                      color: Colors.redAccent,
+                      label: 'PPG Signal',
+                    ),
+                  ),
+                  
+                  // Status and prompts
                   Padding(
                     padding: const EdgeInsets.all(16.0),
                     child: Text(
@@ -113,12 +126,29 @@ class _VitalSignPageState extends State<VitalSignPage> {
                       textAlign: TextAlign.center,
                     ),
                   ),
+                  
+                  // Progress indicator during profiling
                   if (controller.currentState == TrackingState.profiling)
                     LinearProgressIndicator(
                       value: controller.gatheringProgress,
                       backgroundColor: Colors.grey[800],
                       valueColor: const AlwaysStoppedAnimation<Color>(Colors.red),
                     ),
+                  
+                  // Heart rate display when measurement is complete
+                  if (controller.currentState == TrackingState.complete)
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Text(
+                        'Heart Rate: ${controller.heartRate.toStringAsFixed(1)} BPM',
+                        style: const TextStyle(
+                          color: Colors.green,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  
                   const SizedBox(height: 30),
                 ],
               ),
