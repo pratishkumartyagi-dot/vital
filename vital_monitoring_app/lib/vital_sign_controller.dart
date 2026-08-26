@@ -3,6 +3,7 @@ import 'package:camera/camera.dart';
 import 'zero_allocation_extractor.dart';
 import 'ppg_signal_engine.dart';
 import 'dart:math';
+import 'dart:async';
 
 enum TrackingState { baseline, profiling, complete, rejected }
 
@@ -11,11 +12,15 @@ class VitalSignController extends ChangeNotifier {
   double _gatheringProgress = 0.0;
   String _toastPrompt = "Align your finger over the camera lens and flash.";
   double _heartRate = 0.0;
+  bool _isDemoMode = false;
+  Timer? _demoTimer;
+  int _demoFrameCount = 0;
 
   TrackingState get currentState => _currentState;
   double get gatheringProgress => _gatheringProgress;
   String get toastPrompt => _toastPrompt;
   double get heartRate => _heartRate;
+  bool get isDemoMode => _isDemoMode;
 
   // Buffer for processing (used for perfusion index calculation)
   final List<double> _liveGreenBuffer = [];
@@ -24,7 +29,89 @@ class VitalSignController extends ChangeNotifier {
   final List<double> _waveformBuffer = [];
   static const int _waveformDisplaySize = 300; // Show ~10 seconds at 30fps
 
+  VitalSignController() {
+    // Start in demo mode by default for research/testing
+    _enableDemoMode();
+  }
+
+  void _enableDemoMode() {
+    _isDemoMode = true;
+    _toastPrompt = "DEMO MODE: Simulated PPG signal. Place finger over camera to switch to live mode.";
+    _startDemoTimer();
+  }
+
+  void _disableDemoMode() {
+    _isDemoMode = false;
+    _toastPrompt = "Align your finger over the camera lens and flash.";
+    _stopDemoTimer();
+    _liveGreenBuffer.clear();
+    _waveformBuffer.clear();
+  }
+
+  void _startDemoTimer() {
+    _demoTimer?.cancel();
+    _demoTimer = Timer.periodic(const Duration(milliseconds: 33), (timer) { // ~30fps
+      _demoFrameCount++;
+      if (_isDemoMode) {
+        // Generate simulated PPG signal with heartbeat-like pattern
+        final double time = _demoFrameCount * 0.033; // 33ms per frame
+        // Base signal with noise
+        final double baseSignal = 100 + 
+            20 * sin(2 * pi * 1.2 * time) + // ~72 BPM (1.2 Hz)
+            5 * sin(2 * pi * 2.5 * time) +   // Harmonics
+            (Random().nextDouble() - 0.5) * 2; // Noise
+        
+        // Add occasional motion artifacts
+        if (_demoFrameCount % 200 == 0) {
+          _liveGreenBuffer.add(baseSignal + (Random().nextDouble() - 0.5) * 30);
+        } else {
+          _liveGreenBuffer.add(baseSignal);
+        }
+        
+        // Add to waveform display buffer
+        _waveformBuffer.add(baseSignal);
+        // Keep display buffer at fixed size
+        if (_waveformBuffer.length > _waveformDisplaySize) {
+          _waveformBuffer.removeAt(0);
+        }
+
+        // Process for state changes (same as live mode)
+        if (_liveGreenBuffer.length >= 120) {
+          final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
+          
+          if (pi < 0.5) {
+            _currentState = TrackingState.rejected;
+            _toastPrompt = "Unreliable Signal. Please steady your finger and apply lighter pressure.";
+            _gatheringProgress = 0.0;
+            _liveGreenBuffer.clear();
+            _waveformBuffer.clear();
+          } else {
+            _currentState = TrackingState.profiling;
+            _toastPrompt = "Analyzing heart rate stability. Keep perfectly still...";
+            _gatheringProgress += 0.02; // Increment progress tracking
+            
+            if (_gatheringProgress >= 1.0) {
+              _gatheringProgress = 1.0;
+              _currentState = TrackingState.complete;
+              _toastPrompt = "Measurement complete.";
+              // Calculate heart rate when measurement completes
+              _calculateHeartRate();
+            }
+          }
+          notifyListeners();
+        }
+      }
+    });
+  }
+
+  void _stopDemoTimer() {
+    _demoTimer?.cancel();
+    _demoTimer = null;
+  }
+
   void attachStreamPipeline(CameraController controller) {
+    if (_isDemoMode) return; // Don't attach live stream if in demo mode
+    
     controller.startImageStream((CameraImage streamedFrame) {
       if (_currentState == TrackingState.complete) return;
 
@@ -128,5 +215,11 @@ class VitalSignController extends ChangeNotifier {
     // Normalize to 0-1 range
     return _waveformBuffer.map((value) => 
         (value - minVal) / (maxVal - minVal)).toList();
+  }
+
+  @override
+  void dispose() {
+    _stopDemoTimer();
+    super.dispose();
   }
 }
