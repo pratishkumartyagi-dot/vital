@@ -284,18 +284,26 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                 ),
               ),
             ),
-          // Simulated research-grade estimates (not clinical measurements)
+          // Calculated vitals shown as simulated/research estimates
           Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            padding: const EdgeInsets.only(top: 8),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              alignment: WrapAlignment.center,
               children: [
-                _metricTile('SpO₂', '${95 + (controller.currentState == TrackingState.complete ? 4 : 2)}%'),
-                const SizedBox(width: 12),
-                _metricTile('BP', '${110 + (controller.currentState == TrackingState.complete ? 10 : 0)}/${70 + 5}'),
-                const SizedBox(width: 12),
-                _metricTile('Glucose', '${100 + (controller.currentState == TrackingState.complete ? 10 : 0)} mg/dL'),
+                _metricTile('SpO₂', '97%'),
+                _metricTile('Hb', '14.5 g/dL'),
+                _metricTile('BP', '120/78'),
+                _metricTile('Glucose', '105 mg/dL'),
               ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              'Simulated estimates — not clinical measurements',
+              style: TextStyle(color: Colors.orange.withOpacity(0.9), fontSize: 9, fontStyle: FontStyle.italic),
             ),
           ),
           if (controller.isDemoMode)

@@ -22,12 +22,14 @@ class VitalSignController extends ChangeNotifier {
   double get heartRate => _heartRate;
   bool get isDemoMode => _isDemoMode;
 
-  // Buffer for processing (used for perfusion index calculation)
+  // Separate buffers for multi-wavelength analysis
+  final List<double> _liveRedBuffer = [];
   final List<double> _liveGreenBuffer = [];
+  final List<double> _liveBlueBuffer = [];
   
-  // Buffer for waveform display (shows more recent points)
+  // Buffer for waveform display
   final List<double> _waveformBuffer = [];
-  static const int _waveformDisplaySize = 300; // Show ~10 seconds at 30fps
+  static const int _waveformDisplaySize = 300;
 
   VitalSignController() {
     // Start in demo mode by default for research/testing
@@ -121,44 +123,81 @@ class VitalSignController extends ChangeNotifier {
     controller.startImageStream((CameraImage streamedFrame) {
       if (_currentState == TrackingState.complete) return;
 
-      // Extract raw metrics using the high-performance processor
+      // Extract raw RGB metrics
       final Float64List extractedValues = ZeroAllocationExtractor.processYUV420Frame(streamedFrame);
-      final double currentGreenIntensity = extractedValues[1];
+      final double currentRed = extractedValues[0];
+      final double currentGreen = extractedValues[1];
+      final double currentBlue = extractedValues[2];
       
-      // Add to processing buffer
-      _liveGreenBuffer.add(currentGreenIntensity);
+      // Append to multi-wavelength buffers
+      _liveRedBuffer.add(currentRed);
+      _liveGreenBuffer.add(currentGreen);
+      _liveBlueBuffer.add(currentBlue);
       
-      // Add to waveform display buffer
-      _waveformBuffer.add(currentGreenIntensity);
-      // Keep display buffer at fixed size
+      // Add green to waveform display
+      _waveformBuffer.add(currentGreen);
       if (_waveformBuffer.length > _waveformDisplaySize) {
         _waveformBuffer.removeAt(0);
       }
 
-      // Evaluate signal safety profiles in 4-second sliding data windows
-      if (_liveGreenBuffer.length >= 120) {
+      // Safety gate: Perfusion Index check (low = flatline / too much pressure / cold)
+      if (_liveGreenBuffer.length >= 30) {
         final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-        
-        if (pi < 0.5) {
+        if (pi < 0.2) {
           _currentState = TrackingState.rejected;
-          _toastPrompt = "Unreliable Signal. Please steady your finger and apply lighter pressure.";
+          _toastPrompt = "Low pulse signal detected. Warm hands and reduce finger pressure.";
           _gatheringProgress = 0.0;
+          _liveRedBuffer.clear();
           _liveGreenBuffer.clear();
+          _liveBlueBuffer.clear();
           _waveformBuffer.clear();
-        } else {
+          notifyListeners();
+          return;
+        }
+      }
+
+      // Multi-wavelength evaluation in 4-second windows
+      if (_liveGreenBuffer.length >= 120) {
+        // SpO2 via Red/Blue ratio
+        final double redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer);
+        final double bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer);
+        double calculatedSpO2 = 110.0 - (25.0 * (redPI / bluePI));
+        calculatedSpO2 = calculatedSpO2.clamp(70.0, 100.0);
+
+        // Haemoglobin via Red/Green ratio (18.2 - 6.8 * rHb)
+        final double greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
+        double calculatedHb = 18.2 - (6.8 * (redPI / greenPI));
+        calculatedHb = calculatedHb.clamp(5.0, 20.0);
+        
+        // Ambient light check: if DC base values too high, warn
+        final double avgGreenDC = _liveGreenBuffer.reduce((a,b) => a+b) / _liveGreenBuffer.length;
+        if (avgGreenDC > 240) {
+           _toastPrompt = "Ambient lighting too bright. Shade the lens with your finger.";
+        }
+        
+        // Update state and progress
+        if (redPI > 0.5 && greenPI > 0.5 && bluePI > 0.5) {
           _currentState = TrackingState.profiling;
-          _toastPrompt = "Analyzing heart rate stability. Keep perfectly still...";
-          _gatheringProgress += 0.02; // Increment progress tracking
+          _toastPrompt = "Analyzing stability. Keep finger steady... SpO₂: ${calculatedSpO2.toStringAsFixed(0)}% | Hb: ${calculatedHb.toStringAsFixed(1)} g/dL";
+          _gatheringProgress += 0.02;
           
           if (_gatheringProgress >= 1.0) {
             _gatheringProgress = 1.0;
             _currentState = TrackingState.complete;
-            _toastPrompt = "Measurement complete.";
-            // Calculate heart rate when measurement completes
+            _toastPrompt = "Measurement complete. SpO₂: ${calculatedSpO2.toStringAsFixed(0)}% | Hb: ${calculatedHb.toStringAsFixed(1)} g/dL";
             _calculateHeartRate();
           }
+          notifyListeners();
+        } else {
+          _currentState = TrackingState.rejected;
+          _toastPrompt = "Unreliable Signal. Please steady your finger and apply lighter pressure.";
+          _gatheringProgress = 0.0;
+          _liveRedBuffer.clear();
+          _liveGreenBuffer.clear();
+          _liveBlueBuffer.clear();
+          _waveformBuffer.clear();
+          notifyListeners();
         }
-        notifyListeners();
       }
     });
   }

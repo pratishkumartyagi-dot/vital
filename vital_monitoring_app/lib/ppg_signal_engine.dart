@@ -23,6 +23,17 @@ class PPGSignalEngine {
     return filtered;
   }
 
+  /// Calculates haemoglobin (g/dL) using Red/Green AC/DC ratio
+  /// Hgb = 18.2 - (6.8 * R_Hb) where R_Hb = (AC_Red/DC_Red) / (AC_Green/DC_Green)
+  static double computeHaemoglobin(List<double> redSignal, List<double> greenSignal) {
+    final double redPI = computePerfusionIndex(redSignal);
+    final double greenPI = computePerfusionIndex(greenSignal);
+    if (redPI == 0.0 || greenPI == 0.0) return 0.0;
+    final double rHb = redPI / greenPI;
+    final double hgb = 18.2 - (6.8 * rHb);
+    return hgb.clamp(5.0, 20.0);
+  }
+
   /// Calculates dynamic perfusion indices across raw signals
   static double computePerfusionIndex(List<double> rawSignal) {
     double maxVal = rawSignal[0];
