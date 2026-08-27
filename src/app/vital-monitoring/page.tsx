@@ -41,9 +41,19 @@ export default function VitalMonitoringPage() {
     }
   }, []);
 
+  const startedRef = useRef(false);
+
   useEffect(() => {
     checkPermission();
-  }, [checkPermission]);
+    const timer = setTimeout(() => {
+      if (!startedRef.current && !cameraOn && !loading) {
+        startedRef.current = true;
+        toggleCamera();
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current;
