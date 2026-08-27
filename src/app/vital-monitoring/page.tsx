@@ -27,6 +27,7 @@ export default function VitalMonitoringPage() {
   const [bpm, setBpm] = useState<number | null>(null);
   const valuesRef = useRef<number[]>([]);
   const animFrame = useRef<number>(0);
+  const wRef = useRef<number[]>([0, 0, 0, 0, 0]);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -89,7 +90,38 @@ export default function VitalMonitoringPage() {
     }
     const avg = count ? r / count : 128;
     valuesRef.current.push(avg);
-    if (valuesRef.current.length > 120) valuesRef.current.shift();
+    if (valuesRef.current.length > 180) valuesRef.current.shift();
+
+    // Simple IIR bandpass approximation for BPM
+    const w = wRef.current;
+    const b = [0.0039, 0.0, -0.0078, 0.0, 0.0039];
+    const a = [1.0, -3.1806, 3.8612, -2.1122, 0.4351];
+    let out = b[0] * avg + w[1];
+    w[1] = b[1] * avg - a[1] * out + w[2];
+    w[2] = b[2] * avg - a[2] * out + w[3];
+    w[3] = b[3] * avg - a[3] * out + w[4];
+    w[4] = b[4] * avg - a[4] * out;
+
+    // Peak detection for BPM (every ~30 frames at 30fps = ~1 sec interval)
+    const vals = valuesRef.current;
+    if (vals.length >= 30) {
+      const peaks: number[] = [];
+      for (let i = 1; i < vals.length - 1; i++) {
+        if (vals[i] > vals[i - 1] && vals[i] > vals[i + 1] && vals[i] > 100) {
+          if (peaks.length === 0 || i - peaks[peaks.length - 1] >= 15) peaks.push(i);
+        }
+      }
+      if (peaks.length >= 2) {
+        const intervals: number[] = [];
+        for (let i = 1; i < peaks.length; i++) intervals.push((peaks[i] - peaks[i - 1]) / 30);
+        const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+        if (avgInterval > 0) {
+          const rate = 60 / avgInterval;
+          setBpm(Math.min(Math.max(rate, 40), 180));
+        }
+      }
+    }
+
     drawWaveform();
     animFrame.current = requestAnimationFrame(processFrame);
   }, [cameraOn, drawWaveform]);
