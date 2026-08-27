@@ -62,7 +62,7 @@ class VitalSignPage extends StatefulWidget {
 class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserver {
   CameraController? _controller;
   bool _isInitialized = false;
-  bool _showInfoOverlay = true;
+  bool _showInfoOverlay = false;
   String? _cameraError;
 
   @override
@@ -213,48 +213,20 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   }
 
   Widget _buildCameraPreview() {
-    if (!_isInitialized || _cameras.isEmpty || _cameraError != null) {
-      return Container(
-        color: Colors.black,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(
-                Icons.videocam,
-                size: 64,
-                color: Colors.grey,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                _cameraError != null
-                    ? 'Camera Error\nRunning in Demo Mode\n\n$_cameraError'
-                    : 'Camera Not Available\nRunning in Demo Mode',
-                style: const TextStyle(
-                  color: Colors.grey,
-                  fontSize: 16,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
+    if (_controller != null && _controller!.value.isInitialized) {
+      return Center(
+        child: AspectRatio(
+          aspectRatio: 1.0 / _controller!.value.aspectRatio,
+          child: CameraPreview(_controller!),
         ),
       );
     }
 
-    if (_controller == null || !_controller!.value.isInitialized) {
-      return Container(
-        color: Colors.black,
-        child: const Center(
-          child: CircularProgressIndicator(color: Colors.red),
-        ),
-      );
-    }
-
-    return Center(
-      child: AspectRatio(
-        aspectRatio: 1.0 / _controller!.value.aspectRatio,
-        child: CameraPreview(_controller!),
+    // Loading / initializing state
+    return Container(
+      color: Colors.black,
+      child: const Center(
+        child: CircularProgressIndicator(color: Colors.red),
       ),
     );
   }
