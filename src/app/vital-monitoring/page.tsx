@@ -18,12 +18,15 @@ function getErrorMessage(err: unknown): string {
 
 export default function VitalMonitoringPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
-
   const [permission, setPermission] = useState<string>("unknown");
+  const [bpm, setBpm] = useState<number | null>(null);
+  const valuesRef = useRef<number[]>([]);
+  const animFrame = useRef<number>(0);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -41,14 +44,70 @@ export default function VitalMonitoringPage() {
     checkPermission();
   }, [checkPermission]);
 
-  const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => {
-      t.stop();
-    });
-    streamRef.current = null;
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
+  const drawWaveform = useCallback(() => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video || !video.videoWidth) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.width = 300;
+    canvas.height = 120;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "#ef4444";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const values = valuesRef.current;
+    if (values.length < 2) return;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    const step = canvas.width / Math.max(values.length - 1, 1);
+    for (let i = 0; i < values.length; i++) {
+      const x = i * step;
+      const y = canvas.height - ((values[i] - min) / range) * canvas.height;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
+    ctx.stroke();
+  }, []);
+
+  const processFrame = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !cameraOn) return;
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 64;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, 64, 64);
+    const data = ctx.getImageData(0, 0, 64, 64).data;
+    let r = 0, count = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      r += data[i];
+      count++;
+    }
+    const avg = count ? r / count : 128;
+    valuesRef.current.push(avg);
+    if (valuesRef.current.length > 120) valuesRef.current.shift();
+    drawWaveform();
+    animFrame.current = requestAnimationFrame(processFrame);
+  }, [cameraOn, drawWaveform]);
+
+  useEffect(() => {
+    if (cameraOn) {
+      animFrame.current = requestAnimationFrame(processFrame);
+    } else {
+      cancelAnimationFrame(animFrame.current);
+      valuesRef.current = [];
+    }
+    return () => cancelAnimationFrame(animFrame.current);
+  }, [cameraOn, processFrame]);
+
+  const stopStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
   const toggleCamera = useCallback(async () => {
@@ -58,29 +117,20 @@ export default function VitalMonitoringPage() {
       setError(null);
       return;
     }
-
     setLoading(true);
     setError(null);
-
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setError("Camera access is not supported in this browser.");
       setLoading(false);
       setCameraOn(false);
       return;
     }
-
     try {
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        });
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       } catch {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user" },
-          audio: false,
-        });
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
       }
       streamRef.current = stream;
       if (videoRef.current) {
@@ -99,52 +149,38 @@ export default function VitalMonitoringPage() {
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
-      <h1 className="text-5xl font-extrabold mb-6 tracking-tight text-center">
-        PPG Vital Monitor
-      </h1>
+      <h1 className="text-5xl font-extrabold mb-6 tracking-tight text-center">PPG Vital Monitor</h1>
       <p className="text-lg text-neutral-400 mb-8 max-w-md text-center">
-        Place your fingertip over the camera lens and flash to begin real-time
-        signal acquisition.
+        Place your fingertip over the camera lens and flash to begin real-time signal acquisition.
       </p>
 
       <div className="w-full max-w-md bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 overflow-hidden">
         <div className="relative h-72 bg-black">
-          <video
-            ref={videoRef}
-            className="w-full h-full object-cover"
-            muted
-            playsInline
-            autoPlay
-          />
-          {!cameraOn && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <span className="text-neutral-500 text-sm">Camera off</span>
-            </div>
-          )}
+          <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
+          {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-500 text-sm">Camera off</span></div>}
         </div>
         <div className="p-4 flex items-center justify-between gap-4">
           <div className="flex-1 min-w-0">
-            <span className="block text-sm text-neutral-300 truncate">
-              {loading ? "Starting camera..." : cameraOn ? "Camera active" : "Ready"}
-            </span>
+            <span className="block text-sm text-neutral-300 truncate">{loading ? "Starting camera..." : cameraOn ? "Camera active" : "Ready"}</span>
             {error && (
               <div className="mt-2 p-3 rounded-lg bg-red-950/60 border border-red-900/40">
                 <p className="text-xs text-red-300 font-medium">{error}</p>
                 {(error.includes("denied") || permission === "denied") && (
-                  <p className="text-xs text-red-200/80 mt-2">
-                    Tap the lock / site-info icon in your address bar, choose &quot;Camera&quot;, set to &quot;Allow&quot;, then refresh.
-                  </p>
+                  <p className="text-xs text-red-200/80 mt-2">Tap the lock / site-info icon in your address bar, choose &quot;Camera&quot;, set to &quot;Allow&quot;, then refresh.</p>
                 )}
               </div>
             )}
           </div>
-          <button
-            onClick={toggleCamera}
-            disabled={loading}
-            className="px-5 py-2.5 rounded-full text-sm font-semibold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-lg shadow-red-900/30 whitespace-nowrap"
-          >
+          <button onClick={toggleCamera} disabled={loading} className="px-5 py-2.5 rounded-full text-sm font-semibold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-lg shadow-red-900/30 whitespace-nowrap">
             {loading ? "Starting..." : cameraOn ? "Stop Camera" : "Start Camera"}
           </button>
+        </div>
+        <div className="px-4 pb-4">
+          <div className="relative h-32 bg-neutral-950 rounded-lg border border-neutral-800 overflow-hidden">
+            <canvas ref={canvasRef} className="w-full h-full" />
+            {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-600 text-xs">Start camera to see waveform</span></div>}
+            {bpm !== null && <div className="absolute top-2 right-2 bg-red-900/80 text-red-200 text-xs font-bold px-2 py-0.5 rounded">{bpm.toFixed(0)} BPM</div>}
+          </div>
         </div>
       </div>
 
