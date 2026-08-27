@@ -24,6 +24,8 @@ The project is a research-grade PPG Vital Signs application built with Flutter t
 - [x] **Improved Error Handling** - Graceful fallback to demo mode when camera unavailable
 - [x] **Comprehensive Instructions Overlay** - Detailed information about app purpose and usage
 - [x] **Explicit Research Documentation** - Clear explanation of what the app is and how to use for research
+- [x] Fixed black screen at start (page.tsx `bg-neutral-900` with no content)
+- [x] Fixed broken Next.js build (removed failing Google Fonts import in layout.tsx)
 
 ## Current Structure
 
