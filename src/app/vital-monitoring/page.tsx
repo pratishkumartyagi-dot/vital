@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -22,6 +22,24 @@ export default function VitalMonitoringPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
+
+  const [permission, setPermission] = useState<string>("unknown");
+
+  const checkPermission = useCallback(async () => {
+    try {
+      const perms = (navigator as Navigator & { permissions?: { query?: (params: { name: string }) => Promise<{ state: string }> } }).permissions;
+      if (perms && perms.query) {
+        const result = await perms.query({ name: "camera" });
+        setPermission(result.state);
+      }
+    } catch {
+      setPermission("unknown");
+    }
+  }, []);
+
+  useEffect(() => {
+    checkPermission();
+  }, [checkPermission]);
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => {
@@ -52,10 +70,18 @@ export default function VitalMonitoringPage() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+          audio: false,
+        });
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -101,7 +127,16 @@ export default function VitalMonitoringPage() {
             <span className="block text-sm text-neutral-300 truncate">
               {loading ? "Starting camera..." : cameraOn ? "Camera active" : "Ready"}
             </span>
-            {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+            {error && (
+              <div className="mt-2 p-3 rounded-lg bg-red-950/60 border border-red-900/40">
+                <p className="text-xs text-red-300 font-medium">{error}</p>
+                {(error.includes("denied") || permission === "denied") && (
+                  <p className="text-xs text-red-200/80 mt-2">
+                    Tap the lock / site-info icon in your address bar, choose &quot;Camera&quot;, set to &quot;Allow&quot;, then refresh.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
           <button
             onClick={toggleCamera}
