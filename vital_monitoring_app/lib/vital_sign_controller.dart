@@ -12,6 +12,7 @@ class VitalSignController extends ChangeNotifier {
   double _gatheringProgress = 0.0;
   String _toastPrompt = "Align your finger over the camera lens and flash.";
   double _heartRate = 0.0;
+  double _hbLevel = 0.0;
   bool _isDemoMode = false;
   Timer? _demoTimer;
   int _demoFrameCount = 0;
@@ -20,6 +21,7 @@ class VitalSignController extends ChangeNotifier {
   double get gatheringProgress => _gatheringProgress;
   String get toastPrompt => _toastPrompt;
   double get heartRate => _heartRate;
+  double get hbLevel => _hbLevel;
   bool get isDemoMode => _isDemoMode;
 
   // Separate buffers for multi-wavelength analysis
@@ -168,6 +170,7 @@ class VitalSignController extends ChangeNotifier {
         final double greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
         double calculatedHb = 18.2 - (6.8 * (redPI / greenPI));
         calculatedHb = calculatedHb.clamp(5.0, 20.0);
+        _hbLevel = calculatedHb;
         
         // Ambient light check: if DC base values too high, warn
         final double avgGreenDC = _liveGreenBuffer.reduce((a,b) => a+b) / _liveGreenBuffer.length;
@@ -273,6 +276,7 @@ class VitalSignController extends ChangeNotifier {
     _gatheringProgress = 0.0;
     _toastPrompt = "Align your finger over the camera lens and flash.";
     _heartRate = 0.0;
+    _hbLevel = 0.0;
     _liveGreenBuffer.clear();
     _waveformBuffer.clear();
     _enableDemoMode();

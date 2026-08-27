@@ -26,6 +26,8 @@ The project is a research-grade PPG Vital Signs application built with Flutter t
 - [x] **Explicit Research Documentation** - Clear explanation of what the app is and how to use for research
 - [x] Fixed black screen at start (page.tsx `bg-neutral-900` with no content)
 - [x] Fixed broken Next.js build (removed failing Google Fonts import in layout.tsx)
+- [x] **Hb level display fix**: Added `_hbLevel` state field and getter to `VitalSignController`, stored calculated Hb value in `attachStreamPipeline`, cleared on reset, and updated UI in `main.dart` to show dynamic Hb value instead of hardcoded `14.5 g/dL`
+- [x] **Web app Hb display**: Added `hb` state, RGB channel buffers, perfusion index computation, Hb/SpO2 calculation in `processFrame`, and Hb metric tile in the metrics grid of `src/app/vital-monitoring/page.tsx`
 
 ## Current Structure
 
