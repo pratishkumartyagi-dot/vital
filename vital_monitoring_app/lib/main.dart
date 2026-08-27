@@ -5,6 +5,8 @@ import 'native_hardware_bridge.dart';
 import 'vital_sign_controller.dart';
 import 'waveform_chart.dart';
 import 'package:provider/provider.dart';
+import 'ml_inference.dart';
+import 'feature_extractor.dart';
 
 late List<CameraDescription> _cameras;
 
@@ -69,6 +71,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    VitalMLInference.init().then((_) => debugPrint('ML model loaded'));
     _initializeCamera();
   }
 
@@ -390,6 +393,14 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                 'Repeat measurements for data collection',
                 'Use demo mode for testing without camera access',
                 'Export data using the validation script for LOSO analysis',
+              ]),
+              const SizedBox(height: 16),
+              _buildInfoSection('Calibration & Validation:', [
+                'Initial setup: input clinical cuff BP and lab glucose values',
+                'Finger-pressure safety: too hard = flatline (reduce pressure)',
+                'SpO2 computed via Red/Blue ratio calibration (not clinical-grade)',
+                'BP and Glucose estimated by TFLite model (requires ground-truth data)',
+                'Run validation_script.py for LOSO clinical analysis',
               ]),
               const SizedBox(height: 16),
               _buildInfoSection('Technical Notes:', [
