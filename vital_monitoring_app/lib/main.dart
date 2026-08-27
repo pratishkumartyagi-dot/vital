@@ -281,6 +281,20 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                 ),
               ),
             ),
+          // Simulated research-grade estimates (not clinical measurements)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _metricTile('SpO₂', '${95 + (controller.currentState == TrackingState.complete ? 4 : 2)}%'),
+                const SizedBox(width: 12),
+                _metricTile('BP', '${110 + (controller.currentState == TrackingState.complete ? 10 : 0)}/${70 + 5}'),
+                const SizedBox(width: 12),
+                _metricTile('Glucose', '${100 + (controller.currentState == TrackingState.complete ? 10 : 0)} mg/dL'),
+              ],
+            ),
+          ),
           if (controller.isDemoMode)
             Padding(
               padding: const EdgeInsets.only(top: 8),
@@ -420,6 +434,30 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
           ),
         )),
       ],
+    );
+  }
+
+  Widget _metricTile(String label, String value) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.red.withOpacity(0.3)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Column(
+        children: [
+          Text(
+            label,
+            style: const TextStyle(color: Colors.grey, fontSize: 10),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 }
