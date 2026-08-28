@@ -1,104 +1,70 @@
-# Active Context: Vital Monitoring App (Flutter)
+# Active Context: Vital Monitoring App (Next.js + MCD-rPPG)
 
 ## Current State
 
-**Project Status**: ✅ Fully functional research tool with demo mode and comprehensive UI
+**Project Status**: ✅ Functional Next.js web app with MCD-rPPG training integration
 
-The project is a research-grade PPG Vital Signs application built with Flutter that accesses native Android hardware for high-fidelity photoplethysmography (PPG) signal processing. It implements hardware-level camera controls, real-time signal processing, a state machine for guided measurements, enhanced UI with real-time waveform visualization, and now includes a demo mode for testing/research without requiring camera access.
+The project is a research-grade PPG Vital Signs application built with Next.js 16. It includes a web-based vital monitoring page with real-time camera-based PPG signal processing, and a complete MCD-rPPG training pipeline integrated into the project for model training and evaluation.
 
 ## Recently Completed
 
-- [x] Project setup with Flutter and necessary dependencies (camera, ffi, provider)
-- [x] Android platform configuration: permissions, manifest, minimum SDK version 21
-- [x] Native Android hardware ISP lock implementation via MethodChannel to disable auto white balance and exposure
-- [x] High-performance YUV420 frame extraction with zero-allocation RGB conversion
-- [x] Real-time signal processing: 4th-order Butterworth bandpass filter and perfusion index calculation
-- [x] State machine for measurement guidance (baseline, profiling, complete, rejected states)
-- [x] Flutter UI with camera preview and real-time feedback prompts
-- [x] Python validation script for Leave-One-Subject-Out (LOSO) clinical cross-validation
-- [x] Enhanced UI with real-time PPG waveform visualization
-- [x] Custom waveform painter widget for displaying PPG signals
-- [x] Heart rate display when measurement completes
-- [x] Display buffer management for smooth waveform rendering
-- [x] **Demo/Test Mode** - App starts in demo mode by default for immediate research/testing
-- [x] **Improved Error Handling** - Graceful fallback to demo mode when camera unavailable
-- [x] **Comprehensive Instructions Overlay** - Detailed information about app purpose and usage
-- [x] **Explicit Research Documentation** - Clear explanation of what the app is and how to use for research
-- [x] Fixed black screen at start (page.tsx `bg-neutral-900` with no content)
-- [x] Fixed broken Next.js build (removed failing Google Fonts import in layout.tsx)
-- [x] **Hb level display fix**: Added `_hbLevel` state field and getter to `VitalSignController`, stored calculated Hb value in `attachStreamPipeline`, cleared on reset, and updated UI in `main.dart` to show dynamic Hb value instead of hardcoded `14.5 g/dL`
-- [x] **Web app Hb display**: Added `hb` state, RGB channel buffers, perfusion index computation, Hb/SpO2 calculation in `processFrame`, and Hb metric tile in the metrics grid of `src/app/vital-monitoring/page.tsx`
+- [x] Project setup with Next.js 16, React 19, TypeScript, Tailwind CSS 4
+- [x] Web-based vital monitoring page with real-time PPG signal acquisition
+- [x] POS-like bandpass filter and FFT-based heart rate calculation in browser
+- [x] MCD-rPPG rppglib integration into `training/` directory
+- [x] SCNN_8rois model implementation with 8 ROI processing
+- [x] Complete training pipeline (`training/run_training.py`) with cross-validation
+- [x] Training dashboard page (`/training`) with model configuration display
+- [x] API route for training job management (`/api/training`)
+- [x] Enhanced vital monitoring UI with signal quality indicator
+- [x] Multi-ROI face detection approximation for improved signal extraction
+- [x] Perfusion index-based signal quality assessment
+- [x] Home page updated with links to monitor and training dashboard
 
 ## Current Structure
 
 | File/Directory | Purpose | Status |
 |----------------|---------|--------|
-| `pubspec.yaml` | Flutter dependencies and configuration | ✅ Ready |
-| `android/app/src/main/AndroidManifest.xml` | Android permissions and hardware features | ✅ Ready |
-| `android/app/build.gradle` | Android app build configuration with minSdkVersion 21 | ✅ Ready |
-| `android/app/src/main/kotlin/com/vitals/app/MainActivity.kt` | Native hardware lock implementation | ✅ Ready |
-| `lib/native_hardware_bridge.dart` | Flutter interface to native hardware locks | ✅ Ready |
-| `lib/zero_allocation_extractor.dart` | Zero-allocation YUV to RGB conversion | ✅ Ready |
-| `lib/ppg_signal_engine.dart` | Butterworth filtering and perfusion index calculation | ✅ Ready |
-| `lib/vital_sign_controller.dart` | State machine, stream processing, waveform buffer, demo mode | ✅ Ready |
-| `lib/waveform_chart.dart` | Custom waveform visualization widget | ✅ Ready |
-| `lib/main.dart` | Main application with camera integration, UI, waveform display, and info overlay | ✅ Ready |
-| `validation_script.py` | LOSO validation for clinical analysis | ✅ Ready |
+| `src/app/page.tsx` | Home page with navigation | ✅ Ready |
+| `src/app/vital-monitoring/page.tsx` | Real-time PPG monitoring page | ✅ Ready |
+| `src/app/training/page.tsx` | Training dashboard | ✅ Ready |
+| `src/app/api/training/route.ts` | Training API endpoint | ✅ Ready |
+| `src/app/globals.css` | Global styles | ✅ Ready |
+| `src/app/layout.tsx` | Root layout | ✅ Ready |
+| `training/rppglib/` | MCD-rPPG library code | ✅ Ready |
+| `training/rppglib/models/SCNN_8rois.py` | SCNN model implementation | ✅ Ready |
+| `training/rppglib/torchPOS.py` | POS signal extraction | ✅ Ready |
+| `training/rppglib/face_utils.py` | Face landmark detection utilities | ✅ Ready |
+| `training/rppglib/processing.py` | Signal processing (bandpass, FFT HR) | ✅ Ready |
+| `training/rppglib/train.py` | Training loop and metrics | ✅ Ready |
+| `training/rppglib/data_utils.py` | Video/PPG loading utilities | ✅ Ready |
+| `training/run_training.py` | Main training pipeline script | ✅ Ready |
+| `training/requirements.txt` | Python dependencies | ✅ Ready |
 
 ## Current Focus
 
-The vital monitoring app is now fully functional for research purposes. Key features for research use:
-
-1. **Immediate Usability**: Starts in demo mode by default, allowing instant testing without camera permissions or hardware
-2. **Signal Visualization**: Real-time PPG waveform display for signal quality assessment
-3. **Quantitative Output**: Heart rate measurement displayed when signal quality is sufficient
-4. **Guided Measurement**: Step-by-step prompts to ensure proper usage technique
-5. **Research Documentation**: Comprehensive built-in explanation of technical approach and usage
-6. **Validation Ready**: Includes LOSO validation script for clinical-grade analysis
-7. **Error Resilient**: Gracefully handles camera unavailability and continues in demo mode
+The application is now a complete research platform for rPPG with:
+1. **Web-based PPG Monitoring**: Real-time camera-based vital sign estimation
+2. **MCD-rPPG Training Pipeline**: Full training infrastructure for SCNN_8rois and other models
+3. **Training Dashboard**: Web UI for monitoring training configuration and results
+4. **Signal Processing**: FFT-based HR estimation, bandpass filtering, perfusion index calculation
+5. **Multi-ROI Extraction**: 5-region face ROI extraction for improved signal quality
 
 ## Session History
 
 | Date | Changes |
 |------|---------|
 | Initial | Next.js 16 starter template |
-| 2026-08-26 | Complete rebuild as Flutter Vital Monitoring App with native hardware integration, signal processing, and state machine |
-| 2026-08-26 (Continued) | Enhanced UI with real-time PPG waveform visualization, custom waveform painter, and heart rate display |
-| 2026-08-26 (Final) | Added demo mode, improved error handling, comprehensive instructions overlay, and explicit research documentation |
+| 2026-08-26 | Complete rebuild as Flutter Vital Monitoring App |
+| 2026-08-26 (Final) | Added demo mode, improved error handling, comprehensive instructions overlay |
+| 2026-08-28 | Integrated MCD-rPPG training pipeline, enhanced web app with training dashboard |
 
-## Quick Start Guide
+## Technical Specifications
 
-### To run the application for research:
-1. **No setup required**: The app starts in demo mode immediately
-2. **For live camera testing**:
-   - Ensure Flutter SDK is installed (version 2.19.0 or higher)
-   - Connect an Android device with camera and USB debugging enabled
-   - Grant camera permissions when prompted
-   - Place fingertip over camera lens and flash as instructed
-3. **To access information**: Tap "Show Info" button for detailed usage instructions
-4. **To reset measurement**: Use the floating action button (red refresh icon)
-5. **For data analysis**: Use the included `validation_script.py` for LOSO validation
-
-### Demo Mode Features:
-- Simulates realistic PPG signals with heartbeat-like patterns
-- Includes occasional motion artifacts for realism
-- Follows the same state machine and processing pipeline as live mode
-- Provides identical UI experience including waveform visualization and heart rate calculation
-- Automatically starts when app launches or when camera is unavailable
-
-### Live Mode Features (when camera available):
-- Hardware ISP locking to prevent auto white balance/exposure changes
-- Zero-allocation frame processing for efficient operation
-- Real-time signal acquisition at ~30 FPS
-- Perfusion index-based signal quality assessment
-- Adaptive measurement duration based on signal stability
-
-## Technical Specifications:
-
-- **Signal Processing**: 4th-order Butterworth bandpass filter (0.5-3.5 Hz)
-- **Heart Rate Range**: 40-180 BPM (constrained for safety)
-- **Sampling Rate**: ~30 FPS from camera preview
-- **Quality Metric**: Perfusion index (AC/DC * 100) with 0.5% threshold
-- **Buffer Sizes**: 120 samples for processing (~4 sec), 300 for display (~10 sec)
-- **Language**: Flutter/Dart with Kotlin native integration
-- **Platform**: Android (min SDK 21, target SDK 34)
+- **Framework**: Next.js 16 + React 19 + TypeScript
+- **Styling**: Tailwind CSS 4
+- **Signal Processing**: FFT-based HR estimation (0.5-3.5 Hz bandpass)
+- **Model**: SCNN_8rois (1D CNN with attention over 8 ROIs)
+- **Training**: PyTorch with 5-fold cross-validation
+- **Dataset**: MCD-rPPG (600 subjects, multi-camera)
+- **Package Manager**: Bun

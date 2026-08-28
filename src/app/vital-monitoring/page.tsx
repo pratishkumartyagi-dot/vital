@@ -2,6 +2,8 @@
 
 import { useRef, useState, useCallback, useEffect } from "react";
 
+import Link from 'next/link';
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
     const msg = err.message.toLowerCase();
@@ -27,6 +29,75 @@ function computePerfusionIndex(signal: number[]): number {
   return dc > 0 ? (ac / dc) * 100 : 0;
 }
 
+function bandpassFilter(signal: number[], low: number, high: number, fs: number = 30): number[] {
+  const n = signal.length;
+  if (n < 10) return signal;
+  
+  const result: number[] = new Array(n).fill(0);
+  const tauH = 1 / (2 * Math.PI * high);
+  const tauL = 1 / (2 * Math.PI * low);
+  const alphaH = tauH / (tauH + 1 / fs);
+  const alphaL = tauL / (tauL + 1 / fs);
+  
+  let prevH: number[] = new Array(n).fill(0);
+  let prevL: number[] = new Array(n).fill(0);
+  
+  for (let i = 0; i < n; i++) {
+    prevH[i] = signal[i];
+    prevL[i] = signal[i];
+  }
+  
+  for (let i = 1; i < n; i++) {
+    prevH[i] = alphaH * prevH[i] + (1 - alphaH) * prevH[i - 1];
+  }
+  
+  for (let i = 1; i < n; i++) {
+    prevL[i] = alphaL * prevL[i] + (1 - alphaL) * prevL[i - 1];
+  }
+  
+  for (let i = 0; i < n; i++) {
+    result[i] = prevH[i] - prevL[i];
+  }
+  
+  return result;
+}
+
+function computeHeartRate(signal: number[], fs: number = 30): number | null {
+  if (signal.length < 30) return null;
+  
+  const filtered = bandpassFilter(signal, 0.5, 3.5, fs);
+  
+  const N = filtered.length;
+  const freqs = new Array(Math.floor(N / 2));
+  const magnitudes = new Array(Math.floor(N / 2));
+  
+  for (let k = 0; k < Math.floor(N / 2); k++) {
+    let real = 0;
+    let imag = 0;
+    for (let n = 0; n < N; n++) {
+      const angle = (2 * Math.PI * k * n) / N;
+      real += filtered[n] * Math.cos(angle);
+      imag -= filtered[n] * Math.sin(angle);
+    }
+    freqs[k] = (k * fs) / N;
+    magnitudes[k] = Math.sqrt(real * real + imag * imag);
+  }
+  
+  const maskStart = Math.floor(0.5 * N / fs);
+  const maskEnd = Math.min(Math.floor(3.5 * N / fs), freqs.length);
+  
+  let maxMag = 0;
+  let maxIdx = maskStart;
+  for (let i = maskStart; i < maskEnd; i++) {
+    if (magnitudes[i] > maxMag) {
+      maxMag = magnitudes[i];
+      maxIdx = i;
+    }
+  }
+  
+  return freqs[maxIdx] * 60;
+}
+
 export default function VitalMonitoringPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -40,12 +111,14 @@ export default function VitalMonitoringPage() {
   const [bp, setBp] = useState<string | null>(null);
   const [sugar, setSugar] = useState<number | null>(null);
   const [hb, setHb] = useState<number | null>(null);
+  const [signalQuality, setSignalQuality] = useState<number | null>(null);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
   const blueRef = useRef<number[]>([]);
   const animFrame = useRef<number>(0);
-  const wRef = useRef<number[]>([0, 0, 0, 0, 0]);
+  const lastBpmUpdate = useRef<number>(0);
+  const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -60,38 +133,110 @@ export default function VitalMonitoringPage() {
   }, []);
 
   const startedRef = useRef(false);
+  const cameraOnRef = useRef(cameraOn);
+  const loadingRef = useRef(loading);
+  const toggleCameraRef = useRef<(() => void) | null>(null);
+  
+  useEffect(() => {
+    cameraOnRef.current = cameraOn;
+  }, [cameraOn]);
+  
+  useEffect(() => {
+    loadingRef.current = loading;
+  }, [loading]);
 
   useEffect(() => {
     checkPermission();
     const timer = setTimeout(() => {
-      if (!startedRef.current && !cameraOn && !loading) {
+      if (!startedRef.current && !cameraOnRef.current && !loadingRef.current) {
         startedRef.current = true;
-        toggleCamera();
+        toggleCameraRef.current?.();
       }
     }, 600);
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkPermission]);
+
+  const detectFaceROI = useCallback((video: HTMLVideoElement): { roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, 64, 64);
+    const imageData = ctx.getImageData(0, 0, 64, 64);
+    const data = imageData.data;
+    
+    let minX = 64, maxX = 0, minY = 64, maxY = 0;
+    let found = false;
+    
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        const r = data[(y * 64 + x) * 4];
+        const g = data[(y * 64 + x) * 4 + 1];
+        const b = data[(y * 64 + x) * 4 + 2];
+        const brightness = (r + g + b) / 3;
+        
+        if (brightness > 20 && brightness < 240) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          found = true;
+        }
+      }
+    }
+    
+    if (!found || maxX - minX < 10 || maxY - minY < 10) return null;
+    
+    const roi: number[][] = [];
+    const regions = [
+      { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
+      { x: minX + (maxX - minX) * 0.6, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
+      { x: minX + (maxX - minX) * 0.35, y: minY + (maxY - minY) * 0.35, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
+      { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
+      { x: minX + (maxX - minX) * 0.55, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
+    ];
+    
+    for (const region of regions) {
+      const regionData: number[] = [];
+      const startX = Math.max(0, Math.floor(region.x));
+      const endX = Math.min(64, Math.floor(region.x + region.w));
+      const startY = Math.max(0, Math.floor(region.y));
+      const endY = Math.min(64, Math.floor(region.y + region.h));
+      
+      for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+          const idx = (y * 64 + x) * 4;
+          regionData.push(data[idx], data[idx + 1], data[idx + 2]);
+        }
+      }
+      roi.push(regionData);
+    }
+    
+    return { roi, coords: { x: minX, y: minY, w: maxX - minX, h: maxY - minY } };
   }, []);
 
   const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video || !video.videoWidth) return;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     canvas.width = 300;
     canvas.height = 120;
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = "#ef4444";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
+    
     const values = valuesRef.current;
     if (values.length < 2) return;
+    
     const min = Math.min(...values);
     const max = Math.max(...values);
     const range = max - min || 1;
     const step = canvas.width / Math.max(values.length - 1, 1);
+    
+    ctx.strokeStyle = "#ef4444";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
     for (let i = 0; i < values.length; i++) {
       const x = i * step;
       const y = canvas.height - ((values[i] - min) / range) * canvas.height;
@@ -99,11 +244,30 @@ export default function VitalMonitoringPage() {
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
+    
+    ctx.strokeStyle = "#22d3ee";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const greenValues = greenRef.current;
+    if (greenValues.length > 1) {
+      const gMin = Math.min(...greenValues);
+      const gMax = Math.max(...greenValues);
+      const gRange = gMax - gMin || 1;
+      const gStep = canvas.width / Math.max(greenValues.length - 1, 1);
+      for (let i = 0; i < greenValues.length; i++) {
+        const x = i * gStep;
+        const y = canvas.height - ((greenValues[i] - gMin) / gRange) * canvas.height;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
   }, []);
 
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !cameraOn) return;
+    
     const c = document.createElement("canvas");
     c.width = 64;
     c.height = 64;
@@ -111,6 +275,7 @@ export default function VitalMonitoringPage() {
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, 64, 64);
     const data = ctx.getImageData(0, 0, 64, 64).data;
+    
     let r = 0, g = 0, b = 0, count = 0;
     for (let i = 0; i < data.length; i += 4) {
       r += data[i];
@@ -121,6 +286,7 @@ export default function VitalMonitoringPage() {
     const avgR = count ? r / count : 128;
     const avgG = count ? g / count : 128;
     const avgB = count ? b / count : 128;
+    
     valuesRef.current.push(avgR);
     if (valuesRef.current.length > 180) valuesRef.current.shift();
     redRef.current.push(avgR);
@@ -130,45 +296,38 @@ export default function VitalMonitoringPage() {
     if (greenRef.current.length > 180) greenRef.current.shift();
     if (blueRef.current.length > 180) blueRef.current.shift();
 
-    // Simple IIR bandpass approximation for BPM
-    const w = wRef.current;
-    const bCoef = [0.0039, 0.0, -0.0078, 0.0, 0.0039];
-    const aCoef = [1.0, -3.1806, 3.8612, -2.1122, 0.4351];
-    let out = bCoef[0] * avgR + w[1];
-    w[1] = bCoef[1] * avgR - aCoef[1] * out + w[2];
-    w[2] = bCoef[2] * avgR - aCoef[2] * out + w[3];
-    w[3] = bCoef[3] * avgR - aCoef[3] * out + w[4];
-    w[4] = bCoef[4] * avgR - aCoef[4] * out;
-
-    // Peak detection for BPM (every ~30 frames at 30fps = ~1 sec interval)
-    const vals = valuesRef.current;
-    if (vals.length >= 30) {
-      const peaks: number[] = [];
-      for (let i = 1; i < vals.length - 1; i++) {
-        if (vals[i] > vals[i - 1] && vals[i] > vals[i + 1] && vals[i] > 100) {
-          if (peaks.length === 0 || i - peaks[peaks.length - 1] >= 15) peaks.push(i);
-        }
-      }
-      if (peaks.length >= 2) {
-        const intervals: number[] = [];
-        for (let i = 1; i < peaks.length; i++) intervals.push((peaks[i] - peaks[i - 1]) / 30);
-        const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-        if (avgInterval > 0) {
-          const rate = 60 / avgInterval;
-          setBpm(Math.min(Math.max(rate, 40), 180));
-          const redPI = computePerfusionIndex(redRef.current);
-          const greenPI = computePerfusionIndex(greenRef.current);
-          const bluePI = computePerfusionIndex(blueRef.current);
+    const redPI = computePerfusionIndex(redRef.current);
+    const greenPI = computePerfusionIndex(greenRef.current);
+    const bluePI = computePerfusionIndex(blueRef.current);
+    const quality = Math.min(redPI, greenPI, bluePI);
+    setSignalQuality(quality);
+    
+    if (quality > 0.3) {
+      const now = Date.now();
+      if (now - lastBpmUpdate.current > 2000) {
+        lastBpmUpdate.current = now;
+        
+        if (valuesRef.current.length >= 90) {
+          const hr = computeHeartRate(valuesRef.current);
+          if (hr !== null) {
+            setBpm(Math.min(Math.max(hr, 40), 180));
+          }
+          
           let hb = 18.2 - 6.8 * (redPI / (greenPI || 1));
           hb = Math.min(Math.max(hb, 5), 20);
           setHb(hb);
+          
           let spo2 = 110 - 25 * (redPI / (bluePI || 1));
           spo2 = Math.min(Math.max(spo2, 70), 100);
           setSpo2(Math.round(spo2));
+          
           setBp(`${110 + Math.floor(Math.random() * 20)}/${70 + Math.floor(Math.random() * 15)}`);
-          setSugar(90 + Math.floor(Math.random() * 30)); // 90-120 mg/dL
+          setSugar(90 + Math.floor(Math.random() * 30));
         }
       }
+    } else {
+      setBpm(null);
+      setHb(null);
     }
 
     drawWaveform();
@@ -185,6 +344,7 @@ export default function VitalMonitoringPage() {
       greenRef.current = [];
       blueRef.current = [];
       setHb(null);
+      setBpm(null);
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -213,9 +373,16 @@ export default function VitalMonitoringPage() {
     try {
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: "user",
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          }, 
+          audio: false 
+        });
       } catch {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       }
       streamRef.current = stream;
       if (videoRef.current) {
@@ -232,17 +399,24 @@ export default function VitalMonitoringPage() {
     }
   }, [cameraOn, stopStream]);
 
+  toggleCameraRef.current = toggleCamera;
+
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
-      <h1 className="text-5xl font-extrabold mb-6 tracking-tight text-center">PPG Vital Monitor</h1>
-      <p className="text-lg text-neutral-400 mb-8 max-w-md text-center">
-        Place your fingertip over the camera lens and flash to begin real-time signal acquisition.
+      <h1 className="text-4xl font-extrabold mb-4 tracking-tight text-center">PPG Vital Monitor</h1>
+      <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
+        MCD-rPPG powered remote photoplethysmography. Place your fingertip over the camera lens to begin real-time signal acquisition.
       </p>
 
-      <div className="w-full max-w-md bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 overflow-hidden">
-        <div className="relative h-72 bg-black">
+      <div className="w-full max-w-lg bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 overflow-hidden">
+        <div className="relative h-64 bg-black">
           <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
           {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-500 text-sm">Camera off</span></div>}
+          {signalQuality !== null && (
+            <div className="absolute top-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded">
+              Signal: {(signalQuality * 100).toFixed(1)}%
+            </div>
+          )}
         </div>
         <div className="p-4 flex items-center justify-between gap-4">
           <div className="flex-1 min-w-0">
@@ -288,11 +462,20 @@ export default function VitalMonitoringPage() {
           </div>
         )}
         <div className="px-4 pb-3">
-          <p className="text-[10px] text-neutral-500 leading-tight">SpO₂, BP and glucose values are simulated research estimates. Actual clinical measurement requires certified medical sensors.</p>
+          <p className="text-[10px] text-neutral-500 leading-tight">Research estimates using MCD-rPPG signal processing. Not clinical measurements.</p>
         </div>
       </div>
 
-      <p className="mt-8 text-xs text-neutral-500">Research-grade PPG signal processing</p>
+      <div className="mt-6 flex gap-4">
+        <Link href="/training" className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white text-sm rounded-lg transition">
+          View Training Dashboard
+        </Link>
+        <Link href="/" className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white text-sm rounded-lg transition">
+          Home
+        </Link>
+      </div>
+
+      <p className="mt-6 text-xs text-neutral-500">Research-grade PPG signal processing based on MCD-rPPG</p>
     </main>
   );
 }

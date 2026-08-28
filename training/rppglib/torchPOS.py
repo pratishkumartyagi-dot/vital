@@ -1,0 +1,16 @@
+import numpy as np
+from . import torchPOS
+
+NUM_EPCHS = 50
+LR = 0.001
+
+FACE = np.array([1, 2, 3, 4, 5, 6, 8, 9, 10, 11,12,13,14,15,16,17,27,26,25,24,23,22,21,20,19,18])
+NOSE = np.array([22, 23, 43, 36, 35, 34,33,32,40])
+LEFT_UPPER_CHEEK = np.array([1, 37, 42, 41,40,32,3,2])
+RIGHT_UPPER_CHEEK = np.array([17, 46, 47, 48, 43,36,15,16])
+LEFT_LOWER_CHEEK = np.array([3, 32, 51, 50, 49, 5, 4])
+RIGHT_LOWER_CHEEK = np.array([15, 36, 53, 54, 55, 13, 14])
+LIPS = np.array([49,50,51,52,53,54,55,56,57,58,59,60])
+CHIN = np.array([5, 6, 7, 8, 9, 10, 11,12,13,56,57,58,59,60])
+
+ALL_REGIONS = [FACE, NOSE, LEFT_UPPER_CHEEK, RIGHT_UPPER_CHEEK, LEFT_LOWER_CHEEK, RIGHT_LOWER_CHEEK, LIPS, CHIN]

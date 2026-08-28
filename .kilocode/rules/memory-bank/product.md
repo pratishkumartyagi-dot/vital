@@ -1,44 +1,33 @@
-# Product Context: Next.js Starter Template
+# Product Context: Vital Monitoring App
 
-## Why This Template Exists
+## Why This App Exists
 
-Starting a new Next.js project involves boilerplate setup, configuration decisions, and establishing patterns. This template provides a clean, opinionated starting point that eliminates setup friction and establishes best practices from the start. It's optimized for AI-assisted development, where an AI can quickly extend the template based on user requirements.
+Remote photoplethysmography (rPPG) enables non-contact measurement of vital signs like heart rate and blood oxygen saturation from video. This application provides both a real-time monitoring interface and a complete training pipeline for developing rPPG models.
 
 ## Problems It Solves
 
-1. **Setup Time**: Eliminates boilerplate configuration (TypeScript, Tailwind, ESLint)
-2. **Decision Fatigue**: Pre-made choices for tooling and patterns
-3. **AI Context**: Memory bank provides persistent context for AI assistants
-4. **Extensibility**: Recipe system for adding common features
-5. **Consistency**: Standardized project structure and conventions
+1. **Research Tooling**: Provides a complete platform for rPPG research
+2. **Real-time Monitoring**: Web-based PPG signal acquisition without specialized hardware
+3. **Model Training**: Integrated MCD-rPPG training pipeline for model development
+4. **Validation**: Cross-validation framework for model evaluation
 
-## How It Should Work (User Flow)
+## How It Works
 
-1. User starts with this template
-2. User describes what they want to build to AI assistant
-3. AI adds pages, components, and features as needed
-4. AI uses recipes for common additions (database, auth)
-5. User previews changes via hot reload
-6. Iterate until satisfied
-7. Deploy
+1. User opens the web app
+2. Camera captures video frames
+3. Signal processing extracts PPG from facial regions
+4. Heart rate and SpO2 are estimated in real-time
+5. Training dashboard allows model configuration and monitoring
 
 ## Key User Experience Goals
 
-- **Zero to Feature Fast**: Get building immediately, no setup required
-- **AI-Friendly**: Memory bank and recipes make AI assistance effective
-- **Flexible Foundation**: Can become any type of application
-- **Best Practices Built-In**: TypeScript strict mode, ESLint, clean structure
-
-## What This Template Provides
-
-1. **Clean App Structure**: Single page ready for expansion
-2. **Type Safety**: Full TypeScript setup with strict mode
-3. **Modern Styling**: Tailwind CSS 4 ready to use
-4. **Code Quality**: ESLint configured
-5. **Extensibility**: Recipe system for common features
+- **Immediate Usability**: Works directly in browser with webcam
+- **Research Ready**: Complete training pipeline included
+- **Clear Visualization**: Real-time waveform and signal quality indicators
+- **Professional UI**: Dark theme with medical/research aesthetic
 
 ## Integration Points
 
-- **Database**: Use add-database recipe for Drizzle + SQLite
-- **Styling**: Tailwind CSS pre-configured
-- **AI Assistance**: Memory bank for context persistence
+- **MCD-rPPG**: Training models based on the MCD-rPPG dataset
+- **Signal Processing**: POS algorithm and bandpass filtering
+- **Model Evaluation**: 5-fold cross-validation with HR/PPG metrics

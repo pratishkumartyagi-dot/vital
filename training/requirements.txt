@@ -1,0 +1,14 @@
+torch==2.6.0
+torchaudio==2.6.0
+numpy==2.3.5
+scipy==1.16.3
+pandas==2.3.3
+scikit-learn==1.7.2
+timm==1.0.22
+matplotlib==3.10.7
+numba==0.62.1
+opencv-python==4.11.0.86
+face-alignment==1.4.1
+tqdm==4.67.1
+sk-video==1.1.10
+imageio==2.37.0

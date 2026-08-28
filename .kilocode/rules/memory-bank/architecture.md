@@ -1,120 +1,57 @@
-# System Patterns: Next.js Starter Template
+# System Patterns: Vital Monitoring App
 
 ## Architecture Overview
 
 ```
-src/
-├── app/                    # Next.js App Router
-│   ├── layout.tsx          # Root layout + metadata
-│   ├── page.tsx            # Home page
-│   ├── globals.css         # Tailwind imports + global styles
-│   └── favicon.ico         # Site icon
-└── (expand as needed)
-    ├── components/         # React components (add when needed)
-    ├── lib/                # Utilities and helpers (add when needed)
-    └── db/                 # Database files (add via recipe)
+/
+├── src/
+│   └── app/                    # Next.js App Router
+│       ├── layout.tsx          # Root layout
+│       ├── page.tsx            # Home page
+│       ├── globals.css         # Global styles
+│       ├── vital-monitoring/
+│       │   └── page.tsx        # Real-time PPG monitoring
+│       ├── training/
+│       │   └── page.tsx        # Training dashboard
+│       └── api/
+│           └── training/
+│               └── route.ts    # Training API
+├── training/
+│   ├── run_training.py         # Main training script
+│   ├── requirements.txt        # Python dependencies
+│   └── rppglib/                # MCD-rPPG library
+│       ├── models/             # Model implementations
+│       ├── train.py            # Training loop
+│       ├── processing.py       # Signal processing
+│       ├── face_utils.py       # Face detection
+│       └── data_utils.py       # Data loading
+└── vital_monitoring_app/       # Flutter app (legacy)
 ```
 
 ## Key Design Patterns
 
 ### 1. App Router Pattern
+- `/` - Home page
+- `/vital-monitoring` - Real-time PPG monitoring
+- `/training` - Training dashboard
+- `/api/training` - Training API
 
-Uses Next.js App Router with file-based routing:
-```
-src/app/
-├── page.tsx           # Route: /
-├── about/page.tsx     # Route: /about
-├── blog/
-│   ├── page.tsx       # Route: /blog
-│   └── [slug]/page.tsx # Route: /blog/:slug
-└── api/
-    └── route.ts       # API Route: /api
-```
+### 2. Client Components
+- Vital monitoring page uses "use client" for camera access and real-time processing
+- Training dashboard uses "use client" for interactive elements
 
-### 2. Component Organization Pattern (When Expanding)
-
+### 3. Signal Processing Pipeline
 ```
-src/components/
-├── ui/                # Reusable UI components (Button, Card, etc.)
-├── layout/            # Layout components (Header, Footer)
-├── sections/          # Page sections (Hero, Features, etc.)
-└── forms/             # Form components
+Camera Frame → ROI Extraction → POS Processing → Bandpass Filter → HR Estimation
 ```
 
-### 3. Server Components by Default
-
-All components are Server Components unless marked with `"use client"`:
-```tsx
-// Server Component (default) - can fetch data, access DB
-export default function Page() {
-  return <div>Server rendered</div>;
-}
-
-// Client Component - for interactivity
-"use client";
-export default function Counter() {
-  const [count, setCount] = useState(0);
-  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
-}
+### 4. Model Training Pipeline
 ```
-
-### 4. Layout Pattern
-
-Layouts wrap pages and can be nested:
-```tsx
-// src/app/layout.tsx - Root layout
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
-  );
-}
-
-// src/app/dashboard/layout.tsx - Nested layout
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex">
-      <Sidebar />
-      <main>{children}</main>
-    </div>
-  );
-}
+Dataset → Preprocessing → Cross-Validation Split → Training → Evaluation → Metrics
 ```
 
 ## Styling Conventions
 
-### Tailwind CSS Usage
-- Utility classes directly on elements
-- Component composition for repeated patterns
-- Responsive: `sm:`, `md:`, `lg:`, `xl:`
-
-### Common Patterns
-```tsx
-// Container
-<div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-
-// Responsive grid
-<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-
-// Flexbox centering
-<div className="flex items-center justify-center">
-```
-
-## File Naming Conventions
-
-- Components: PascalCase (`Button.tsx`, `Header.tsx`)
-- Utilities: camelCase (`utils.ts`, `helpers.ts`)
-- Pages/Routes: lowercase (`page.tsx`, `layout.tsx`)
-- Directories: kebab-case (`api-routes/`) or lowercase (`components/`)
-
-## State Management
-
-For simple needs:
-- `useState` for local component state
-- `useContext` for shared state
-- Server Components for data fetching
-
-For complex needs (add when necessary):
-- Zustand for client state
-- React Query for server state
+- Dark theme with red accents for medical/research aesthetic
+- Tailwind CSS utility classes
+- Responsive design for mobile and desktop

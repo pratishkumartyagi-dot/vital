@@ -1,48 +1,45 @@
-# Project Brief: Next.js Starter Template
+# Project Brief: Vital Monitoring App
 
 ## Purpose
 
-This is a minimal Next.js starter template designed for AI-assisted development. It provides a clean foundation that can be extended to build any type of web application through interaction with an AI assistant.
+This is a research-grade remote photoplethysmography (rPPG) application for measuring vital signs from video. It combines a Next.js web interface for real-time monitoring with the MCD-rPPG training pipeline for model development.
 
 ## Target Users
 
-- Developers wanting a clean Next.js starting point
-- Users building applications through AI-assisted coding
-- Teams needing a standardized, modern Next.js setup
+- Researchers working on rPPG and health biomarker estimation
+- Developers building health monitoring applications
+- Teams needing a standardized platform for PPG signal processing
 
 ## Core Use Case
 
-Users describe what they want to build to an AI assistant, which then expands this template by:
-
-1. Adding components and pages as needed
-2. Installing additional dependencies
-3. Setting up databases, authentication, etc. using recipes
-4. Customizing styling and branding
+1. Real-time vital sign monitoring via webcam (web app)
+2. Model training and evaluation using the MCD-rPPG dataset
+3. Research documentation and validation tools
 
 ## Key Requirements
 
 ### Must Have
-
-- Modern Next.js 16 setup with App Router
+- Real-time PPG signal acquisition from webcam
+- MCD-rPPG model training pipeline
+- Heart rate and SpO2 estimation
+- Training dashboard for model management
+- Next.js 16 with App Router
 - TypeScript for type safety
 - Tailwind CSS 4 for styling
-- ESLint for code quality
-- Clean, minimal starting structure
-- Bun as package manager
 
 ### Nice to Have
-
-- Recipe system for common additions (database, auth)
-- Memory bank for AI context persistence
-- Clear development guidelines
+- Database for storing measurement history
+- User authentication
+- Model export/deployment tools
+- Advanced signal processing visualization
 
 ## Success Metrics
-
-- Clean, zero-error TypeScript setup
-- Passing lint and type checks
+- Working real-time PPG monitoring
+- Successful model training pipeline
+- Clean, maintainable codebase
+- Passing type checks and lint
 
 ## Constraints
-
-- Minimal dependencies by default
 - Framework: Next.js 16 + React 19 + Tailwind CSS 4
 - Package manager: Bun
+- Python training pipeline requires PyTorch
