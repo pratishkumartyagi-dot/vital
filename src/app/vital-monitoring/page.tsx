@@ -312,10 +312,8 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
-    if (phaseRef.current === "measuring") {
-      ppgBufferRef.current.push(avgG);
-      if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
-    }
+    ppgBufferRef.current.push(avgR);
+    if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
 
     valuesRef.current.push(avgR);
     if (valuesRef.current.length > 180) valuesRef.current.shift();
@@ -336,7 +334,7 @@ export default function VitalMonitoringPage() {
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
     const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
 
-    if (quality > 0.3) {
+    if (quality > 0.05) {
       const nowMs = Date.now();
       if (nowMs - lastBpmUpdate.current > 2000) {
         lastBpmUpdate.current = nowMs;
@@ -394,6 +392,9 @@ export default function VitalMonitoringPage() {
     } else {
       setBpm(null);
       setHb(null);
+      setHrv(null);
+      setRespRate(null);
+      setRhythm("unknown");
     }
 
     drawWaveform();
