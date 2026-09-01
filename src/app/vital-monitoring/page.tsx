@@ -644,9 +644,10 @@ export default function VitalMonitoringPage() {
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack && cameraMode === "rear") {
         try {
-          await videoTrack.applyConstraints({
-            advanced: [{ torch: torchOn } as any]
-          });
+          const caps = videoTrack.getCapabilities?.() as { torch?: unknown } | undefined;
+          if (caps?.torch) {
+            await videoTrack.applyConstraints({ torch: torchOn } as any);
+          }
         } catch {
           // Torch may not be supported on all devices
         }
@@ -669,6 +670,25 @@ export default function VitalMonitoringPage() {
   }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode]);
 
   toggleCameraRef.current = toggleCamera;
+
+  const switchCameraMode = useCallback(async (mode: "front" | "rear") => {
+    const wasOn = cameraOnRef.current;
+    setCameraMode(mode);
+    if (mode === "rear") {
+      setTorchOn(true);
+    } else {
+      setTorchOn(false);
+    }
+    if (wasOn) {
+      stopStream();
+      setCameraOn(false);
+      setError(null);
+      setPhase("idle");
+      setCountdown(0);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    toggleCameraRef.current?.();
+  }, [stopStream]);
 
   const submitPatientInfo = useCallback(() => {
     if (!form.name.trim()) {
@@ -902,10 +922,7 @@ export default function VitalMonitoringPage() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => {
-                setCameraMode("front");
-                setTorchOn(false);
-              }}
+              onClick={() => switchCameraMode("front")}
               className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                 cameraMode === "front"
                   ? "bg-neutral-700 border-neutral-500 text-neutral-100"
@@ -915,10 +932,7 @@ export default function VitalMonitoringPage() {
               Front Camera
             </button>
             <button
-              onClick={() => {
-                setCameraMode("rear");
-                setTorchOn(true);
-              }}
+              onClick={() => switchCameraMode("rear")}
               className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                 cameraMode === "rear"
                   ? "bg-neutral-700 border-neutral-500 text-neutral-100"
@@ -929,23 +943,23 @@ export default function VitalMonitoringPage() {
             </button>
             {cameraMode === "rear" && (
               <button
-                onClick={async () => {
-                  const next = !torchOn;
-                  setTorchOn(next);
-                  const track = streamRef.current?.getVideoTracks()[0];
-                  if (track) {
-                    try {
-                      const caps = track.getCapabilities?.() as { torch?: boolean } | undefined;
-                      if (caps?.torch) {
-                        await track.applyConstraints({ advanced: [{ torch: next } as unknown as MediaTrackConstraintSet] });
-                      } else {
-                        setError("This device/browser does not expose a torch/flash API for the selected track.");
-                      }
-                    } catch (e) {
-                      setError(getErrorMessage(e));
-                    }
-                  }
-                }}
+                 onClick={async () => {
+                   const next = !torchOn;
+                   setTorchOn(next);
+                   const track = streamRef.current?.getVideoTracks()[0];
+                   if (track) {
+                     try {
+                       const caps = track.getCapabilities?.() as { torch?: unknown } | undefined;
+                       if (caps?.torch) {
+                         await track.applyConstraints({ torch: next } as any);
+                       } else {
+                         setError("This device/browser does not expose a torch/flash API for the selected track.");
+                       }
+                     } catch (e) {
+                       setError(getErrorMessage(e));
+                     }
+                   }
+                 }}
                 className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                   torchOn
                     ? "bg-amber-600 border-amber-500 text-neutral-100"
