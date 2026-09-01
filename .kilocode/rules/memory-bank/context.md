@@ -81,6 +81,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-01 | Added PPG Heart Rate + HRV (heartpy-style) and Respiratory Rate (RRest-style) analysis in browser + Python reference implementation in `training/ppg_analysis.py` |
 | 2026-09-01 | Fixed bandpass filter bug (was bandstop) and peak detection threshold in `ppg-analysis.ts` that caused all-zero readings |
 | 2026-09-01 | Fixed recurring bandpass cutoff swap bug: HP filter must use `low` cutoff (0.7 Hz), LP must use `high` cutoff (3.5 Hz). Previous fix had them swapped, producing an empty passband. Fixed in both `ppg-analysis.ts` and `page.tsx` |
+| 2026-09-01 | Fixed rear camera and flash function: added `switchCameraMode` that stops the current stream and restarts with the new facing mode; the camera mode buttons now call this function instead of just setting state; fixed torch constraint application to use direct `{ torch: bool }` instead of `advanced: [{ torch: bool }]` |
 | 2026-09-01 | Fixed rear-camera fingertip PPG: auto-enable torch on Rear Camera selection, dynamic torch constraint on the live track, center-ROI sampling, relaxed quality gate (0.005), finger-detection badge |
 | 2026-09-01 | Added Demo Mode (synthetic PPG generator) so the 70s measurement session always produces a complete reading, even when no real camera PPG is available (no finger, no face, no torch support) |
 
