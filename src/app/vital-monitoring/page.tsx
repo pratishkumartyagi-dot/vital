@@ -95,6 +95,7 @@ export default function VitalMonitoringPage() {
   const [respRate, setRespRate] = useState<number | null>(null);
   const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
   const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
+  const [fingerDetected, setFingerDetected] = useState(false);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
@@ -285,7 +286,7 @@ export default function VitalMonitoringPage() {
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !cameraOn) return;
-    
+
     const c = document.createElement("canvas");
     c.width = 64;
     c.height = 64;
@@ -293,13 +294,26 @@ export default function VitalMonitoringPage() {
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, 64, 64);
     const data = ctx.getImageData(0, 0, 64, 64).data;
-    
+
     let r = 0, g = 0, b = 0, count = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      r += data[i];
-      g += data[i + 1];
-      b += data[i + 2];
-      count++;
+    if (cameraMode === "rear") {
+      const cx0 = 22, cy0 = 22, cx1 = 42, cy1 = 42;
+      for (let y = cy0; y < cy1; y++) {
+        for (let x = cx0; x < cx1; x++) {
+          const i = (y * 64 + x) * 4;
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
+          count++;
+        }
+      }
+    } else {
+      for (let i = 0; i < data.length; i += 4) {
+        r += data[i];
+        g += data[i + 1];
+        b += data[i + 2];
+        count++;
+      }
     }
     const avgR = count ? r / count : 128;
     const avgG = count ? g / count : 128;
@@ -315,8 +329,15 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
-    ppgBufferRef.current.push(avgG);
-    if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
+    const isFingerFrame = cameraMode === "rear"
+      ? (avgR > 90 && avgR < 245 && avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8)
+      : true;
+    if (cameraMode === "rear") setFingerDetected(isFingerFrame);
+
+    if (phaseRef.current === "measuring" && isFingerFrame) {
+      ppgBufferRef.current.push(avgG);
+      if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
+    }
 
     valuesRef.current.push(avgR);
     if (valuesRef.current.length > 180) valuesRef.current.shift();
@@ -336,8 +357,9 @@ export default function VitalMonitoringPage() {
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
     const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
+    const qualityGate = cameraMode === "rear" ? 0.005 : 0.05;
 
-    if (quality > 0.05) {
+    if (quality > qualityGate) {
       const nowMs = Date.now();
       if (nowMs - lastBpmUpdate.current > 2000) {
         lastBpmUpdate.current = nowMs;
@@ -398,11 +420,14 @@ export default function VitalMonitoringPage() {
       setHrv(null);
       setRespRate(null);
       setRhythm("unknown");
+      setSpo2(null);
+      setBp(null);
+      setSugar(null);
     }
 
     drawWaveform();
     animFrame.current = requestAnimationFrame(processFrame);
-  }, [cameraOn, drawWaveform, spo2Offset]);
+  }, [cameraOn, drawWaveform, spo2Offset, cameraMode]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -419,6 +444,10 @@ export default function VitalMonitoringPage() {
       setRespRate(null);
       setHrv(null);
       setRhythm("unknown");
+      setSpo2(null);
+      setBp(null);
+      setSugar(null);
+      setFingerDetected(false);
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -758,12 +787,17 @@ export default function VitalMonitoringPage() {
         )}
       </div>
       <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
-        MCD-rPPG powered remote photoplethysmography. Place your fingertip over the camera lens to begin real-time signal acquisition.
+        MCD-rPPG powered remote photoplethysmography. Front camera: position your face in good lighting. Rear camera + flash: cover the lens with your fingertip.
       </p>
 
       <div className="w-full max-w-lg bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 overflow-hidden">
         <div className="relative h-64 bg-black">
           <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
+          {cameraOn && cameraMode === "rear" && (
+            <div className={`absolute top-2 right-2 ${fingerDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"} text-xs px-2 py-1 rounded`}>
+              {fingerDetected ? "Finger detected" : "Place fingertip over lens"}
+            </div>
+          )}
           {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-500 text-sm">Camera off</span></div>}
           {signalQuality !== null && (
             <div className="absolute top-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded">
@@ -802,7 +836,10 @@ export default function VitalMonitoringPage() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setCameraMode("front")}
+              onClick={() => {
+                setCameraMode("front");
+                setTorchOn(false);
+              }}
               className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                 cameraMode === "front"
                   ? "bg-neutral-700 border-neutral-500 text-neutral-100"
@@ -812,7 +849,10 @@ export default function VitalMonitoringPage() {
               Front Camera
             </button>
             <button
-              onClick={() => setCameraMode("rear")}
+              onClick={() => {
+                setCameraMode("rear");
+                setTorchOn(true);
+              }}
               className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                 cameraMode === "rear"
                   ? "bg-neutral-700 border-neutral-500 text-neutral-100"
@@ -823,7 +863,23 @@ export default function VitalMonitoringPage() {
             </button>
             {cameraMode === "rear" && (
               <button
-                onClick={() => setTorchOn((prev) => !prev)}
+                onClick={async () => {
+                  const next = !torchOn;
+                  setTorchOn(next);
+                  const track = streamRef.current?.getVideoTracks()[0];
+                  if (track) {
+                    try {
+                      const caps = track.getCapabilities?.() as { torch?: boolean } | undefined;
+                      if (caps?.torch) {
+                        await track.applyConstraints({ advanced: [{ torch: next } as unknown as MediaTrackConstraintSet] });
+                      } else {
+                        setError("This device/browser does not expose a torch/flash API for the selected track.");
+                      }
+                    } catch (e) {
+                      setError(getErrorMessage(e));
+                    }
+                  }
+                }}
                 className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                   torchOn
                     ? "bg-amber-600 border-amber-500 text-neutral-100"
