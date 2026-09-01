@@ -3,6 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
+import { analyzeVitals, type VitalAnalysis } from './ppg-analysis';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -29,75 +30,6 @@ function computePerfusionIndex(signal: number[]): number {
   return dc > 0 ? (ac / dc) * 100 : 0;
 }
 
-function bandpassFilter(signal: number[], low: number, high: number, fs: number = 30): number[] {
-  const n = signal.length;
-  if (n < 10) return signal;
-  
-  const result: number[] = new Array(n).fill(0);
-  const tauH = 1 / (2 * Math.PI * high);
-  const tauL = 1 / (2 * Math.PI * low);
-  const alphaH = tauH / (tauH + 1 / fs);
-  const alphaL = tauL / (tauL + 1 / fs);
-  
-  let prevH: number[] = new Array(n).fill(0);
-  let prevL: number[] = new Array(n).fill(0);
-  
-  for (let i = 0; i < n; i++) {
-    prevH[i] = signal[i];
-    prevL[i] = signal[i];
-  }
-  
-  for (let i = 1; i < n; i++) {
-    prevH[i] = alphaH * prevH[i] + (1 - alphaH) * prevH[i - 1];
-  }
-  
-  for (let i = 1; i < n; i++) {
-    prevL[i] = alphaL * prevL[i] + (1 - alphaL) * prevL[i - 1];
-  }
-  
-  for (let i = 0; i < n; i++) {
-    result[i] = prevH[i] - prevL[i];
-  }
-  
-  return result;
-}
-
-function computeHeartRate(signal: number[], fs: number = 30): number | null {
-  if (signal.length < 30) return null;
-  
-  const filtered = bandpassFilter(signal, 0.5, 3.5, fs);
-  
-  const N = filtered.length;
-  const freqs = new Array(Math.floor(N / 2));
-  const magnitudes = new Array(Math.floor(N / 2));
-  
-  for (let k = 0; k < Math.floor(N / 2); k++) {
-    let real = 0;
-    let imag = 0;
-    for (let n = 0; n < N; n++) {
-      const angle = (2 * Math.PI * k * n) / N;
-      real += filtered[n] * Math.cos(angle);
-      imag -= filtered[n] * Math.sin(angle);
-    }
-    freqs[k] = (k * fs) / N;
-    magnitudes[k] = Math.sqrt(real * real + imag * imag);
-  }
-  
-  const maskStart = Math.floor(0.5 * N / fs);
-  const maskEnd = Math.min(Math.floor(3.5 * N / fs), freqs.length);
-  
-  let maxMag = 0;
-  let maxIdx = maskStart;
-  for (let i = maskStart; i < maskEnd; i++) {
-    if (magnitudes[i] > maxMag) {
-      maxMag = magnitudes[i];
-      maxIdx = i;
-    }
-  }
-  
-  return freqs[maxIdx] * 60;
-}
-
 export default function VitalMonitoringPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -122,16 +54,27 @@ export default function VitalMonitoringPage() {
     bpDia: number;
     sugar: number;
     signalQuality: number;
+    respRate: number;
+    sdnn: number;
+    rmssd: number;
+    pnn50: number;
+    rhythm: string;
   } | null>(null);
+  const [respRate, setRespRate] = useState<number | null>(null);
+  const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
+  const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
   const blueRef = useRef<number[]>([]);
+  const ppgBufferRef = useRef<number[]>([]);
+  const fpsRef = useRef<number>(30);
+  const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
   const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
   const sessionStartRef = useRef<number>(0);
-  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; signalQuality: number }[]>([]);
+  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
 
@@ -330,6 +273,19 @@ export default function VitalMonitoringPage() {
     const avgG = count ? g / count : 128;
     const avgB = count ? b / count : 128;
     
+    const now = performance.now();
+    if (lastFrameTimeRef.current > 0) {
+      const dt = now - lastFrameTimeRef.current;
+      if (dt > 0) {
+        const instFps = 1000 / dt;
+        fpsRef.current = fpsRef.current * 0.9 + instFps * 0.1;
+      }
+    }
+    lastFrameTimeRef.current = now;
+
+    ppgBufferRef.current.push(avgG);
+    if (ppgBufferRef.current.length > 70 * 35) ppgBufferRef.current.shift();
+
     valuesRef.current.push(avgR);
     if (valuesRef.current.length > 180) valuesRef.current.shift();
     redRef.current.push(avgR);
@@ -344,17 +300,21 @@ export default function VitalMonitoringPage() {
     const bluePI = computePerfusionIndex(blueRef.current);
     const quality = Math.min(redPI, greenPI, bluePI);
     setSignalQuality(quality);
-    
+
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
     const measuring = phase === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
 
     if (quality > 0.3) {
-      const now = Date.now();
-      if (now - lastBpmUpdate.current > 2000) {
-        lastBpmUpdate.current = now;
+      const nowMs = Date.now();
+      if (nowMs - lastBpmUpdate.current > 2000) {
+        lastBpmUpdate.current = nowMs;
 
-        let hr: number | null = null;
+        const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
+        const analysisBuffer = ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
+        const analysis: VitalAnalysis = analyzeVitals(analysisBuffer, fs);
+        const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
+
         let hbVal = 18.2 - 6.8 * (redPI / (greenPI || 1));
         hbVal = Math.min(Math.max(hbVal, 5), 20);
         let spo2Val = 110 - 25 * (redPI / (bluePI || 1));
@@ -363,17 +323,19 @@ export default function VitalMonitoringPage() {
         const bpDia = 70 + Math.floor(Math.random() * 15);
         const sugarVal = 90 + Math.floor(Math.random() * 30);
 
-        if (valuesRef.current.length >= 90) {
-          hr = computeHeartRate(valuesRef.current);
-          if (hr !== null) hr = Math.min(Math.max(hr, 40), 180);
-        }
-
         if (hr !== null) {
           setBpm(hr);
           setHb(hbVal);
           setSpo2(Math.round(spo2Val));
           setBp(`${bpSys}/${bpDia}`);
           setSugar(sugarVal);
+          if (analysis.respRate !== null) {
+            setRespRate(Math.round(analysis.respRate * 10) / 10);
+          }
+          if (analysis.hrv) {
+            setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
+          }
+          setRhythm(analysis.rhythm);
 
           if (measuring) {
             samplesRef.current.push({
@@ -384,6 +346,11 @@ export default function VitalMonitoringPage() {
               bpDia,
               sugar: sugarVal,
               signalQuality: quality,
+              respRate: analysis.respRate ?? 0,
+              sdnn: analysis.hrv?.sdnn ?? 0,
+              rmssd: analysis.hrv?.rmssd ?? 0,
+              pnn50: analysis.hrv?.pnn50 ?? 0,
+              rhythm: analysis.rhythm,
             });
           }
         }
@@ -406,8 +373,12 @@ export default function VitalMonitoringPage() {
       redRef.current = [];
       greenRef.current = [];
       blueRef.current = [];
+      ppgBufferRef.current = [];
       setHb(null);
       setBpm(null);
+      setRespRate(null);
+      setHrv(null);
+      setRhythm("unknown");
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -420,9 +391,22 @@ export default function VitalMonitoringPage() {
 
   const finalizeSession = useCallback(() => {
     const samples = samplesRef.current;
+    const avg = (key: keyof typeof samples[number]) =>
+      samples.length > 0 ? samples.reduce((a, s) => a + (s[key] as number), 0) / samples.length : 0;
+    const mode = <T extends string>(items: T[]): T => {
+      const m = new Map<T, number>();
+      for (const it of items) m.set(it, (m.get(it) ?? 0) + 1);
+      let best: T = items[0] ?? ("unknown" as T);
+      let bestN = 0;
+      for (const [k, v] of m.entries()) {
+        if (v > bestN) {
+          best = k;
+          bestN = v;
+        }
+      }
+      return best;
+    };
     if (samples.length > 0) {
-      const avg = (key: keyof typeof samples[number]) =>
-        samples.reduce((a, s) => a + (s[key] as number), 0) / samples.length;
       const bpSysAvg = Math.round(avg("bpSys"));
       const bpDiaAvg = Math.round(avg("bpDia"));
       setFinalReading({
@@ -433,6 +417,11 @@ export default function VitalMonitoringPage() {
         bpDia: bpDiaAvg,
         sugar: Math.round(avg("sugar")),
         signalQuality: avg("signalQuality"),
+        respRate: avg("respRate"),
+        sdnn: avg("sdnn"),
+        rmssd: avg("rmssd"),
+        pnn50: avg("pnn50"),
+        rhythm: mode(samples.map((s) => (s.rhythm as "regular" | "irregular" | "unknown"))),
       });
     } else {
       setFinalReading({
@@ -443,13 +432,18 @@ export default function VitalMonitoringPage() {
         bpDia: 0,
         sugar: sugar ?? 0,
         signalQuality: signalQuality ?? 0,
+        respRate: respRate ?? 0,
+        sdnn: hrv?.sdnn ?? 0,
+        rmssd: hrv?.rmssd ?? 0,
+        pnn50: hrv?.pnn50 ?? 0,
+        rhythm: rhythm,
       });
     }
     setPhase("finalized");
     setCountdown(0);
     stopStream();
     setCameraOn(false);
-  }, [bpm, hb, spo2, sugar, signalQuality, stopStream]);
+  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm, stopStream]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -754,22 +748,36 @@ export default function VitalMonitoringPage() {
           </div>
         </div>
         {(bpm !== null || cameraOn) && (
-          <div className="px-4 pb-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="px-4 pb-4 grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">Heart Rate</p>
+              <p className="text-2xl font-bold text-red-400">{bpm !== null ? `${bpm.toFixed(0)} BPM` : "--"}</p>
+              <p className={`text-[10px] mt-1 ${rhythm === "regular" ? "text-emerald-400" : rhythm === "irregular" ? "text-amber-400" : "text-neutral-500"}`}>
+                Rhythm: {rhythm}
+              </p>
+            </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">Resp Rate</p>
+              <p className="text-2xl font-bold text-sky-400">{respRate !== null ? `${respRate.toFixed(1)} /min` : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">breaths/min</p>
+            </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">HRV (SDNN)</p>
+              <p className="text-2xl font-bold text-violet-400">{hrv ? `${hrv.sdnn.toFixed(1)} ms` : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">RMSSD {hrv ? hrv.rmssd.toFixed(1) : "--"}</p>
+            </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">SpO₂</p>
               <p className="text-2xl font-bold text-cyan-400">{spo2 !== null ? `${spo2}%` : "--"}</p>
-            </div>
-            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
-              <p className="text-neutral-400 mb-1">Hb</p>
-              <p className="text-2xl font-bold text-rose-400">{hb !== null ? `${hb.toFixed(1)} g/dL` : "--"}</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">BP</p>
               <p className="text-xl font-bold text-emerald-400">{bp || "--"}</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
-              <p className="text-neutral-400 mb-1">Glucose</p>
-              <p className="text-xl font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
+              <p className="text-neutral-400 mb-1">Hb / Glucose</p>
+              <p className="text-base font-bold text-rose-400">{hb !== null ? `${hb.toFixed(1)} g/dL` : "--"}</p>
+              <p className="text-base font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
             </div>
           </div>
         )}
@@ -790,6 +798,37 @@ export default function VitalMonitoringPage() {
                     LMP: {patient.lmp || "—"} • {patient.pregnancy === "pregnant" ? "Pregnant" : "Non-pregnant"}
                   </p>
                 )}
+              </div>
+              <div className="mb-4 p-3 rounded-lg bg-neutral-900/80 border border-emerald-700/40 text-xs">
+                <p className="text-neutral-400 mb-2 font-semibold">Cardiac & Respiratory (PPG-derived)</p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div>
+                    <p className="text-neutral-500 text-[10px]">Heart Rate</p>
+                    <p className="text-xl font-bold text-red-400">{finalReading.bpm.toFixed(1)} BPM</p>
+                  </div>
+                  <div>
+                    <p className="text-neutral-500 text-[10px]">Rhythm</p>
+                    <p className={`text-base font-bold ${finalReading.rhythm === "regular" ? "text-emerald-400" : finalReading.rhythm === "irregular" ? "text-amber-400" : "text-neutral-400"}`}>
+                      {finalReading.rhythm}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-neutral-500 text-[10px]">Resp Rate</p>
+                    <p className="text-xl font-bold text-sky-400">{finalReading.respRate > 0 ? finalReading.respRate.toFixed(1) : "—"} /min</p>
+                  </div>
+                  <div>
+                    <p className="text-neutral-500 text-[10px]">HRV (SDNN)</p>
+                    <p className="text-xl font-bold text-violet-400">{finalReading.sdnn > 0 ? finalReading.sdnn.toFixed(1) : "—"} ms</p>
+                  </div>
+                  <div>
+                    <p className="text-neutral-500 text-[10px]">RMSSD</p>
+                    <p className="text-base font-bold text-violet-300">{finalReading.rmssd > 0 ? finalReading.rmssd.toFixed(1) : "—"} ms</p>
+                  </div>
+                  <div>
+                    <p className="text-neutral-500 text-[10px]">pNN50</p>
+                    <p className="text-base font-bold text-violet-300">{finalReading.pnn50 > 0 ? finalReading.pnn50.toFixed(1) : "—"}%</p>
+                  </div>
+                </div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
@@ -828,6 +867,9 @@ export default function VitalMonitoringPage() {
                   setBp(null);
                   setSugar(null);
                   setSignalQuality(null);
+                  setRespRate(null);
+                  setHrv(null);
+                  setRhythm("unknown");
                   setPatient(null);
                   setForm({ name: "", age: "", sex: "", lmp: "", pregnancy: "" });
                   startedRef.current = false;
