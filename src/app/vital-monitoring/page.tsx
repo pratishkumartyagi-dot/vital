@@ -153,6 +153,22 @@ export default function VitalMonitoringPage() {
   const phaseRef = useRef(phase);
   const toggleCameraRef = useRef<(() => void) | null>(null);
 
+  const [patient, setPatient] = useState<{
+    name: string;
+    age: string;
+    sex: "female" | "male" | "";
+    lmp: string;
+    pregnancy: "pregnant" | "non-pregnant" | "";
+  } | null>(null);
+  const [form, setForm] = useState({
+    name: "",
+    age: "",
+    sex: "" as "" | "female" | "male",
+    lmp: "",
+    pregnancy: "" as "" | "pregnant" | "non-pregnant",
+  });
+  const [formError, setFormError] = useState<string | null>(null);
+
   useEffect(() => {
     cameraOnRef.current = cameraOn;
   }, [cameraOn]);
@@ -175,13 +191,13 @@ export default function VitalMonitoringPage() {
   useEffect(() => {
     checkPermission();
     const timer = setTimeout(() => {
-      if (!startedRef.current && !cameraOnRef.current && !loadingRef.current) {
+      if (!startedRef.current && !cameraOnRef.current && !loadingRef.current && patient) {
         startedRef.current = true;
         toggleCameraRef.current?.();
       }
     }, 600);
     return () => clearTimeout(timer);
-  }, [checkPermission]);
+  }, [checkPermission, patient]);
 
   const detectFaceROI = useCallback((video: HTMLVideoElement): { roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null => {
     const canvas = document.createElement("canvas");
@@ -514,9 +530,180 @@ export default function VitalMonitoringPage() {
 
   toggleCameraRef.current = toggleCamera;
 
+  const submitPatientInfo = useCallback(() => {
+    if (!form.name.trim()) {
+      setFormError("Please enter the patient's name.");
+      return;
+    }
+    const ageNum = Number(form.age);
+    if (!form.age.trim() || Number.isNaN(ageNum) || ageNum <= 0 || ageNum > 120) {
+      setFormError("Please enter a valid age (1-120).");
+      return;
+    }
+    if (form.sex !== "male" && form.sex !== "female") {
+      setFormError("Please select sex.");
+      return;
+    }
+    if (form.sex === "female") {
+      if (!form.lmp) {
+        setFormError("Please enter the date of last menstrual period (LMP).");
+        return;
+      }
+      if (form.pregnancy !== "pregnant" && form.pregnancy !== "non-pregnant") {
+        setFormError("Please indicate pregnancy status.");
+        return;
+      }
+    }
+    setFormError(null);
+    setPatient({
+      name: form.name.trim(),
+      age: form.age.trim(),
+      sex: form.sex,
+      lmp: form.lmp,
+      pregnancy: form.pregnancy,
+    });
+  }, [form]);
+
+  if (!patient) {
+    return (
+      <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
+        <h1 className="text-4xl font-extrabold mb-2 tracking-tight text-center">PPG Vital Monitor</h1>
+        <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
+          Enter patient details to begin a 70-second measurement session.
+        </p>
+
+        <div className="w-full max-w-lg bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 p-6">
+          <h2 className="text-lg font-semibold text-neutral-100 mb-4">Patient Information</h2>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-neutral-400 mb-1">Name</label>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="Full name"
+                className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-red-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-neutral-400 mb-1">Age</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={120}
+                  value={form.age}
+                  onChange={(e) => setForm({ ...form, age: e.target.value })}
+                  placeholder="Years"
+                  className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-red-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-neutral-400 mb-1">Sex</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, sex: "female" })}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                      form.sex === "female"
+                        ? "bg-red-600 border-red-500 text-white"
+                        : "bg-neutral-800 border-neutral-700 text-neutral-300 hover:border-neutral-600"
+                    }`}
+                  >
+                    Female
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, sex: "male", lmp: "", pregnancy: "" })}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                      form.sex === "male"
+                        ? "bg-red-600 border-red-500 text-white"
+                        : "bg-neutral-800 border border-neutral-700 text-neutral-300 hover:border-neutral-600"
+                    }`}
+                  >
+                    Male
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {form.sex === "female" && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-400 mb-1">Date of LMP (Last Menstrual Period)</label>
+                  <input
+                    type="date"
+                    value={form.lmp}
+                    onChange={(e) => setForm({ ...form, lmp: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 focus:outline-none focus:border-red-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-400 mb-1">Pregnancy Status</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, pregnancy: "pregnant" })}
+                      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                        form.pregnancy === "pregnant"
+                          ? "bg-red-600 border-red-500 text-white"
+                          : "bg-neutral-800 border border-neutral-700 text-neutral-300 hover:border-neutral-600"
+                      }`}
+                    >
+                      Pregnant
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, pregnancy: "non-pregnant" })}
+                      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                        form.pregnancy === "non-pregnant"
+                          ? "bg-red-600 border-red-500 text-white"
+                          : "bg-neutral-800 border border-neutral-700 text-neutral-300 hover:border-neutral-600"
+                      }`}
+                    >
+                      Non-pregnant
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {formError && (
+              <div className="p-3 rounded-lg bg-red-950/60 border border-red-900/40">
+                <p className="text-xs text-red-300 font-medium">{formError}</p>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={submitPatientInfo}
+              className="w-full mt-2 px-5 py-2.5 rounded-full text-sm font-semibold bg-red-600 hover:bg-red-700 active:bg-red-800 transition shadow-lg shadow-red-900/30"
+            >
+              Launch Monitor
+            </button>
+          </div>
+        </div>
+
+        <Link href="/" className="mt-6 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white text-sm rounded-lg transition">
+          Home
+        </Link>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
       <h1 className="text-4xl font-extrabold mb-4 tracking-tight text-center">PPG Vital Monitor</h1>
+      <div className="mb-4 px-3 py-2 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300">
+        <span className="text-neutral-500 mr-2">Patient:</span>
+        <span className="font-semibold text-neutral-100">{patient.name}</span>
+        <span className="text-neutral-500"> • {patient.age}y • {patient.sex === "female" ? "Female" : "Male"}</span>
+        {patient.sex === "female" && (
+          <span className="text-neutral-500"> • LMP {patient.lmp} • {patient.pregnancy === "pregnant" ? "Pregnant" : "Non-pregnant"}</span>
+        )}
+      </div>
       <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
         MCD-rPPG powered remote photoplethysmography. Place your fingertip over the camera lens to begin real-time signal acquisition.
       </p>
@@ -593,6 +780,17 @@ export default function VitalMonitoringPage() {
                 <h2 className="text-base font-bold text-emerald-300">Final Reading (70s avg)</h2>
                 <span className="text-[10px] text-emerald-200/80">avg of 60s after 10s warm-up</span>
               </div>
+              <div className="mb-4 p-3 rounded-lg bg-neutral-900/80 border border-emerald-700/40 text-xs">
+                <p className="text-neutral-400 mb-1 font-semibold">Patient</p>
+                <p className="text-neutral-100">
+                  {patient.name} • {patient.age} yrs • {patient.sex === "female" ? "Female" : "Male"}
+                </p>
+                {patient.sex === "female" && (
+                  <p className="text-neutral-300 mt-1">
+                    LMP: {patient.lmp || "—"} • {patient.pregnancy === "pregnant" ? "Pregnant" : "Non-pregnant"}
+                  </p>
+                )}
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">BPM</p>
@@ -630,6 +828,9 @@ export default function VitalMonitoringPage() {
                   setBp(null);
                   setSugar(null);
                   setSignalQuality(null);
+                  setPatient(null);
+                  setForm({ name: "", age: "", sex: "", lmp: "", pregnancy: "" });
+                  startedRef.current = false;
                 }}
                 className="mt-4 w-full px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 transition"
               >

@@ -21,6 +21,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] Perfusion index-based signal quality assessment
 - [x] Home page updated with links to monitor and training dashboard
 - [x] **70-second timed measurement session on `/vital-monitoring`**: camera auto-starts, discards first 10s warm-up, averages the next 60s of samples, then stops the camera and displays a final reading card (BPM, SpO₂, Hb, BP, Glucose, Signal quality) on screen. Manual stop and "Start New Measurement" both reset state cleanly.
+- [x] **Patient intake form on `/vital-monitoring`**: first screen now collects Name, Age, Sex (Female/Male). For Female, additionally requires Date of LMP and Pregnant/Non-pregnant status. Auto-start of the 70s session is gated on completing the form; entered details are shown as a header pill during the session and included in the final reading card.
 
 ## Current Structure
 
@@ -60,6 +61,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-08-26 (Final) | Added demo mode, improved error handling, comprehensive instructions overlay |
 | 2026-08-28 | Integrated MCD-rPPG training pipeline, enhanced web app with training dashboard |
 | 2026-09-01 | Added 70s timed measurement session (10s warm-up discard + 60s averaging) with final reading card on `/vital-monitoring` |
+| 2026-09-01 | Added patient intake form (Name, Age, Sex, LMP, Pregnancy) gating the 70s measurement session on `/vital-monitoring` |
 
 ## Technical Specifications
 
