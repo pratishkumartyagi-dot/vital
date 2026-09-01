@@ -26,7 +26,11 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] **Python reference implementation** at `training/ppg_analysis.py` using the real `heartpy` and `RRest` libraries for offline validation (with the same fusion fallback if RRest import fails).
 - [x] **Removed dead code** from `page.tsx`: old `computeHeartRate` and `bandpassFilter` functions replaced by the dedicated `ppg-analysis.ts` module.
 - [x] **Bugfix (SpO2)**: replaced frame-average perfusion-index ratio with proper AC/DC ratio from bandpass-filtered red/blue PPG buffers (`computeAcDc`) for clinically meaningful SpO2.
-- [x] **Bugfix (all-zero readings)**: `ppg-analysis.ts` `bandpass()` was a bandstop (notch) rejecting the 0.7–3.5 Hz HR band; rewrote as proper bandpass (lowpass-highcut minus lowpass-lowcut). Lowered peak threshold from 0 to 15% of filtered signal range for noisy webcam PPG.
+- [x] **Bugfix (all-zero readings)**: `ppg-analysis.ts` `bandpass()` was a bandstop (notch) rejecting the 0.7–3.5 Hz HR band; rewrote as proper Butterworth bandpass (HP→LP cascade). Peak detection now uses 2nd-order butterBandpass with percentile-based adaptive threshold (20% above 10th-percentile baseline).
+- [x] **Bugfix (warm-up leak)**: `ppgBufferRef` was filled during warm-up phase, contaminating the signal buffer used for HR/HRV analysis. Now `ppgBufferRef` only fills during `phase === "measuring"` (checked via `phaseRef.current`).
+- [x] **Bugfix (ppgBuffer cap)**: `ppgBufferRef` was capped at `70*35=2450` frames but color buffers were capped at 180. Now ppgBuffer is also capped at 180.
+- [x] **Bugfix (AC/DC SpO2/Hb)**: SpO2 and Hb were using raw perfusion-index ratios (PI = AC/DC but computed on unfiltered signal). Now use proper AC/DC from bandpass-filtered (0.7–3.5 Hz) buffers: `R = (AC_r/dc_r)/(AC_b/dc_b)` for SpO2, `R = (AC_r/dc_r)/(AC_g/dc_g)` for Hb (18.2–6.8R).
+- [x] **Bugfix (stale measuring gate)**: `processFrame` used `measuring` from stale `phase` in callback closure. Replaced with `isMeasuring` using `phaseRef.current`. Removed stale `phase` from `useCallback` dependency array.
 
 ## Current Structure
 
