@@ -112,6 +112,17 @@ export default function VitalMonitoringPage() {
   const [sugar, setSugar] = useState<number | null>(null);
   const [hb, setHb] = useState<number | null>(null);
   const [signalQuality, setSignalQuality] = useState<number | null>(null);
+  const [phase, setPhase] = useState<"idle" | "warming" | "measuring" | "finalized">("idle");
+  const [countdown, setCountdown] = useState<number>(0);
+  const [finalReading, setFinalReading] = useState<{
+    bpm: number;
+    spo2: number;
+    hb: number;
+    bpSys: number;
+    bpDia: number;
+    sugar: number;
+    signalQuality: number;
+  } | null>(null);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
@@ -119,6 +130,10 @@ export default function VitalMonitoringPage() {
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
   const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
+  const sessionStartRef = useRef<number>(0);
+  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; signalQuality: number }[]>([]);
+  const autoStopTimerRef = useRef<number | null>(null);
+  const countdownTimerRef = useRef<number | null>(null);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -135,15 +150,27 @@ export default function VitalMonitoringPage() {
   const startedRef = useRef(false);
   const cameraOnRef = useRef(cameraOn);
   const loadingRef = useRef(loading);
+  const phaseRef = useRef(phase);
   const toggleCameraRef = useRef<(() => void) | null>(null);
-  
+
   useEffect(() => {
     cameraOnRef.current = cameraOn;
   }, [cameraOn]);
-  
+
   useEffect(() => {
     loadingRef.current = loading;
   }, [loading]);
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
+      if (autoStopTimerRef.current) window.clearTimeout(autoStopTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     checkPermission();
@@ -302,27 +329,47 @@ export default function VitalMonitoringPage() {
     const quality = Math.min(redPI, greenPI, bluePI);
     setSignalQuality(quality);
     
+    const sessionStart = sessionStartRef.current;
+    const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
+    const measuring = phase === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
+
     if (quality > 0.3) {
       const now = Date.now();
       if (now - lastBpmUpdate.current > 2000) {
         lastBpmUpdate.current = now;
-        
+
+        let hr: number | null = null;
+        let hbVal = 18.2 - 6.8 * (redPI / (greenPI || 1));
+        hbVal = Math.min(Math.max(hbVal, 5), 20);
+        let spo2Val = 110 - 25 * (redPI / (bluePI || 1));
+        spo2Val = Math.min(Math.max(spo2Val, 70), 100);
+        const bpSys = 110 + Math.floor(Math.random() * 20);
+        const bpDia = 70 + Math.floor(Math.random() * 15);
+        const sugarVal = 90 + Math.floor(Math.random() * 30);
+
         if (valuesRef.current.length >= 90) {
-          const hr = computeHeartRate(valuesRef.current);
-          if (hr !== null) {
-            setBpm(Math.min(Math.max(hr, 40), 180));
+          hr = computeHeartRate(valuesRef.current);
+          if (hr !== null) hr = Math.min(Math.max(hr, 40), 180);
+        }
+
+        if (hr !== null) {
+          setBpm(hr);
+          setHb(hbVal);
+          setSpo2(Math.round(spo2Val));
+          setBp(`${bpSys}/${bpDia}`);
+          setSugar(sugarVal);
+
+          if (measuring) {
+            samplesRef.current.push({
+              bpm: hr,
+              spo2: Math.round(spo2Val),
+              hb: hbVal,
+              bpSys,
+              bpDia,
+              sugar: sugarVal,
+              signalQuality: quality,
+            });
           }
-          
-          let hb = 18.2 - 6.8 * (redPI / (greenPI || 1));
-          hb = Math.min(Math.max(hb, 5), 20);
-          setHb(hb);
-          
-          let spo2 = 110 - 25 * (redPI / (bluePI || 1));
-          spo2 = Math.min(Math.max(spo2, 70), 100);
-          setSpo2(Math.round(spo2));
-          
-          setBp(`${110 + Math.floor(Math.random() * 20)}/${70 + Math.floor(Math.random() * 15)}`);
-          setSugar(90 + Math.floor(Math.random() * 30));
         }
       }
     } else {
@@ -332,7 +379,7 @@ export default function VitalMonitoringPage() {
 
     drawWaveform();
     animFrame.current = requestAnimationFrame(processFrame);
-  }, [cameraOn, drawWaveform]);
+  }, [cameraOn, drawWaveform, phase]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -355,11 +402,76 @@ export default function VitalMonitoringPage() {
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
+  const finalizeSession = useCallback(() => {
+    const samples = samplesRef.current;
+    if (samples.length > 0) {
+      const avg = (key: keyof typeof samples[number]) =>
+        samples.reduce((a, s) => a + (s[key] as number), 0) / samples.length;
+      const bpSysAvg = Math.round(avg("bpSys"));
+      const bpDiaAvg = Math.round(avg("bpDia"));
+      setFinalReading({
+        bpm: avg("bpm"),
+        spo2: Math.round(avg("spo2")),
+        hb: avg("hb"),
+        bpSys: bpSysAvg,
+        bpDia: bpDiaAvg,
+        sugar: Math.round(avg("sugar")),
+        signalQuality: avg("signalQuality"),
+      });
+    } else {
+      setFinalReading({
+        bpm: bpm ?? 0,
+        spo2: spo2 ?? 0,
+        hb: hb ?? 0,
+        bpSys: 0,
+        bpDia: 0,
+        sugar: sugar ?? 0,
+        signalQuality: signalQuality ?? 0,
+      });
+    }
+    setPhase("finalized");
+    setCountdown(0);
+    stopStream();
+    setCameraOn(false);
+  }, [bpm, hb, spo2, sugar, signalQuality, stopStream]);
+
+  const startAutoCountdown = useCallback(() => {
+    sessionStartRef.current = Date.now();
+    samplesRef.current = [];
+    setFinalReading(null);
+    setPhase("warming");
+    setCountdown(70);
+    if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
+    countdownTimerRef.current = window.setInterval(() => {
+      const elapsed = Date.now() - sessionStartRef.current;
+      const remaining = Math.max(0, 70 - Math.floor(elapsed / 1000));
+      setCountdown(remaining);
+      if (elapsed >= 10000 && phaseRef.current === "warming") {
+        setPhase("measuring");
+      }
+      if (remaining <= 0) {
+        if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+        finalizeSession();
+      }
+    }, 250);
+  }, [finalizeSession]);
+
   const toggleCamera = useCallback(async () => {
     if (cameraOn) {
+      if (countdownTimerRef.current) {
+        window.clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+      if (autoStopTimerRef.current) {
+        window.clearTimeout(autoStopTimerRef.current);
+        autoStopTimerRef.current = null;
+      }
       stopStream();
       setCameraOn(false);
       setError(null);
+      setPhase("idle");
+      setCountdown(0);
       return;
     }
     setLoading(true);
@@ -373,13 +485,13 @@ export default function VitalMonitoringPage() {
     try {
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
             facingMode: "user",
             width: { ideal: 640 },
             height: { ideal: 480 }
-          }, 
-          audio: false 
+          },
+          audio: false
         });
       } catch {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
@@ -391,13 +503,14 @@ export default function VitalMonitoringPage() {
       }
       setCameraOn(true);
       setError(null);
+      startAutoCountdown();
     } catch (e: unknown) {
       setError(getErrorMessage(e));
       setCameraOn(false);
     } finally {
       setLoading(false);
     }
-  }, [cameraOn, stopStream]);
+  }, [cameraOn, stopStream, startAutoCountdown]);
 
   toggleCameraRef.current = toggleCamera;
 
@@ -420,7 +533,19 @@ export default function VitalMonitoringPage() {
         </div>
         <div className="p-4 flex items-center justify-between gap-4">
           <div className="flex-1 min-w-0">
-            <span className="block text-sm text-neutral-300 truncate">{loading ? "Starting camera..." : cameraOn ? "Camera active" : "Ready"}</span>
+            <span className="block text-sm text-neutral-300 truncate">
+              {phase === "warming" && countdown > 0
+                ? `Warming up — discarding first 10s (${countdown}s total remaining)`
+                : phase === "measuring"
+                ? `Measuring — averaging next 60s (${countdown}s remaining)`
+                : phase === "finalized"
+                ? "Measurement complete — final reading below"
+                : loading
+                ? "Starting camera..."
+                : cameraOn
+                ? "Camera active"
+                : "Ready"}
+            </span>
             {error && (
               <div className="mt-2 p-3 rounded-lg bg-red-950/60 border border-red-900/40">
                 <p className="text-xs text-red-300 font-medium">{error}</p>
@@ -459,6 +584,75 @@ export default function VitalMonitoringPage() {
               <p className="text-neutral-400 mb-1">Glucose</p>
               <p className="text-xl font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
             </div>
+          </div>
+        )}
+        {phase === "finalized" && finalReading && (
+          <div className="px-4 pb-4">
+            <div className="rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-base font-bold text-emerald-300">Final Reading (70s avg)</h2>
+                <span className="text-[10px] text-emerald-200/80">avg of 60s after 10s warm-up</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+                  <p className="text-neutral-400 mb-1">BPM</p>
+                  <p className="text-2xl font-bold text-red-400">{finalReading.bpm.toFixed(1)}</p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+                  <p className="text-neutral-400 mb-1">SpO₂</p>
+                  <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2}%</p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+                  <p className="text-neutral-400 mb-1">Hb</p>
+                  <p className="text-2xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+                  <p className="text-neutral-400 mb-1">BP</p>
+                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys}/{finalReading.bpDia}</p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+                  <p className="text-neutral-400 mb-1">Glucose</p>
+                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar} mg/dL</p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+                  <p className="text-neutral-400 mb-1">Signal</p>
+                  <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setPhase("idle");
+                  setFinalReading(null);
+                  setCountdown(0);
+                  setSpo2(null);
+                  setHb(null);
+                  setBpm(null);
+                  setBp(null);
+                  setSugar(null);
+                  setSignalQuality(null);
+                }}
+                className="mt-4 w-full px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 transition"
+              >
+                Start New Measurement
+              </button>
+            </div>
+          </div>
+        )}
+        {(cameraOn || phase === "warming" || phase === "measuring") && (
+          <div className="px-4 pb-3">
+            <div className="h-2 w-full bg-neutral-800 rounded-full overflow-hidden border border-neutral-700">
+              <div
+                className="h-full bg-red-600 transition-all duration-300"
+                style={{
+                  width: phase === "finalized" ? "100%" : phase === "measuring" ? `${Math.min(100, ((70 - countdown) / 70) * 100)}%` : phase === "warming" ? `${Math.min(100, ((70 - countdown) / 70) * 100)}%` : "0%",
+                }}
+              />
+            </div>
+            <p className="mt-1 text-[10px] text-neutral-500 text-center">
+              {phase === "warming" && `Warm-up — discarding first 10s (${countdown}s)`}
+              {phase === "measuring" && `Measuring — averaging next 60s (${countdown}s left)`}
+              {phase === "finalized" && "Done"}
+            </p>
           </div>
         )}
         <div className="px-4 pb-3">
