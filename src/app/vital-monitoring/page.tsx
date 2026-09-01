@@ -51,8 +51,8 @@ function bandpassFilter(signal: number[], low: number, high: number, fs: number)
   const n = signal.length;
   if (n < 10) return signal.slice();
   const result: number[] = new Array(n);
-  const tauH = 1 / (2 * Math.PI * high);
-  const tauL = 1 / (2 * Math.PI * low);
+  const tauH = 1 / (2 * Math.PI * low);
+  const tauL = 1 / (2 * Math.PI * high);
   const alphaH = tauH / (tauH + 1 / fs);
   const alphaL = tauL / (tauL + 1 / fs);
   let hp = signal[0];

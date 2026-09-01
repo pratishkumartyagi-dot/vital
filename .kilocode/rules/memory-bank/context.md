@@ -27,6 +27,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] **Removed dead code** from `page.tsx`: old `computeHeartRate` and `bandpassFilter` functions replaced by the dedicated `ppg-analysis.ts` module.
 - [x] **Bugfix (SpO2)**: replaced frame-average perfusion-index ratio with proper AC/DC ratio from bandpass-filtered red/blue PPG buffers (`computeAcDc`) for clinically meaningful SpO2.
 - [x] **Bugfix (all-zero readings)**: `ppg-analysis.ts` `bandpass()` was a bandstop (notch) rejecting the 0.7–3.5 Hz HR band; rewrote as proper Butterworth bandpass (HP→LP cascade). Peak detection now uses 2nd-order butterBandpass with percentile-based adaptive threshold (20% above 10th-percentile baseline).
+- [x] **Bugfix (all-zero readings recurrence)**: The "fixed" bandpass in commit `5cd9aa5` had HP and LP time constants swapped (`tauH` used `high` for HP cutoff, `tauL` used `low` for LP cutoff), creating a bandpass with NO passband (HP at 3.5 Hz removes all signal below 3.5 Hz including heart rate, LP at 0.7 Hz then removes everything above 0.7 Hz). Swapped so HP cutoff uses `low` (0.7 Hz) and LP cutoff uses `high` (3.5 Hz), correctly passing 0.7-3.5 Hz. Fixed in both `ppg-analysis.ts` (`bandpass`) and `page.tsx` (`bandpassFilter`).
 - [x] **Bugfix (warm-up leak)**: `ppgBufferRef` was filled during warm-up phase, contaminating the signal buffer used for HR/HRV analysis. Now `ppgBufferRef` only fills during `phase === "measuring"` (checked via `phaseRef.current`).
 - [x] **Bugfix (ppgBuffer cap)**: `ppgBufferRef` was capped at `70*35=2450` frames but color buffers were capped at 180. Now ppgBuffer is also capped at 180.
 - [x] **Bugfix (AC/DC SpO2/Hb)**: SpO2 and Hb were using raw perfusion-index ratios (PI = AC/DC but computed on unfiltered signal). Now use proper AC/DC from bandpass-filtered (0.7–3.5 Hz) buffers: `R = (AC_r/dc_r)/(AC_b/dc_b)` for SpO2, `R = (AC_r/dc_r)/(AC_g/dc_g)` for Hb (18.2–6.8R).
@@ -79,6 +80,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-01 | Added patient intake form (Name, Age, Sex, LMP, Pregnancy) gating the 70s measurement session on `/vital-monitoring` |
 | 2026-09-01 | Added PPG Heart Rate + HRV (heartpy-style) and Respiratory Rate (RRest-style) analysis in browser + Python reference implementation in `training/ppg_analysis.py` |
 | 2026-09-01 | Fixed bandpass filter bug (was bandstop) and peak detection threshold in `ppg-analysis.ts` that caused all-zero readings |
+| 2026-09-01 | Fixed recurring bandpass cutoff swap bug: HP filter must use `low` cutoff (0.7 Hz), LP must use `high` cutoff (3.5 Hz). Previous fix had them swapped, producing an empty passband. Fixed in both `ppg-analysis.ts` and `page.tsx` |
 | 2026-09-01 | Fixed rear-camera fingertip PPG: auto-enable torch on Rear Camera selection, dynamic torch constraint on the live track, center-ROI sampling, relaxed quality gate (0.005), finger-detection badge |
 | 2026-09-01 | Added Demo Mode (synthetic PPG generator) so the 70s measurement session always produces a complete reading, even when no real camera PPG is available (no finger, no face, no torch support) |
 
