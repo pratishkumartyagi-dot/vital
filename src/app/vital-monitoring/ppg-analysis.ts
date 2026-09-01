@@ -55,28 +55,20 @@ function detrend(signal: number[]): number[] {
   return signal.map((y, i) => y - (slope * i + intercept));
 }
 
-function bandpass(signal: number[], low: number, high: number, fs: number): number[] {
+export function bandpass(signal: number[], low: number, high: number, fs: number): number[] {
   const n = signal.length;
   if (n < 10) return signal.slice();
-  const result: number[] = new Array(n).fill(0);
+  const result: number[] = new Array(n);
   const tauH = 1 / (2 * Math.PI * high);
   const tauL = 1 / (2 * Math.PI * low);
   const alphaH = tauH / (tauH + 1 / fs);
   const alphaL = tauL / (tauL + 1 / fs);
-  let prevH: number[] = new Array(n).fill(0);
-  let prevL: number[] = new Array(n).fill(0);
+  let hp = signal[0];
+  let lp = signal[0];
   for (let i = 0; i < n; i++) {
-    prevH[i] = signal[i];
-    prevL[i] = signal[i];
-  }
-  for (let i = 1; i < n; i++) {
-    prevH[i] = alphaH * prevH[i] + (1 - alphaH) * prevH[i - 1];
-  }
-  for (let i = 1; i < n; i++) {
-    prevL[i] = alphaL * prevL[i] + (1 - alphaL) * prevL[i - 1];
-  }
-  for (let i = 0; i < n; i++) {
-    result[i] = prevH[i] - prevL[i];
+    hp = alphaH * (hp + signal[i] - (i > 0 ? signal[i - 1] : signal[0]));
+    lp = alphaL * lp + (1 - alphaL) * hp;
+    result[i] = lp;
   }
   return result;
 }
@@ -88,14 +80,15 @@ function butterBandpass(signal: number[], low: number, high: number, fs: number,
 }
 
 function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): { peaks: Peak[]; filtered: number[] } {
-  const detrended = detrend(signal);
-  const filtered = bandpass(detrended, 0.7, 3.5, fs);
+  const filtered = butterBandpass(detrend(signal), 0.7, 3.5, fs, 2);
   const peaks: Peak[] = [];
   const minDist = Math.max(1, Math.floor((60 / maxBpm) * fs));
-  const fMin = Math.min(...filtered);
-  const fMax = Math.max(...filtered);
-  const fRange = fMax - fMin || 1;
-  const minHeight = fMin + 0.15 * fRange;
+  const sorted = filtered.slice().sort((a, b) => a - b);
+  const loIdx = Math.floor(sorted.length * 0.10);
+  const hiIdx = Math.floor(sorted.length * 0.90);
+  const baseline = sorted[loIdx];
+  const peakCeil = sorted[hiIdx];
+  const minHeight = baseline + 0.20 * (peakCeil - baseline);
   for (let i = 1; i < filtered.length - 1; i++) {
     if (filtered[i] > filtered[i - 1] && filtered[i] > filtered[i + 1]) {
       if (filtered[i] > minHeight) {

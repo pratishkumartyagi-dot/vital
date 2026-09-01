@@ -30,6 +30,35 @@ function computePerfusionIndex(signal: number[]): number {
   return dc > 0 ? (ac / dc) * 100 : 0;
 }
 
+function bandpassFilter(signal: number[], low: number, high: number, fs: number): number[] {
+  const n = signal.length;
+  if (n < 10) return signal.slice();
+  const result: number[] = new Array(n);
+  const tauH = 1 / (2 * Math.PI * high);
+  const tauL = 1 / (2 * Math.PI * low);
+  const alphaH = tauH / (tauH + 1 / fs);
+  const alphaL = tauL / (tauL + 1 / fs);
+  let hp = signal[0];
+  let lp = signal[0];
+  for (let i = 0; i < n; i++) {
+    hp = alphaH * (hp + signal[i] - (i > 0 ? signal[i - 1] : signal[0]));
+    lp = alphaL * lp + (1 - alphaL) * hp;
+    result[i] = lp;
+  }
+  return result;
+}
+
+function computeAcDc(signal: number[], fs: number): { ac: number; dc: number } {
+  if (signal.length < fs * 3) return { ac: 0, dc: signal.reduce((a, b) => a + b, 0) / (signal.length || 1) };
+  const bp = bandpassFilter(signal, 0.7, 3.5, fs);
+  const meanBp = bp.reduce((a, b) => a + b, 0) / bp.length;
+  let ac = 0;
+  for (const v of bp) ac += Math.abs(v - meanBp);
+  ac /= bp.length;
+  const dc = signal.reduce((a, b) => a + b, 0) / (signal.length || 1);
+  return { ac, dc };
+}
+
 export default function VitalMonitoringPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -283,8 +312,10 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
-    ppgBufferRef.current.push(avgG);
-    if (ppgBufferRef.current.length > 70 * 35) ppgBufferRef.current.shift();
+    if (phaseRef.current === "measuring") {
+      ppgBufferRef.current.push(avgG);
+      if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
+    }
 
     valuesRef.current.push(avgR);
     if (valuesRef.current.length > 180) valuesRef.current.shift();
@@ -303,7 +334,7 @@ export default function VitalMonitoringPage() {
 
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
-    const measuring = phase === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
+    const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
 
     if (quality > 0.3) {
       const nowMs = Date.now();
@@ -315,10 +346,15 @@ export default function VitalMonitoringPage() {
         const analysis: VitalAnalysis = analyzeVitals(analysisBuffer, fs);
         const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
 
-        let hbVal = 18.2 - 6.8 * (redPI / (greenPI || 1));
-        hbVal = Math.min(Math.max(hbVal, 5), 20);
-        let spo2Val = 110 - 25 * (redPI / (bluePI || 1));
+        const { ac: acR, dc: dcR } = computeAcDc(redRef.current, fs);
+        const { ac: acG, dc: dcG } = computeAcDc(greenRef.current, fs);
+        const { ac: acB, dc: dcB } = computeAcDc(blueRef.current, fs);
+        const Rratio = dcR > 0 && dcB > 0 ? (acR / dcR) / (acB / dcB) : 1;
+        let spo2Val = 110 - 25 * Rratio;
         spo2Val = Math.min(Math.max(spo2Val, 70), 100);
+        const HbRatio = dcR > 0 && dcG > 0 ? (acR / dcR) / (acG / dcG) : 0;
+        let hbVal = 18.2 - 6.8 * HbRatio;
+        hbVal = Math.min(Math.max(hbVal, 5), 20);
         const bpSys = 110 + Math.floor(Math.random() * 20);
         const bpDia = 70 + Math.floor(Math.random() * 15);
         const sugarVal = 90 + Math.floor(Math.random() * 30);
@@ -337,7 +373,7 @@ export default function VitalMonitoringPage() {
           }
           setRhythm(analysis.rhythm);
 
-          if (measuring) {
+          if (isMeasuring) {
             samplesRef.current.push({
               bpm: hr,
               spo2: Math.round(spo2Val),
@@ -362,7 +398,7 @@ export default function VitalMonitoringPage() {
 
     drawWaveform();
     animFrame.current = requestAnimationFrame(processFrame);
-  }, [cameraOn, drawWaveform, phase]);
+  }, [cameraOn, drawWaveform]);
 
   useEffect(() => {
     if (cameraOn) {
