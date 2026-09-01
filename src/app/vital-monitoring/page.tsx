@@ -315,7 +315,7 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
-    ppgBufferRef.current.push(avgR);
+    ppgBufferRef.current.push(avgG);
     if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
 
     valuesRef.current.push(avgR);
