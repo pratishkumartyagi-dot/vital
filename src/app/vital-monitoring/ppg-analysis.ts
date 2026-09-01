@@ -88,7 +88,8 @@ function butterBandpass(signal: number[], low: number, high: number, fs: number,
 }
 
 function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): { peaks: Peak[]; filtered: number[] } {
-  const filtered = butterBandpass(detrend(signal), 0.7, 3.5, fs, 2);
+  const detrended = detrend(signal);
+  const filtered = bandpass(detrended, 0.7, 3.5, fs);
   const peaks: Peak[] = [];
   const minDist = Math.max(1, Math.floor((60 / maxBpm) * fs));
   const fMin = Math.min(...filtered);
