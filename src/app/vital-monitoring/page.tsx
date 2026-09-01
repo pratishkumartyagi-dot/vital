@@ -67,6 +67,9 @@ export default function VitalMonitoringPage() {
   const [loading, setLoading] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
   const [permission, setPermission] = useState<string>("unknown");
+  const [cameraMode, setCameraMode] = useState<"front" | "rear">("front");
+  const [torchOn, setTorchOn] = useState(false);
+  const [spo2Offset, setSpo2Offset] = useState(0);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
   const [bp, setBp] = useState<string | null>(null);
@@ -348,7 +351,7 @@ export default function VitalMonitoringPage() {
         const { ac: acG, dc: dcG } = computeAcDc(greenRef.current, fs);
         const { ac: acB, dc: dcB } = computeAcDc(blueRef.current, fs);
         const Rratio = dcR > 0 && dcB > 0 ? (acR / dcR) / (acB / dcB) : 1;
-        let spo2Val = 110 - 25 * Rratio;
+        let spo2Val = 110 - 25 * Rratio + spo2Offset;
         spo2Val = Math.min(Math.max(spo2Val, 70), 100);
         const HbRatio = dcR > 0 && dcG > 0 ? (acR / dcR) / (acG / dcG) : 0;
         let hbVal = 18.2 - 6.8 * HbRatio;
@@ -399,7 +402,7 @@ export default function VitalMonitoringPage() {
 
     drawWaveform();
     animFrame.current = requestAnimationFrame(processFrame);
-  }, [cameraOn, drawWaveform]);
+  }, [cameraOn, drawWaveform, spo2Offset]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -531,18 +534,37 @@ export default function VitalMonitoringPage() {
     }
     try {
       let stream: MediaStream;
+      const videoConstraints: MediaTrackConstraints = {
+        width: { ideal: 640 },
+        height: { ideal: 480 }
+      };
+
+      if (cameraMode === "rear") {
+        videoConstraints.facingMode = "environment";
+      } else {
+        videoConstraints.facingMode = "user";
+      }
+
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: "user",
-            width: { ideal: 640 },
-            height: { ideal: 480 }
-          },
+          video: videoConstraints,
           audio: false
         });
       } catch {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       }
+
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack && cameraMode === "rear") {
+        try {
+          await videoTrack.applyConstraints({
+            advanced: [{ torch: torchOn } as any]
+          });
+        } catch {
+          // Torch may not be supported on all devices
+        }
+      }
+
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -557,7 +579,7 @@ export default function VitalMonitoringPage() {
     } finally {
       setLoading(false);
     }
-  }, [cameraOn, stopStream, startAutoCountdown]);
+  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn]);
 
   toggleCameraRef.current = toggleCamera;
 
@@ -749,33 +771,82 @@ export default function VitalMonitoringPage() {
             </div>
           )}
         </div>
-        <div className="p-4 flex items-center justify-between gap-4">
-          <div className="flex-1 min-w-0">
-            <span className="block text-sm text-neutral-300 truncate">
-              {phase === "warming" && countdown > 0
-                ? `Warming up — discarding first 10s (${countdown}s total remaining)`
-                : phase === "measuring"
-                ? `Measuring — averaging next 60s (${countdown}s remaining)`
-                : phase === "finalized"
-                ? "Measurement complete — final reading below"
-                : loading
-                ? "Starting camera..."
-                : cameraOn
-                ? "Camera active"
-                : "Ready"}
-            </span>
-            {error && (
-              <div className="mt-2 p-3 rounded-lg bg-red-950/60 border border-red-900/40">
-                <p className="text-xs text-red-300 font-medium">{error}</p>
-                {(error.includes("denied") || permission === "denied") && (
-                  <p className="text-xs text-red-200/80 mt-2">Tap the lock / site-info icon in your address bar, choose &quot;Camera&quot;, set to &quot;Allow&quot;, then refresh.</p>
-                )}
-              </div>
-            )}
+        <div className="p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <span className="block text-sm text-neutral-300 truncate">
+                {phase === "warming" && countdown > 0
+                  ? `Warming up — discarding first 10s (${countdown}s total remaining)`
+                  : phase === "measuring"
+                  ? `Measuring — averaging next 60s (${countdown}s remaining)`
+                  : phase === "finalized"
+                  ? "Measurement complete — final reading below"
+                  : loading
+                  ? "Starting camera..."
+                  : cameraOn
+                  ? "Camera active"
+                  : "Ready"}
+              </span>
+              {error && (
+                <div className="mt-2 p-3 rounded-lg bg-red-950/60 border border-red-900/40">
+                  <p className="text-xs text-red-300 font-medium">{error}</p>
+                  {(error.includes("denied") || permission === "denied") && (
+                    <p className="text-xs text-red-200/80 mt-2">Tap the lock / site-info icon in your address bar, choose &quot;Camera&quot;, set to &quot;Allow&quot;, then refresh.</p>
+                  )}
+                </div>
+              )}
+            </div>
+            <button onClick={toggleCamera} disabled={loading} className="px-5 py-2.5 rounded-full text-sm font-semibold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-lg shadow-red-900/30 whitespace-nowrap">
+              {loading ? "Starting..." : cameraOn ? "Stop Camera" : "Start Camera"}
+            </button>
           </div>
-          <button onClick={toggleCamera} disabled={loading} className="px-5 py-2.5 rounded-full text-sm font-semibold bg-red-600 hover:bg-red-700 active:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-lg shadow-red-900/30 whitespace-nowrap">
-            {loading ? "Starting..." : cameraOn ? "Stop Camera" : "Start Camera"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCameraMode("front")}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
+                cameraMode === "front"
+                  ? "bg-neutral-700 border-neutral-500 text-neutral-100"
+                  : "bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-500"
+              }`}
+            >
+              Front Camera
+            </button>
+            <button
+              onClick={() => setCameraMode("rear")}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
+                cameraMode === "rear"
+                  ? "bg-neutral-700 border-neutral-500 text-neutral-100"
+                  : "bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-500"
+              }`}
+            >
+              Rear Camera
+            </button>
+            {cameraMode === "rear" && (
+              <button
+                onClick={() => setTorchOn((prev) => !prev)}
+                className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
+                  torchOn
+                    ? "bg-amber-600 border-amber-500 text-neutral-100"
+                    : "bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-500"
+                }`}
+              >
+                {torchOn ? "Flash On" : "Flash Off"}
+              </button>
+            )}
+            <div className="ml-auto flex items-center gap-2">
+              <label className="text-[10px] text-neutral-400">SpO₂ offset</label>
+              <input
+                type="range"
+                min="-10"
+                max="10"
+                step="1"
+                value={spo2Offset}
+                onChange={(e) => setSpo2Offset(Number(e.target.value))}
+                className="w-24"
+              />
+              <span className="text-[10px] text-neutral-500 w-6">{spo2Offset > 0 ? `+${spo2Offset}` : spo2Offset}</span>
+            </div>
+          </div>
         </div>
         <div className="px-4 pb-4">
           <div className="relative h-32 bg-neutral-950 rounded-lg border border-neutral-800 overflow-hidden">
