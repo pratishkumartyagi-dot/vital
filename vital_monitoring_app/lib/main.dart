@@ -78,6 +78,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _disableTorch();
     _controller?.dispose();
     super.dispose();
   }
@@ -87,9 +88,17 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     if (_controller == null || !_controller!.value.isInitialized) return;
     
     if (state == AppLifecycleState.inactive) {
+      _disableTorch();
       _controller?.dispose();
     } else if (state == AppLifecycleState.resumed) {
-      _initializeCamera();
+      _initializeCamera().then((_) {
+        if (_controller != null && _controller!.value.isInitialized) {
+          final vitalSignController =
+              Provider.of<VitalSignController>(context, listen: false);
+          vitalSignController.enableLiveMode();
+          vitalSignController.attachStreamPipeline(_controller!);
+        }
+      });
     }
   }
 
@@ -104,9 +113,16 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
       return;
     }
 
+    // Prefer rear camera with flash for PPG monitoring
+    final rearCamera = _cameras.firstWhere(
+          (cam) => cam.lensDirection == CameraLensDirection.back,
+          orElse: () => _cameras.first,
+        );
+    final selectedCamera = rearCamera;
+
     try {
       _controller = CameraController(
-        _cameras.first,
+        selectedCamera,
         ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
@@ -136,6 +152,9 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         _isInitialized = true;
       });
 
+      // Enable torch/flash for PPG measurement
+      await _enableTorch();
+
       final vitalSignController =
           Provider.of<VitalSignController>(context, listen: false);
       vitalSignController.enableLiveMode();
@@ -148,6 +167,30 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         });
       }
       debugPrint('Camera initialization error: $e');
+    }
+  }
+
+  Future<void> _enableTorch() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    
+    try {
+      final hasFlash = _controller!.value.flashMode != null;
+      if (hasFlash) {
+        await _controller!.setFlashMode(FlashMode.torch);
+        debugPrint('Torch enabled for PPG measurement');
+      }
+    } catch (e) {
+      debugPrint('Torch not available: $e');
+    }
+  }
+
+  Future<void> _disableTorch() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    
+    try {
+      await _controller!.setFlashMode(FlashMode.off);
+    } catch (e) {
+      debugPrint('Could not disable torch: $e');
     }
   }
 
