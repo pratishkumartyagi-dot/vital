@@ -57,25 +57,28 @@ function detrend(signal: number[]): number[] {
 
 function bandpass(signal: number[], low: number, high: number, fs: number): number[] {
   const n = signal.length;
-  if (n < 4) return signal.slice();
-  const omegaL = (2 * Math.PI * low) / fs;
-  const omegaH = (2 * Math.PI * high) / fs;
-  const dt = 1 / fs;
-  const rcH = 1 / omegaH;
-  const rcL = 1 / omegaL;
-  const alphaH = dt / (rcH + dt);
-  const alphaL = dt / (rcL + dt);
-  const hp = new Array<number>(n);
-  const lp = new Array<number>(n);
-  hp[0] = signal[0];
-  lp[0] = signal[0];
-  for (let i = 1; i < n; i++) {
-    hp[i] = alphaH * signal[i] + (1 - alphaH) * hp[i - 1];
-    lp[i] = alphaL * (lp[i - 1] + signal[i] - signal[i - 1]);
+  if (n < 10) return signal.slice();
+  const result: number[] = new Array(n).fill(0);
+  const tauH = 1 / (2 * Math.PI * high);
+  const tauL = 1 / (2 * Math.PI * low);
+  const alphaH = tauH / (tauH + 1 / fs);
+  const alphaL = tauL / (tauL + 1 / fs);
+  let prevH: number[] = new Array(n).fill(0);
+  let prevL: number[] = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    prevH[i] = signal[i];
+    prevL[i] = signal[i];
   }
-  const out = new Array<number>(n);
-  for (let i = 0; i < n; i++) out[i] = hp[i] - lp[i];
-  return out;
+  for (let i = 1; i < n; i++) {
+    prevH[i] = alphaH * prevH[i] + (1 - alphaH) * prevH[i - 1];
+  }
+  for (let i = 1; i < n; i++) {
+    prevL[i] = alphaL * prevL[i] + (1 - alphaL) * prevL[i - 1];
+  }
+  for (let i = 0; i < n; i++) {
+    result[i] = prevH[i] - prevL[i];
+  }
+  return result;
 }
 
 function butterBandpass(signal: number[], low: number, high: number, fs: number, order = 2): number[] {
@@ -88,7 +91,10 @@ function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): {
   const filtered = butterBandpass(detrend(signal), 0.7, 3.5, fs, 2);
   const peaks: Peak[] = [];
   const minDist = Math.max(1, Math.floor((60 / maxBpm) * fs));
-  const minHeight = 0;
+  const fMin = Math.min(...filtered);
+  const fMax = Math.max(...filtered);
+  const fRange = fMax - fMin || 1;
+  const minHeight = fMin + 0.15 * fRange;
   for (let i = 1; i < filtered.length - 1; i++) {
     if (filtered[i] > filtered[i - 1] && filtered[i] > filtered[i + 1]) {
       if (filtered[i] > minHeight) {
@@ -102,7 +108,6 @@ function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): {
       }
     }
   }
-  void minBpm;
   return { peaks, filtered };
 }
 

@@ -25,6 +25,8 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] **PPG Heart Rate & Respiratory Rate analysis** on `/vital-monitoring` using in-browser TypeScript module `src/app/vital-monitoring/ppg-analysis.ts` that mirrors the algorithms of `fmoessle/heart-rate-monitor` + `paulvagentcom/heartrate_analysis_python` (peak detection, RR-interval HRV with SDNN/RMSSD/pNN50, rhythm regularity classification) and `peterhcharlton/RRest` (autocorrelation + FFT fusion in the 0.1–0.5 Hz respiratory band). Live tile grid now shows Heart Rate, Rhythm, Resp Rate, HRV (SDNN/RMSSD), SpO₂, BP, Hb, Glucose; final reading card has a dedicated Cardiac & Respiratory (PPG-derived) panel.
 - [x] **Python reference implementation** at `training/ppg_analysis.py` using the real `heartpy` and `RRest` libraries for offline validation (with the same fusion fallback if RRest import fails).
 - [x] **Removed dead code** from `page.tsx`: old `computeHeartRate` and `bandpassFilter` functions replaced by the dedicated `ppg-analysis.ts` module.
+- [x] **Bugfix (SpO2)**: replaced frame-average perfusion-index ratio with proper AC/DC ratio from bandpass-filtered red/blue PPG buffers (`computeAcDc`) for clinically meaningful SpO2.
+- [x] **Bugfix (all-zero readings)**: `ppg-analysis.ts` `bandpass()` was a bandstop (notch) rejecting the 0.7–3.5 Hz HR band; rewrote as proper bandpass (lowpass-highcut minus lowpass-lowcut). Lowered peak threshold from 0 to 15% of filtered signal range for noisy webcam PPG.
 
 ## Current Structure
 
@@ -70,6 +72,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-01 | Added 70s timed measurement session (10s warm-up discard + 60s averaging) with final reading card on `/vital-monitoring` |
 | 2026-09-01 | Added patient intake form (Name, Age, Sex, LMP, Pregnancy) gating the 70s measurement session on `/vital-monitoring` |
 | 2026-09-01 | Added PPG Heart Rate + HRV (heartpy-style) and Respiratory Rate (RRest-style) analysis in browser + Python reference implementation in `training/ppg_analysis.py` |
+| 2026-09-01 | Fixed bandpass filter bug (was bandstop) and peak detection threshold in `ppg-analysis.ts` that caused all-zero readings |
 
 ## Technical Specifications
 
