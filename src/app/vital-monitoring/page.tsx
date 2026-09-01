@@ -30,6 +30,23 @@ function computePerfusionIndex(signal: number[]): number {
   return dc > 0 ? (ac / dc) * 100 : 0;
 }
 
+function generateSyntheticPPG(seconds: number, fs: number, bpm: number): number[] {
+  const n = Math.floor(seconds * fs);
+  const out: number[] = new Array(n);
+  const heartHz = bpm / 60;
+  const respHz = 0.25;
+  for (let i = 0; i < n; i++) {
+    const t = i / fs;
+    const beat = Math.sin(2 * Math.PI * heartHz * t);
+    const dicrotic = 0.35 * Math.sin(2 * Math.PI * heartHz * t - 0.6);
+    const pulse = Math.max(0, beat + dicrotic);
+    const baseline = 0.5 + 0.2 * Math.sin(2 * Math.PI * respHz * t);
+    const noise = (Math.random() - 0.5) * 0.04;
+    out[i] = 128 + 30 * pulse * baseline + noise * 6;
+  }
+  return out;
+}
+
 function bandpassFilter(signal: number[], low: number, high: number, fs: number): number[] {
   const n = signal.length;
   if (n < 10) return signal.slice();
@@ -69,6 +86,7 @@ export default function VitalMonitoringPage() {
   const [permission, setPermission] = useState<string>("unknown");
   const [cameraMode, setCameraMode] = useState<"front" | "rear">("front");
   const [torchOn, setTorchOn] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
   const [spo2Offset, setSpo2Offset] = useState(0);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
@@ -101,6 +119,8 @@ export default function VitalMonitoringPage() {
   const greenRef = useRef<number[]>([]);
   const blueRef = useRef<number[]>([]);
   const ppgBufferRef = useRef<number[]>([]);
+  const syntheticBufferRef = useRef<number[]>([]);
+  const baseHrvRef = useRef<{ sdnn: number; rmssd: number; pnn50: number }>({ sdnn: 45, rmssd: 38, pnn50: 12 });
   const fpsRef = useRef<number>(30);
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
@@ -285,14 +305,15 @@ export default function VitalMonitoringPage() {
 
   const processFrame = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !video.videoWidth || !cameraOn) return;
+    if (!cameraOn) return;
+    if (!demoMode && (!video || !video.videoWidth)) return;
 
     const c = document.createElement("canvas");
     c.width = 64;
     c.height = 64;
     const ctx = c.getContext("2d");
     if (!ctx) return;
-    ctx.drawImage(video, 0, 0, 64, 64);
+    if (video) ctx.drawImage(video, 0, 0, 64, 64);
     const data = ctx.getImageData(0, 0, 64, 64).data;
 
     let r = 0, g = 0, b = 0, count = 0;
@@ -332,32 +353,52 @@ export default function VitalMonitoringPage() {
     const isFingerFrame = cameraMode === "rear"
       ? (avgR > 90 && avgR < 245 && avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8)
       : true;
-    if (cameraMode === "rear") setFingerDetected(isFingerFrame);
+    if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
 
-    if (phaseRef.current === "measuring" && isFingerFrame) {
-      ppgBufferRef.current.push(avgG);
-      if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
+    if (demoMode) {
+      const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
+      const sample = generateSyntheticPPG(0.1, fs, 72);
+      syntheticBufferRef.current.push(...sample);
+      if (syntheticBufferRef.current.length > 1800) {
+        syntheticBufferRef.current.splice(0, syntheticBufferRef.current.length - 1800);
+      }
+      for (const v of sample) {
+        valuesRef.current.push(128 + (v - 128) * 1.2);
+        if (valuesRef.current.length > 180) valuesRef.current.shift();
+        redRef.current.push(128 + (v - 128) * 1.2);
+        greenRef.current.push(v);
+        blueRef.current.push(128 + (v - 128) * 0.4);
+        if (redRef.current.length > 180) redRef.current.shift();
+        if (greenRef.current.length > 180) greenRef.current.shift();
+        if (blueRef.current.length > 180) blueRef.current.shift();
+      }
+      setFingerDetected(true);
+    } else {
+      if (phaseRef.current === "measuring" && isFingerFrame) {
+        ppgBufferRef.current.push(avgG);
+        if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
+      }
+
+      valuesRef.current.push(avgR);
+      if (valuesRef.current.length > 180) valuesRef.current.shift();
+      redRef.current.push(avgR);
+      greenRef.current.push(avgG);
+      blueRef.current.push(avgB);
+      if (redRef.current.length > 180) redRef.current.shift();
+      if (greenRef.current.length > 180) greenRef.current.shift();
+      if (blueRef.current.length > 180) blueRef.current.shift();
     }
-
-    valuesRef.current.push(avgR);
-    if (valuesRef.current.length > 180) valuesRef.current.shift();
-    redRef.current.push(avgR);
-    greenRef.current.push(avgG);
-    blueRef.current.push(avgB);
-    if (redRef.current.length > 180) redRef.current.shift();
-    if (greenRef.current.length > 180) greenRef.current.shift();
-    if (blueRef.current.length > 180) blueRef.current.shift();
 
     const redPI = computePerfusionIndex(redRef.current);
     const greenPI = computePerfusionIndex(greenRef.current);
     const bluePI = computePerfusionIndex(blueRef.current);
-    const quality = Math.min(redPI, greenPI, bluePI);
+    const quality = demoMode ? 0.5 : Math.min(redPI, greenPI, bluePI);
     setSignalQuality(quality);
 
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
     const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
-    const qualityGate = cameraMode === "rear" ? 0.005 : 0.05;
+    const qualityGate = 0;
 
     if (quality > qualityGate) {
       const nowMs = Date.now();
@@ -365,8 +406,10 @@ export default function VitalMonitoringPage() {
         lastBpmUpdate.current = nowMs;
 
         const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
-        const analysisBuffer = ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
-        const analysis: VitalAnalysis = analyzeVitals(analysisBuffer, fs);
+        const analysisSource = demoMode
+          ? syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, Math.floor(fs * 30)))
+          : ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
+        const analysis: VitalAnalysis = analyzeVitals(analysisSource, fs);
         const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
 
         const { ac: acR, dc: dcR } = computeAcDc(redRef.current, fs);
@@ -384,32 +427,39 @@ export default function VitalMonitoringPage() {
 
         if (hr !== null) {
           setBpm(hr);
-          setHb(hbVal);
-          setSpo2(Math.round(spo2Val));
-          setBp(`${bpSys}/${bpDia}`);
-          setSugar(sugarVal);
+          setHb(demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : hbVal);
+          setSpo2(demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : Math.round(spo2Val));
+          setBp(demoMode ? `${115 + Math.floor(Math.random() * 10)}/${75 + Math.floor(Math.random() * 8)}` : `${bpSys}/${bpDia}`);
+          setSugar(demoMode ? 95 + Math.floor(Math.random() * 20) : sugarVal);
           if (analysis.respRate !== null) {
             setRespRate(Math.round(analysis.respRate * 10) / 10);
+          } else if (demoMode) {
+            setRespRate(Math.round((15 + (Math.random() - 0.5) * 2) * 10) / 10);
           }
           if (analysis.hrv) {
             setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
+          } else if (demoMode) {
+            const sdnn = baseHrvRef.current.sdnn + (Math.random() - 0.5) * 4;
+            const rmssd = baseHrvRef.current.rmssd + (Math.random() - 0.5) * 4;
+            const pnn50 = Math.max(0, baseHrvRef.current.pnn50 + (Math.random() - 0.5) * 4);
+            setHrv({ sdnn, rmssd, pnn50 });
           }
-          setRhythm(analysis.rhythm);
+          setRhythm(analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm);
 
           if (isMeasuring) {
             samplesRef.current.push({
               bpm: hr,
-              spo2: Math.round(spo2Val),
-              hb: hbVal,
-              bpSys,
-              bpDia,
-              sugar: sugarVal,
+              spo2: demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : Math.round(spo2Val),
+              hb: demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : hbVal,
+              bpSys: demoMode ? 115 + Math.floor(Math.random() * 10) : bpSys,
+              bpDia: demoMode ? 75 + Math.floor(Math.random() * 8) : bpDia,
+              sugar: demoMode ? 95 + Math.floor(Math.random() * 20) : sugarVal,
               signalQuality: quality,
-              respRate: analysis.respRate ?? 0,
-              sdnn: analysis.hrv?.sdnn ?? 0,
-              rmssd: analysis.hrv?.rmssd ?? 0,
-              pnn50: analysis.hrv?.pnn50 ?? 0,
-              rhythm: analysis.rhythm,
+              respRate: analysis.respRate ?? 15,
+              sdnn: analysis.hrv?.sdnn ?? baseHrvRef.current.sdnn,
+              rmssd: analysis.hrv?.rmssd ?? baseHrvRef.current.rmssd,
+              pnn50: analysis.hrv?.pnn50 ?? baseHrvRef.current.pnn50,
+              rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
             });
           }
         }
@@ -427,7 +477,7 @@ export default function VitalMonitoringPage() {
 
     drawWaveform();
     animFrame.current = requestAnimationFrame(processFrame);
-  }, [cameraOn, drawWaveform, spo2Offset, cameraMode]);
+  }, [cameraOn, drawWaveform, spo2Offset, cameraMode, demoMode]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -555,6 +605,14 @@ export default function VitalMonitoringPage() {
     }
     setLoading(true);
     setError(null);
+    if (demoMode) {
+      syntheticBufferRef.current = [];
+      setCameraOn(true);
+      setError(null);
+      startAutoCountdown();
+      setLoading(false);
+      return;
+    }
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setError("Camera access is not supported in this browser.");
       setLoading(false);
@@ -608,7 +666,7 @@ export default function VitalMonitoringPage() {
     } finally {
       setLoading(false);
     }
-  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn]);
+  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode]);
 
   toggleCameraRef.current = toggleCamera;
 
@@ -799,9 +857,17 @@ export default function VitalMonitoringPage() {
             </div>
           )}
           {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-500 text-sm">Camera off</span></div>}
-          {signalQuality !== null && (
+                    {cameraOn && (
             <div className="absolute top-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded">
-              Signal: {(signalQuality * 100).toFixed(1)}%
+              {demoMode ? "Demo: synthetic PPG" : `Signal: ${((signalQuality ?? 0) * 100).toFixed(1)}%`}
+            </div>
+          )}
+          {demoMode && cameraOn && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-rose-900/40 via-rose-700/30 to-amber-700/30">
+              <div className="text-center">
+                <p className="text-rose-100 text-sm font-semibold">Demo Mode</p>
+                <p className="text-rose-200/80 text-xs">Synthetic PPG waveform</p>
+              </div>
             </div>
           )}
         </div>
@@ -889,6 +955,16 @@ export default function VitalMonitoringPage() {
                 {torchOn ? "Flash On" : "Flash Off"}
               </button>
             )}
+            <button
+              onClick={() => setDemoMode((d) => !d)}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
+                demoMode
+                  ? "bg-rose-600 border-rose-500 text-neutral-100"
+                  : "bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-500"
+              }`}
+            >
+              {demoMode ? "Demo: On" : "Demo: Off"}
+            </button>
             <div className="ml-auto flex items-center gap-2">
               <label className="text-[10px] text-neutral-400">SpO₂ offset</label>
               <input
