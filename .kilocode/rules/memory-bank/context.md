@@ -31,6 +31,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] **Bugfix (ppgBuffer cap)**: `ppgBufferRef` was capped at `70*35=2450` frames but color buffers were capped at 180. Now ppgBuffer is also capped at 180.
 - [x] **Bugfix (AC/DC SpO2/Hb)**: SpO2 and Hb were using raw perfusion-index ratios (PI = AC/DC but computed on unfiltered signal). Now use proper AC/DC from bandpass-filtered (0.7–3.5 Hz) buffers: `R = (AC_r/dc_r)/(AC_b/dc_b)` for SpO2, `R = (AC_r/dc_r)/(AC_g/dc_g)` for Hb (18.2–6.8R).
 - [x] **Bugfix (stale measuring gate)**: `processFrame` used `measuring` from stale `phase` in callback closure. Replaced with `isMeasuring` using `phaseRef.current`. Removed stale `phase` from `useCallback` dependency array.
+- [x] **Bugfix (rear-camera fingertip PPG all-zero readings)**: torch defaulted to OFF so fingertip PPG had no illumination; torch toggle only re-applied on next `toggleCamera`. Sampling averaged the entire 64x64 frame so a well-covered fingertip produced no AC. The perfusion-index quality gate (0.05) was too strict for fingertip mode. Fixes: (1) selecting Rear Camera auto-enables `torchOn`; (2) Flash button now calls `track.applyConstraints({advanced:[{torch}]})` on the live track, with `getCapabilities()` check and a graceful error if the device/browser doesn't expose torch; (3) `processFrame` samples a centered 20×20 ROI in rear mode (where the finger fills the frame) and the full frame in front mode (face rPPG); (4) quality gate relaxed to 0.005 in rear mode; (5) added "Finger detected / Place fingertip over lens" badge based on red-dominance heuristic; (6) `ppgBufferRef` only fills when `phaseRef.current === "measuring"` AND a finger-like frame is detected, so warm-up frames and non-finger frames no longer contaminate the analysis buffer.
 
 ## Current Structure
 
@@ -77,6 +78,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-01 | Added patient intake form (Name, Age, Sex, LMP, Pregnancy) gating the 70s measurement session on `/vital-monitoring` |
 | 2026-09-01 | Added PPG Heart Rate + HRV (heartpy-style) and Respiratory Rate (RRest-style) analysis in browser + Python reference implementation in `training/ppg_analysis.py` |
 | 2026-09-01 | Fixed bandpass filter bug (was bandstop) and peak detection threshold in `ppg-analysis.ts` that caused all-zero readings |
+| 2026-09-01 | Fixed rear-camera fingertip PPG: auto-enable torch on Rear Camera selection, dynamic torch constraint on the live track, center-ROI sampling, relaxed quality gate (0.005), finger-detection badge |
 
 ## Technical Specifications
 
