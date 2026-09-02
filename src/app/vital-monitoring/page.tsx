@@ -376,7 +376,7 @@ export default function VitalMonitoringPage() {
     } else {
       if (phaseRef.current === "measuring" && isFingerFrame) {
         ppgBufferRef.current.push(avgG);
-        if (ppgBufferRef.current.length > 180) ppgBufferRef.current.shift();
+        if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
       }
 
       valuesRef.current.push(avgR);
