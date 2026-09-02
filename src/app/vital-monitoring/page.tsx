@@ -531,7 +531,45 @@ export default function VitalMonitoringPage() {
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
-  const finalizeSession = useCallback(() => {
+  const startVideoRecording = useCallback((stream: MediaStream) => {
+    videoChunksRef.current = [];
+    try {
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+      mediaRecorderRef.current = recorder;
+      recordingRef.current = true;
+      
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          videoChunksRef.current.push(event.data);
+        }
+      };
+      
+      recorder.start(1000); // Collect data every second
+    } catch (e) {
+      console.warn("Video recording not supported:", e);
+    }
+  }, []);
+
+  const stopVideoRecording = useCallback((): Promise<Blob | null> => {
+    return new Promise((resolve) => {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === "inactive") {
+        resolve(null);
+        return;
+      }
+      
+      recorder.onstop = () => {
+        const blob = new Blob(videoChunksRef.current, { type: "video/webm" });
+        videoChunksRef.current = [];
+        recordingRef.current = false;
+        resolve(blob);
+      };
+      
+      recorder.stop();
+    });
+  }, []);
+
+  const finalizeSession = useCallback(async () => {
     const samples = samplesRef.current;
     const avg = (key: keyof typeof samples[number]) =>
       samples.length > 0 ? samples.reduce((a, s) => a + (s[key] as number), 0) / samples.length : 0;
@@ -578,12 +616,43 @@ export default function VitalMonitoringPage() {
         sdnn: hrv?.sdnn ?? 0,
         rmssd: hrv?.rmssd ?? 0,
         pnn50: hrv?.pnn50 ?? 0,
-        rhythm: rhythm,
+        rhythm: (rhythm as "regular" | "irregular" | "unknown"),
       });
     }
+    
+    const videoBlob = await stopVideoRecording();
+    stopStream();
+    setCameraOn(false);
     setPhase("finalized");
     setCountdown(0);
-  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm]);
+    
+    if (videoBlob && patient && finalReading) {
+      addVitalReading({
+        patient: {
+          name: patient.name,
+          age: patient.age,
+          sex: patient.sex as "male" | "female",
+          lmp: patient.lmp,
+          pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
+        },
+        vitals: {
+          bpm: finalReading.bpm,
+          spo2: finalReading.spo2,
+          hb: finalReading.hb,
+          bpSys: finalReading.bpSys,
+          bpDia: finalReading.bpDia,
+          sugar: finalReading.sugar,
+          signalQuality: finalReading.signalQuality,
+          respRate: finalReading.respRate,
+          sdnn: finalReading.sdnn,
+          rmssd: finalReading.rmssd,
+          pnn50: finalReading.pnn50,
+          rhythm: finalReading.rhythm as "regular" | "irregular" | "unknown",
+        },
+      }, videoBlob);
+      setReadingCount(getReadingCount());
+    }
+  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, finalReading]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -608,44 +677,6 @@ export default function VitalMonitoringPage() {
     }, 250);
   }, [finalizeSession]);
 
-  const startVideoRecording = useCallback((stream: MediaStream) => {
-    videoChunksRef.current = [];
-    try {
-      const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-      mediaRecorderRef.current = recorder;
-      recordingRef.current = true;
-      
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          videoChunksRef.current.push(event.data);
-        }
-      };
-      
-      recorder.start(1000); // Collect data every second
-    } catch (e) {
-      console.warn("Video recording not supported:", e);
-    }
-  }, []);
-
-  const stopVideoRecording = useCallback((): Promise<Blob | null> => {
-    return new Promise((resolve) => {
-      const recorder = mediaRecorderRef.current;
-      if (!recorder || recorder.state === "inactive") {
-        resolve(null);
-        return;
-      }
-      
-      recorder.onstop = () => {
-        const blob = new Blob(videoChunksRef.current, { type: "video/webm" });
-        videoChunksRef.current = [];
-        recordingRef.current = false;
-        resolve(blob);
-      };
-      
-      recorder.stop();
-    });
-  }, []);
-
   const toggleCamera = useCallback(async () => {
     if (cameraOn) {
       if (countdownTimerRef.current) {
@@ -657,40 +688,12 @@ export default function VitalMonitoringPage() {
         autoStopTimerRef.current = null;
       }
       
-      const videoBlob = await stopVideoRecording();
+      await stopVideoRecording();
       stopStream();
       setCameraOn(false);
       setError(null);
       setPhase("idle");
       setCountdown(0);
-      
-      if (videoBlob && phaseRef.current === "finalized" && finalReading && patient) {
-        addVitalReading({
-          patient: {
-            name: patient.name,
-            age: patient.age,
-            sex: patient.sex as "male" | "female",
-            lmp: patient.lmp,
-            pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
-          },
-          vitals: {
-            bpm: finalReading.bpm,
-            spo2: finalReading.spo2,
-            hb: finalReading.hb,
-            bpSys: finalReading.bpSys,
-            bpDia: finalReading.bpDia,
-            sugar: finalReading.sugar,
-            signalQuality: finalReading.signalQuality,
-            respRate: finalReading.respRate,
-            sdnn: finalReading.sdnn,
-            rmssd: finalReading.rmssd,
-            pnn50: finalReading.pnn50,
-            rhythm: finalReading.rhythm as "regular" | "irregular" | "unknown",
-          },
-        }, videoBlob);
-        setReadingCount(getReadingCount());
-      }
-      
       return;
     }
     setLoading(true);
@@ -760,7 +763,7 @@ export default function VitalMonitoringPage() {
     } finally {
       setLoading(false);
     }
-  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode, stopVideoRecording, finalReading, patient, startVideoRecording]);
+  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode, stopVideoRecording, startVideoRecording]);
 
   toggleCameraRef.current = toggleCamera;
 
