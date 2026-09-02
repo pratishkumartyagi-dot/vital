@@ -953,14 +953,65 @@ export default function VitalMonitoringPage() {
         <span className="text-neutral-500 mr-2">Patient:</span>
         <span className="font-semibold text-neutral-100">{patient.name}</span>
         <span className="text-neutral-500"> • {patient.age}y • {patient.sex === "female" ? "Female" : "Male"}</span>
-        {patient.sex === "female" && (
+{patient.sex === "female" && (
           <span className="text-neutral-500"> • LMP {patient.lmp} • {patient.pregnancy === "pregnant" ? "Pregnant" : "Non-pregnant"}</span>
         )}
       </div>
       <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
         MCD-rPPG powered remote photoplethysmography. Front camera: position your face in good lighting. Rear camera + flash: cover the lens with your fingertip.
       </p>
-
+      {phase === "finalized" && finalReading && (
+        <div className="w-full max-w-lg mb-6 p-4 rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 animate-fade-in">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-bold text-emerald-300">Measurement Complete</h2>
+            <span className="text-xs text-emerald-200/80">70s session • 60s averaged after 10s warm-up</span>
+          </div>
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 text-center">
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">Heart Rate</p>
+              <p className="text-2xl font-bold text-red-400">{finalReading.bpm.toFixed(1)} BPM</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">SpO₂</p>
+              <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2}%</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">Resp Rate</p>
+              <p className="text-xl font-bold text-sky-400">{finalReading.respRate > 0 ? finalReading.respRate.toFixed(1) : "—"} /min</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">HRV SDNN</p>
+              <p className="text-xl font-bold text-violet-400">{finalReading.sdnn > 0 ? finalReading.sdnn.toFixed(1) : "—"} ms</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">BP</p>
+              <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys}/{finalReading.bpDia}</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">Glucose</p>
+              <p className="text-xl font-bold text-amber-400">{finalReading.sugar} mg/dL</p>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2 justify-center text-xs">
+            <span className={`px-2 py-1 rounded-full border ${
+              finalReading.rhythm === "regular" ? "text-emerald-400 border-emerald-500 bg-emerald-500/10" :
+              finalReading.rhythm === "irregular" ? "text-amber-400 border-amber-500 bg-amber-500/10" :
+              "text-neutral-500 border-neutral-500 bg-neutral-500/10"
+            }`}>
+              Rhythm: {finalReading.rhythm}
+            </span>
+            <span className="px-2 py-1 rounded-full border text-violet-400 border-violet-500 bg-violet-500/10">
+              RMSSD: {finalReading.rmssd > 0 ? finalReading.rmssd.toFixed(1) : "—"} ms
+            </span>
+            <span className="px-2 py-1 rounded-full border text-rose-400 border-rose-500 bg-rose-500/10">
+              Hb: {finalReading.hb.toFixed(1)} g/dL
+            </span>
+            <span className="px-2 py-1 rounded-full border text-violet-400 border-violet-500 bg-violet-500/10">
+              Signal: {(finalReading.signalQuality * 100).toFixed(1)}%
+            </span>
+          </div>
+        </div>
+      )}
       <div className="w-full max-w-lg bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 overflow-hidden">
         <div className="relative h-64 bg-black">
           <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
