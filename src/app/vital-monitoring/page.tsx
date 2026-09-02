@@ -327,9 +327,12 @@ export default function VitalMonitoringPage() {
   }, []);
 
   const processFrame = useCallback(() => {
+    if (!cameraOnRef.current) return;
     const video = videoRef.current;
-    if (!cameraOn) return;
-    if (!demoMode && (!video || !video.videoWidth)) return;
+    if (!demoMode && (!video || !video.videoWidth)) {
+      animFrame.current = requestAnimationFrame(processFrame);
+      return;
+    }
 
     const c = document.createElement("canvas");
     c.width = 64;
@@ -499,8 +502,10 @@ export default function VitalMonitoringPage() {
     }
 
     drawWaveform();
-    animFrame.current = requestAnimationFrame(processFrame);
-  }, [cameraOn, drawWaveform, spo2Offset, cameraMode, demoMode]);
+    if (cameraOnRef.current) {
+      animFrame.current = requestAnimationFrame(processFrame);
+    }
+  }, [drawWaveform, spo2Offset, cameraMode, demoMode]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -557,14 +562,19 @@ export default function VitalMonitoringPage() {
         resolve(null);
         return;
       }
-      
+
+      const timeout = setTimeout(() => {
+        resolve(null);
+      }, 2000);
+
       recorder.onstop = () => {
+        clearTimeout(timeout);
         const blob = new Blob(videoChunksRef.current, { type: "video/webm" });
         videoChunksRef.current = [];
         recordingRef.current = false;
         resolve(blob);
       };
-      
+
       recorder.stop();
     });
   }, []);
@@ -586,10 +596,13 @@ export default function VitalMonitoringPage() {
       }
       return best;
     };
+
+    let computedReading: { bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
+
     if (samples.length > 0) {
       const bpSysAvg = Math.round(avg("bpSys"));
       const bpDiaAvg = Math.round(avg("bpDia"));
-      setFinalReading({
+      computedReading = {
         bpm: avg("bpm"),
         spo2: Math.round(avg("spo2")),
         hb: avg("hb"),
@@ -602,9 +615,9 @@ export default function VitalMonitoringPage() {
         rmssd: avg("rmssd"),
         pnn50: avg("pnn50"),
         rhythm: mode(samples.map((s) => (s.rhythm as "regular" | "irregular" | "unknown"))),
-      });
+      };
     } else {
-      setFinalReading({
+      computedReading = {
         bpm: bpm ?? 0,
         spo2: spo2 ?? 0,
         hb: hb ?? 0,
@@ -617,16 +630,17 @@ export default function VitalMonitoringPage() {
         rmssd: hrv?.rmssd ?? 0,
         pnn50: hrv?.pnn50 ?? 0,
         rhythm: (rhythm as "regular" | "irregular" | "unknown"),
-      });
+      };
     }
-    
-    const videoBlob = await stopVideoRecording();
+
     stopStream();
     setCameraOn(false);
     setPhase("finalized");
     setCountdown(0);
-    
-    if (videoBlob && patient && finalReading) {
+    setFinalReading(computedReading);
+
+    const videoBlob = await stopVideoRecording().catch(() => null);
+    if (videoBlob && patient && computedReading) {
       addVitalReading({
         patient: {
           name: patient.name,
@@ -635,24 +649,11 @@ export default function VitalMonitoringPage() {
           lmp: patient.lmp,
           pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
         },
-        vitals: {
-          bpm: finalReading.bpm,
-          spo2: finalReading.spo2,
-          hb: finalReading.hb,
-          bpSys: finalReading.bpSys,
-          bpDia: finalReading.bpDia,
-          sugar: finalReading.sugar,
-          signalQuality: finalReading.signalQuality,
-          respRate: finalReading.respRate,
-          sdnn: finalReading.sdnn,
-          rmssd: finalReading.rmssd,
-          pnn50: finalReading.pnn50,
-          rhythm: finalReading.rhythm as "regular" | "irregular" | "unknown",
-        },
+        vitals: computedReading,
       }, videoBlob);
       setReadingCount(getReadingCount());
     }
-  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, finalReading]);
+  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
