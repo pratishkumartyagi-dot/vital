@@ -19,7 +19,7 @@ import csv
 import sys
 from collections import Counter
 from statistics import mean, pstdev
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Tuple, Optional
 
 import numpy as np
 from scipy import signal as sps
@@ -38,6 +38,49 @@ try:
     HAVE_RREST = True
 except Exception:  # pragma: no cover - RRest import may fail on some envs
     HAVE_RREST = False
+
+
+def bootstrap_ci(data: np.ndarray, n_bootstrap: int = 1000, ci: float = 95.0) -> Tuple[float, float]:
+    """Compute bootstrap confidence interval for the mean of data."""
+    if data.size < 2:
+        return np.nan, np.nan
+    boot_means = []
+    for _ in range(n_bootstrap):
+        sample = np.random.choice(data, size=data.size, replace=True)
+        boot_means.append(np.mean(sample))
+    alpha = (100 - ci) / 2
+    return float(np.percentile(boot_means, alpha)), float(np.percentile(boot_means, 100 - alpha))
+
+
+def bootstrap_hrv_ci(rr_ms: np.ndarray, n_bootstrap: int = 1000, ci: float = 95.0) -> dict:
+    """Compute bootstrap CIs for HRV metrics (SDNN, RMSSD, pNN50)."""
+    if rr_ms.size < 2:
+        return {
+            'sdnn_ci': (np.nan, np.nan),
+            'rmssd_ci': (np.nan, np.nan),
+            'pnn50_ci': (np.nan, np.nan),
+        }
+    
+    boot_sdnn = []
+    boot_rmssd = []
+    boot_pnn50 = []
+    
+    for _ in range(n_bootstrap):
+        sample = np.random.choice(rr_ms, size=rr_ms.size, replace=True)
+        sdnn = np.std(sample, ddof=1)
+        successive = np.abs(np.diff(sample))
+        rmssd = np.sqrt(np.mean(successive ** 2)) if successive.size > 0 else 0.0
+        pnn50 = (np.sum(successive > 50.0) / successive.size * 100.0) if successive.size > 0 else 0.0
+        boot_sdnn.append(sdnn)
+        boot_rmssd.append(rmssd)
+        boot_pnn50.append(pnn50)
+    
+    alpha = (100 - ci) / 2
+    return {
+        'sdnn_ci': (float(np.percentile(boot_sdnn, alpha)), float(np.percentile(boot_sdnn, 100 - alpha))),
+        'rmssd_ci': (float(np.percentile(boot_rmssd, alpha)), float(np.percentile(boot_rmssd, 100 - alpha))),
+        'pnn50_ci': (float(np.percentile(boot_pnn50, alpha)), float(np.percentile(boot_pnn50, 100 - alpha))),
+    }
 
 
 def load_ppg_csv(path: str) -> np.ndarray:
@@ -80,7 +123,7 @@ def classify_rhythm(rr_ms: Sequence[float]) -> str:
     return "irregular"
 
 
-def analyze_heart_heartpy(ppg: np.ndarray, fs: float) -> dict:
+def analyze_heart_heartpy(ppg: np.ndarray, fs: float, n_bootstrap: int = 1000) -> dict:
     """Run heartpy for heart rate + HRV (mirrors fmoessle/heart-rate-monitor)."""
     try:
         wd, _ = hp.process(ppg, sample_rate=fs, high_precision=True)
@@ -92,13 +135,24 @@ def analyze_heart_heartpy(ppg: np.ndarray, fs: float) -> dict:
     successive = np.abs(np.diff(rr)) if rr.size > 1 else np.array([])
     rmssd = float(np.sqrt(np.mean(successive ** 2))) if successive.size else 0.0
     pnn50 = float((np.sum(successive > 50.0) / successive.size) * 100.0) if successive.size else 0.0
+    
+    # Bootstrap confidence intervals
+    hrv_ci = bootstrap_hrv_ci(rr, n_bootstrap=n_bootstrap) if rr.size >= 2 else {
+        'sdnn_ci': (np.nan, np.nan),
+        'rmssd_ci': (np.nan, np.nan),
+        'pnn50_ci': (np.nan, np.nan),
+    }
+    
     return {
         "bpm": bpm,
         "peaks": [int(x) for x in wd.get("peaklist", [])],
         "rr_ms": [float(x) for x in rr.tolist()],
         "sdnn_ms": sdnn,
+        "sdnn_ci": hrv_ci['sdnn_ci'],
         "rmssd_ms": rmssd,
+        "rmssd_ci": hrv_ci['rmssd_ci'],
         "pnn50": pnn50,
+        "pnn50_ci": hrv_ci['pnn50_ci'],
         "rhythm": classify_rhythm(rr),
         "signal_quality": float(wd.get("snr", 0.0) or 0.0),
     }
@@ -169,9 +223,9 @@ def _analyze_resp_fallback(ppg: np.ndarray, fs: float) -> dict:
     return {"resp_rate_bpm": float(fused), "method": method, "confidence": confidence}
 
 
-def analyze(ppg_path: str, fs: float = 30.0) -> dict:
+def analyze(ppg_path: str, fs: float = 30.0, n_bootstrap: int = 1000) -> dict:
     ppg = load_ppg_csv(ppg_path)
-    heart = analyze_heart_heartpy(ppg, fs)
+    heart = analyze_heart_heartpy(ppg, fs, n_bootstrap=n_bootstrap)
     resp = analyze_resp_rrest(ppg, fs)
     return {"heart": heart, "resp": resp, "fs": fs, "samples": int(ppg.size)}
 
@@ -180,19 +234,22 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PPG HR + Resp Rate analysis")
     parser.add_argument("csv", help="Path to a single-column PPG CSV file")
     parser.add_argument("--fs", type=float, default=30.0, help="Sampling rate in Hz")
+    parser.add_argument("--n-bootstrap", type=int, default=1000, help="Number of bootstrap iterations for HRV CIs")
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
-    result = analyze(args.csv, fs=args.fs)
+    result = analyze(args.csv, fs=args.fs, n_bootstrap=args.n_bootstrap)
     print(f"PPG samples: {result['samples']} @ {result['fs']} Hz")
     heart = result["heart"]
     if "error" in heart:
         print(f"Heart analysis error: {heart['error']}")
     else:
         print(f"Heart Rate: {heart['bpm']:.1f} BPM  | Rhythm: {heart['rhythm']}")
-        print(f"HRV SDNN: {heart['sdnn_ms']:.1f} ms  RMSSD: {heart['rmssd_ms']:.1f} ms  pNN50: {heart['pnn50']:.1f}%")
+        print(f"HRV SDNN: {heart['sdnn_ms']:.1f} ms (95% CI: {heart['sdnn_ci'][0]:.1f}-{heart['sdnn_ci'][1]:.1f})")
+        print(f"HRV RMSSD: {heart['rmssd_ms']:.1f} ms (95% CI: {heart['rmssd_ci'][0]:.1f}-{heart['rmssd_ci'][1]:.1f})")
+        print(f"HRV pNN50: {heart['pnn50']:.1f}% (95% CI: {heart['pnn50_ci'][0]:.1f}-{heart['pnn50_ci'][1]:.1f})")
         print(f"Peaks detected: {len(heart['peaks'])}")
     resp = result["resp"]
     rr = resp.get("resp_rate_bpm")

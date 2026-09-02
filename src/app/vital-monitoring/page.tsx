@@ -4,6 +4,15 @@ import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
 import { analyzeVitals, type VitalAnalysis } from './ppg-analysis';
+import { 
+  addVitalReading, 
+  getVitalReadings, 
+  downloadReadings, 
+  getReadingCount,
+  getMaxReadings,
+  deleteVitalReading,
+  type VitalReading 
+} from '@/lib/vital-storage';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -164,6 +173,13 @@ export default function VitalMonitoringPage() {
     pregnancy: "" as "" | "pregnant" | "non-pregnant",
   });
   const [formError, setFormError] = useState<string | null>(null);
+  const [readingCount, setReadingCount] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  
+  const videoChunksRef = useRef<Blob[]>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingRef = useRef(false);
 
   useEffect(() => {
     cameraOnRef.current = cameraOn;
@@ -181,7 +197,14 @@ export default function VitalMonitoringPage() {
     return () => {
       if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
       if (autoStopTimerRef.current) window.clearTimeout(autoStopTimerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
     };
+  }, []);
+
+  useEffect(() => {
+    setReadingCount(getReadingCount());
   }, []);
 
   useEffect(() => {
@@ -560,13 +583,12 @@ export default function VitalMonitoringPage() {
     }
     setPhase("finalized");
     setCountdown(0);
-    stopStream();
-    setCameraOn(false);
-  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm, stopStream]);
+  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
     samplesRef.current = [];
+    videoChunksRef.current = [];
     setFinalReading(null);
     setPhase("warming");
     setCountdown(70);
@@ -586,6 +608,44 @@ export default function VitalMonitoringPage() {
     }, 250);
   }, [finalizeSession]);
 
+  const startVideoRecording = useCallback((stream: MediaStream) => {
+    videoChunksRef.current = [];
+    try {
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+      mediaRecorderRef.current = recorder;
+      recordingRef.current = true;
+      
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          videoChunksRef.current.push(event.data);
+        }
+      };
+      
+      recorder.start(1000); // Collect data every second
+    } catch (e) {
+      console.warn("Video recording not supported:", e);
+    }
+  }, []);
+
+  const stopVideoRecording = useCallback((): Promise<Blob | null> => {
+    return new Promise((resolve) => {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === "inactive") {
+        resolve(null);
+        return;
+      }
+      
+      recorder.onstop = () => {
+        const blob = new Blob(videoChunksRef.current, { type: "video/webm" });
+        videoChunksRef.current = [];
+        recordingRef.current = false;
+        resolve(blob);
+      };
+      
+      recorder.stop();
+    });
+  }, []);
+
   const toggleCamera = useCallback(async () => {
     if (cameraOn) {
       if (countdownTimerRef.current) {
@@ -596,11 +656,41 @@ export default function VitalMonitoringPage() {
         window.clearTimeout(autoStopTimerRef.current);
         autoStopTimerRef.current = null;
       }
+      
+      const videoBlob = await stopVideoRecording();
       stopStream();
       setCameraOn(false);
       setError(null);
       setPhase("idle");
       setCountdown(0);
+      
+      if (videoBlob && phaseRef.current === "finalized" && finalReading && patient) {
+        addVitalReading({
+          patient: {
+            name: patient.name,
+            age: patient.age,
+            sex: patient.sex as "male" | "female",
+            lmp: patient.lmp,
+            pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
+          },
+          vitals: {
+            bpm: finalReading.bpm,
+            spo2: finalReading.spo2,
+            hb: finalReading.hb,
+            bpSys: finalReading.bpSys,
+            bpDia: finalReading.bpDia,
+            sugar: finalReading.sugar,
+            signalQuality: finalReading.signalQuality,
+            respRate: finalReading.respRate,
+            sdnn: finalReading.sdnn,
+            rmssd: finalReading.rmssd,
+            pnn50: finalReading.pnn50,
+            rhythm: finalReading.rhythm as "regular" | "irregular" | "unknown",
+          },
+        }, videoBlob);
+        setReadingCount(getReadingCount());
+      }
+      
       return;
     }
     setLoading(true);
@@ -658,6 +748,9 @@ export default function VitalMonitoringPage() {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
+      
+      startVideoRecording(stream);
+      
       setCameraOn(true);
       setError(null);
       startAutoCountdown();
@@ -667,7 +760,7 @@ export default function VitalMonitoringPage() {
     } finally {
       setLoading(false);
     }
-  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode]);
+  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode, stopVideoRecording, finalReading, patient, startVideoRecording]);
 
   toggleCameraRef.current = toggleCamera;
 
@@ -1110,6 +1203,34 @@ export default function VitalMonitoringPage() {
                   <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
                 </div>
               </div>
+              <div className="mt-4 flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={() => {
+                    downloadReadings(getVitalReadings(), "csv");
+                    setReadingCount(getReadingCount());
+                  }}
+                  disabled={exporting}
+                  className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition"
+                >
+                  {exporting ? "Exporting..." : "Export CSV & Clear"}
+                </button>
+                <button
+                  onClick={() => {
+                    downloadReadings(getVitalReadings(), "excel");
+                    setReadingCount(getReadingCount());
+                  }}
+                  disabled={exporting}
+                  className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 transition"
+                >
+                  {exporting ? "Exporting..." : "Export Excel & Clear"}
+                </button>
+                <button
+                  onClick={() => setShowHistory(!showHistory)}
+                  className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-neutral-700 hover:bg-neutral-600 transition"
+                >
+                  {showHistory ? "Hide History" : `View History (${readingCount}/${getMaxReadings()})`}
+                </button>
+              </div>
               <button
                 onClick={() => {
                   setPhase("idle");
@@ -1132,6 +1253,69 @@ export default function VitalMonitoringPage() {
               >
                 Start New Measurement
               </button>
+            </div>
+          </div>
+        )}
+        {showHistory && (
+          <div className="px-4 pb-4">
+            <div className="rounded-xl border border-neutral-700 bg-neutral-900 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-base font-bold text-neutral-100">Stored Readings</h2>
+                <span className="text-[10px] text-neutral-400">{readingCount}/{getMaxReadings()} readings</span>
+              </div>
+              <div className="max-h-64 overflow-y-auto space-y-2">
+                {getVitalReadings().map((reading: VitalReading) => (
+                  <div key={reading.id} className="bg-neutral-800 rounded-lg p-3 border border-neutral-700 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-neutral-100 font-medium">{reading.patient.name}</p>
+                        <p className="text-neutral-400">
+                          {new Date(reading.timestamp).toLocaleString()} • {reading.vitals.bpm.toFixed(0)} BPM • SpO₂ {reading.vitals.spo2}% • {reading.vitals.rhythm}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          deleteVitalReading(reading.id);
+                          setReadingCount(getReadingCount());
+                        }}
+                        className="px-2 py-1 text-[10px] text-neutral-400 hover:text-red-400 transition"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    {reading.videoData && (
+                      <div className="mt-2">
+                        <video src={reading.videoData} controls className="w-full max-h-32 rounded bg-black" />
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {getVitalReadings().length === 0 && (
+                  <p className="text-neutral-500 text-center py-4">No readings stored yet</p>
+                )}
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => {
+                    downloadReadings(getVitalReadings(), "csv");
+                    setReadingCount(getReadingCount());
+                  }}
+                  disabled={getVitalReadings().length === 0 || exporting}
+                  className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition"
+                >
+                  Export All as CSV & Clear
+                </button>
+                <button
+                  onClick={() => {
+                    downloadReadings(getVitalReadings(), "excel");
+                    setReadingCount(getReadingCount());
+                  }}
+                  disabled={getVitalReadings().length === 0 || exporting}
+                  className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 transition"
+                >
+                  Export All as Excel & Clear
+                </button>
+              </div>
             </div>
           </div>
         )}
