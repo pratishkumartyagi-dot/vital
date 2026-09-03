@@ -962,7 +962,7 @@ export default function VitalMonitoringPage() {
         )}
       </div>
       <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
-        MCD-rPPG powered remote photoplethysmography. Front camera: position your face in good lighting. Rear camera + flash: cover the lens with your fingertip.
+        Front camera: position your face in good lighting. Rear camera + flash: cover the lens with your fingertip.
       </p>
       {phase === "finalized" && finalReading && (
         <div className="w-full max-w-lg mb-6 p-4 rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 animate-fade-in">
@@ -1392,7 +1392,7 @@ export default function VitalMonitoringPage() {
           </div>
         )}
         <div className="px-4 pb-3">
-          <p className="text-[10px] text-neutral-500 leading-tight">Research estimates using MCD-rPPG signal processing. Not clinical measurements.</p>
+          <p className="text-[10px] text-neutral-500 leading-tight">Research estimates. Not clinical measurements.</p>
         </div>
       </div>
 
@@ -1405,7 +1405,7 @@ export default function VitalMonitoringPage() {
         </Link>
       </div>
 
-      <p className="mt-6 text-xs text-neutral-500">Research-grade PPG signal processing based on MCD-rPPG</p>
+      <p className="mt-6 text-xs text-neutral-500">Research-grade PPG signal processing</p>
     </main>
   );
 }
