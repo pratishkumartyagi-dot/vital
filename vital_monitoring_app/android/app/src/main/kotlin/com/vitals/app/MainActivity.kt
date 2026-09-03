@@ -1,42 +1,38 @@
 package com.vitals.app
 
+import android.content.Context
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
-import android.os.Handler
-import android.os.HandlerThread
+import android.hardware.camera2.CameraMetadata
+import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlin.math.max
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.vitals.app/camera_hardware"
     private val PPG_CHANNEL = "com.vitals.app/ppg_processor"
+    private val CAMERA_CHANNEL = "com.vitals.app/camera_control"
 
-    private var ppgHandlerThread: HandlerThread? = null
-    private var ppgHandler: Handler? = null
+    private var ppgHandlerThread: android.os.HandlerThread? = null
+    private var ppgHandler: android.os.Handler? = null
     private val ppgProcessor = PpgSignalProcessor()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
-            if (call.method == "applyStrictLocks") {
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CAMERA_CHANNEL).setMethodCallHandler { call, result ->
+            if (call.method == "configureSafePPG") {
                 try {
-                    val cameraId = "0"
-                    val manager = getSystemService(CAMERA_SERVICE) as CameraManager
-                    val characteristics = manager.getCameraCharacteristics(cameraId)
-
-                    val builder = manager.createCaptureRequest(CameraCharacteristics.TEMPLATE_PREVIEW) as android.hardware.camera2.CaptureRequest.Builder
-                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                    builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
-                    builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, 400)
-                    builder.set(CaptureRequest.CONTROL_EFFECT_MODE, CaptureRequest.CONTROL_EFFECT_MODE_OFF)
-
-                    result.success(true)
+                    val caps = queryPpgCapabilities()
+                    if (caps != null) {
+                        result.success(caps)
+                    } else {
+                        result.error("CAMERA_ERROR", "Could not query rear camera capabilities.", null)
+                    }
                 } catch (e: Exception) {
-                    result.error("LOCK_FAILED", "Hardware ISP lock failed: ${e.message}", null)
+                    result.error("CAMERA_ERROR", "Exception: ${e.message}", null)
                 }
             } else {
                 result.notImplemented()
@@ -72,11 +68,57 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun queryPpgCapabilities(): Map<String, Any>? {
+        val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val cameraId = manager.cameraIdList.firstOrNull { id ->
+            val characteristics = manager.getCameraCharacteristics(id)
+            characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+        } ?: return null
+
+        val characteristics = manager.getCameraCharacteristics(cameraId)
+
+        val supportLevel = characteristics.get(CameraCharacteristics.INFO_SUPPORT_LEVEL)
+            ?: CameraMetadata.INFO_SUPPORT_LEVEL_LEGACY
+
+        val capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+        val supportsManualControl = capabilities?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+            ?: false
+
+        val isoRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val minIso = isoRange?.lower ?: 100
+        val maxIso = isoRange?.upper ?: 800
+
+        val exposureRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val minExposure = exposureRange?.lower ?: 1000000L
+        val maxExposure = exposureRange?.upper ?: 30000000L
+
+        val aeCompRange = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        val aeCompMin = aeCompRange?.lower ?: 0
+        val aeCompMax = aeCompRange?.upper ?: 0
+
+        val flashAvailable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+        } else false
+
+        return mapOf(
+            "cameraId" to cameraId,
+            "supportLevel" to supportLevel,
+            "supportsManualControl" to supportsManualControl,
+            "minIso" to minIso,
+            "maxIso" to maxIso,
+            "minExposure" to minExposure,
+            "maxExposure" to maxExposure,
+            "aeCompMin" to aeCompMin,
+            "aeCompMax" to aeCompMax,
+            "flashAvailable" to flashAvailable
+        )
+    }
+
     override fun onResume() {
         super.onResume()
         if (ppgHandlerThread == null) {
-            ppgHandlerThread = HandlerThread("PPGProcessingThread").also { it.start() }
-            ppgHandler = Handler(ppgHandlerThread!!.looper)
+            ppgHandlerThread = android.os.HandlerThread("PPGProcessingThread").also { it.start() }
+            ppgHandler = android.os.Handler(ppgHandlerThread!!.looper)
         }
     }
 

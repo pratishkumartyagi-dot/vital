@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/services.dart';
 
 class NativeHardwareBridge {
   static const _hardwareChannel = MethodChannel('com.vitals.app/camera_hardware');
+  static const _cameraChannel = MethodChannel('com.vitals.app/camera_control');
   static const _ppgChannel = MethodChannel('com.vitals.app/ppg_processor');
 
   static Future<void> lockHardwareISP() async {
@@ -9,6 +11,19 @@ class NativeHardwareBridge {
       await _hardwareChannel.invokeMethod('applyStrictLocks');
     } on PlatformException catch (e) {
       print("ISP lock failure: ${e.message}");
+    }
+  }
+
+  static Future<Map<String, dynamic>?> optimizeSensorForPPG() async {
+    try {
+      final result = await _cameraChannel.invokeMethod<Map<dynamic, dynamic>>('configureSafePPG');
+      if (result != null) {
+        return Map<String, dynamic>.from(result);
+      }
+      return null;
+    } on PlatformException catch (e) {
+      print("PPG camera optimization failure: ${e.message}");
+      return null;
     }
   }
 

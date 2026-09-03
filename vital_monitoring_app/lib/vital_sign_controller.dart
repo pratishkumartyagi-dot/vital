@@ -131,6 +131,16 @@ class VitalSignController extends ChangeNotifier {
       final double currentRed = extractedValues[0];
       final double currentGreen = extractedValues[1];
       final double currentBlue = extractedValues[2];
+
+      // Software guard: reject saturated or dark frames before they reach PPG math
+      if (currentRed > 250.0 || currentGreen > 250.0 || currentBlue > 250.0) {
+        _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
+        return;
+      }
+      if (currentRed < 15.0 && currentGreen < 15.0 && currentBlue < 15.0) {
+        _toastPrompt = "No signal detected. Cover the lens and flash completely.";
+        return;
+      }
       
       // Append to multi-wavelength buffers
       _liveRedBuffer.add(currentRed);

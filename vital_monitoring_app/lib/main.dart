@@ -148,6 +148,17 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         debugPrint('Hardware ISP lock failed: $e');
       }
 
+      try {
+        await _applyAdaptivePpgSettings().timeout(
+          const Duration(seconds: 3),
+          onTimeout: () {
+            debugPrint('Adaptive PPG settings timed out - continuing with defaults');
+          },
+        );
+      } catch (e) {
+        debugPrint('Adaptive PPG settings failed: $e');
+      }
+
       setState(() {
         _isInitialized = true;
       });
@@ -191,6 +202,50 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
       await _controller!.setFlashMode(FlashMode.off);
     } catch (e) {
       debugPrint('Could not disable torch: $e');
+    }
+  }
+
+  Future<void> _applyAdaptivePpgSettings() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+
+    final caps = await NativeHardwareBridge.optimizeSensorForPPG();
+    if (caps == null) {
+      debugPrint('Adaptive PPG: could not query native capabilities');
+      return;
+    }
+
+    debugPrint('Adaptive PPG capabilities: $caps');
+
+    final aeCompMin = caps['aeCompMin'] is int ? caps['aeCompMin'] as int : 0;
+    final aeCompMax = caps['aeCompMax'] is int ? caps['aeCompMax'] as int : 0;
+    final flashAvailable = caps['flashAvailable'] is bool ? caps['flashAvailable'] as bool : false;
+
+    // Underexpose to prevent red/green channel clipping above 250
+    try {
+      if (aeCompMin < 0) {
+        await _controller!.setExposureOffset(aeCompMin.toDouble());
+        debugPrint('Adaptive PPG: exposure offset set to $aeCompMin');
+      }
+    } catch (e) {
+      debugPrint('Adaptive PPG: setExposureOffset failed: $e');
+    }
+
+    // Lock focus if the controller exposes it; otherwise continue
+    try {
+      final focusMode = _controller!.value.focusMode;
+      debugPrint('Adaptive PPG: current focus mode = $focusMode');
+    } catch (e) {
+      debugPrint('Adaptive PPG: focus mode query failed: $e');
+    }
+
+    // Ensure torch is on for rear-camera fingertip PPG
+    if (flashAvailable) {
+      try {
+        await _controller!.setFlashMode(FlashMode.torch);
+        debugPrint('Adaptive PPG: torch enabled');
+      } catch (e) {
+        debugPrint('Adaptive PPG: torch enable failed: $e');
+      }
     }
   }
 
