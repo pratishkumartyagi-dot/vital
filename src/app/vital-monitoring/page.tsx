@@ -423,7 +423,7 @@ export default function VitalMonitoringPage() {
 
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
-    const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 70000;
+    const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 100000;
     const qualityGate = 0;
 
     if (quality > qualityGate) {
@@ -661,11 +661,11 @@ export default function VitalMonitoringPage() {
     videoChunksRef.current = [];
     setFinalReading(null);
     setPhase("warming");
-    setCountdown(70);
+    setCountdown(100);
     if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
     countdownTimerRef.current = window.setInterval(() => {
       const elapsed = Date.now() - sessionStartRef.current;
-      const remaining = Math.max(0, 70 - Math.floor(elapsed / 1000));
+      const remaining = Math.max(0, 100 - Math.floor(elapsed / 1000));
       setCountdown(remaining);
       if (elapsed >= 10000 && phaseRef.current === "warming") {
         setPhase("measuring");
@@ -826,7 +826,7 @@ export default function VitalMonitoringPage() {
       <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
         <h1 className="text-4xl font-extrabold mb-2 tracking-tight text-center">PPG Vital Monitor</h1>
         <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
-          Enter patient details to begin a 70-second measurement session.
+          Enter patient details to begin a 100-second measurement session.
         </p>
 
         <div className="w-full max-w-lg bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 p-6">
@@ -968,7 +968,7 @@ export default function VitalMonitoringPage() {
         <div className="w-full max-w-lg mb-6 p-4 rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 animate-fade-in">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-bold text-emerald-300">Measurement Complete</h2>
-            <span className="text-xs text-emerald-200/80">70s session • 60s averaged after 10s warm-up</span>
+            <span className="text-xs text-emerald-200/80">100s session • 90s recorded after 10s warm-up</span>
           </div>
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 text-center">
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
@@ -1046,7 +1046,7 @@ export default function VitalMonitoringPage() {
                 {phase === "warming" && countdown > 0
                   ? `Warming up — discarding first 10s (${countdown}s total remaining)`
                   : phase === "measuring"
-                  ? `Measuring — averaging next 60s (${countdown}s remaining)`
+                   ? `Measuring — recording next 90s (${countdown}s remaining)`
                   : phase === "finalized"
                   ? "Measurement complete — final reading below"
                   : loading
@@ -1187,8 +1187,8 @@ export default function VitalMonitoringPage() {
           <div className="px-4 pb-4">
             <div className="rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 p-4">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-base font-bold text-emerald-300">Final Reading (70s avg)</h2>
-                <span className="text-[10px] text-emerald-200/80">avg of 60s after 10s warm-up</span>
+                <h2 className="text-base font-bold text-emerald-300">Final Reading (100s analysis)</h2>
+                <span className="text-[10px] text-emerald-200/80">90s recording after 10s warm-up</span>
               </div>
               <div className="mb-4 p-3 rounded-lg bg-neutral-900/80 border border-emerald-700/40 text-xs">
                 <p className="text-neutral-400 mb-1 font-semibold">Patient</p>
@@ -1380,13 +1380,13 @@ export default function VitalMonitoringPage() {
               <div
                 className="h-full bg-red-600 transition-all duration-300"
                 style={{
-                  width: phase === "finalized" ? "100%" : phase === "measuring" ? `${Math.min(100, ((70 - countdown) / 70) * 100)}%` : phase === "warming" ? `${Math.min(100, ((70 - countdown) / 70) * 100)}%` : "0%",
+                  width: phase === "finalized" ? "100%" : phase === "measuring" ? `${Math.min(100, ((100 - countdown) / 100) * 100)}%` : phase === "warming" ? `${Math.min(100, ((100 - countdown) / 100) * 100)}%` : "0%",
                 }}
               />
             </div>
             <p className="mt-1 text-[10px] text-neutral-500 text-center">
               {phase === "warming" && `Warm-up — discarding first 10s (${countdown}s)`}
-              {phase === "measuring" && `Measuring — averaging next 60s (${countdown}s left)`}
+              {phase === "measuring" && `Measuring — recording next 90s (${countdown}s left)`}
               {phase === "finalized" && "Done"}
             </p>
           </div>
