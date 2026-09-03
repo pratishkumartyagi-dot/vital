@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'zero_allocation_extractor.dart';
 import 'ppg_signal_engine.dart';
+import 'native_hardware_bridge.dart';
 import 'dart:math' as math;
 import 'dart:async';
 
@@ -142,6 +143,14 @@ class VitalSignController extends ChangeNotifier {
         _waveformBuffer.removeAt(0);
       }
 
+      // Send green channel to native PPG DSP for more accurate heart rate estimation
+      NativeHardwareBridge.processPpgSample(currentGreen).then((nativeBpm) {
+        if (nativeBpm != null && nativeBpm > 0) {
+          _heartRate = nativeBpm;
+          notifyListeners();
+        }
+      });
+
       // Safety gate: Perfusion Index check (low = flatline / too much pressure / cold)
       if (_liveGreenBuffer.length >= 30) {
         final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
@@ -153,6 +162,7 @@ class VitalSignController extends ChangeNotifier {
           _liveGreenBuffer.clear();
           _liveBlueBuffer.clear();
           _waveformBuffer.clear();
+          NativeHardwareBridge.resetPpgBuffer();
           notifyListeners();
           return;
         }
@@ -199,6 +209,7 @@ class VitalSignController extends ChangeNotifier {
           _liveGreenBuffer.clear();
           _liveBlueBuffer.clear();
           _waveformBuffer.clear();
+          NativeHardwareBridge.resetPpgBuffer();
           notifyListeners();
         }
       }
@@ -277,8 +288,11 @@ class VitalSignController extends ChangeNotifier {
     _toastPrompt = "Align your finger over the camera lens and flash.";
     _heartRate = 0.0;
     _hbLevel = 0.0;
+    _liveRedBuffer.clear();
     _liveGreenBuffer.clear();
+    _liveBlueBuffer.clear();
     _waveformBuffer.clear();
+    NativeHardwareBridge.resetPpgBuffer();
     _enableDemoMode();
     notifyListeners();
   }
