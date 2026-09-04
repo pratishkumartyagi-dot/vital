@@ -1,9 +1,7 @@
-"use client";
-
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, butterworthBandpass } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -28,17 +26,7 @@ function getErrorMessage(err: unknown): string {
   return "Unknown error accessing camera.";
 }
 
-function computePerfusionIndex(signal: number[]): number {
-  if (signal.length < 10) return 0;
-  const dc = signal.reduce((a, b) => a + b, 0) / signal.length;
-  let acSum = 0;
-  for (let i = 0; i < signal.length; i++) {
-    acSum += Math.abs(signal[i] - dc);
-  }
-  const ac = acSum / signal.length;
-  return dc > 0 ? (ac / dc) * 100 : 0;
-}
-
+// Generate synthetic PPG for demo mode (delegated to ppg-analysis logic)
 function generateSyntheticPPG(seconds: number, fs: number, bpm: number): number[] {
   const n = Math.floor(seconds * fs);
   const out: number[] = new Array(n);
@@ -54,35 +42,6 @@ function generateSyntheticPPG(seconds: number, fs: number, bpm: number): number[
     out[i] = 128 + 30 * pulse * baseline + noise * 6;
   }
   return out;
-}
-
-function bandpassFilter(signal: number[], low: number, high: number, fs: number): number[] {
-  const n = signal.length;
-  if (n < 10) return signal.slice();
-  const result: number[] = new Array(n);
-  const tauH = 1 / (2 * Math.PI * low);
-  const tauL = 1 / (2 * Math.PI * high);
-  const alphaH = tauH / (tauH + 1 / fs);
-  const alphaL = tauL / (tauL + 1 / fs);
-  let hp = signal[0];
-  let lp = signal[0];
-  for (let i = 0; i < n; i++) {
-    hp = alphaH * (hp + signal[i] - (i > 0 ? signal[i - 1] : signal[0]));
-    lp = alphaL * lp + (1 - alphaL) * hp;
-    result[i] = lp;
-  }
-  return result;
-}
-
-function computeAcDc(signal: number[], fs: number): { ac: number; dc: number } {
-  if (signal.length < fs * 3) return { ac: 0, dc: signal.reduce((a, b) => a + b, 0) / (signal.length || 1) };
-  const bp = bandpassFilter(signal, 0.7, 3.5, fs);
-  const meanBp = bp.reduce((a, b) => a + b, 0) / bp.length;
-  let ac = 0;
-  for (const v of bp) ac += Math.abs(v - meanBp);
-  ac /= bp.length;
-  const dc = signal.reduce((a, b) => a + b, 0) / (signal.length || 1);
-  return { ac, dc };
 }
 
 export default function VitalMonitoringPage() {
@@ -394,9 +353,9 @@ export default function VitalMonitoringPage() {
         redRef.current.push(128 + (v - 128) * 1.2);
         greenRef.current.push(v);
         blueRef.current.push(128 + (v - 128) * 0.4);
-        if (redRef.current.length > 180) redRef.current.shift();
-        if (greenRef.current.length > 180) greenRef.current.shift();
-        if (blueRef.current.length > 180) blueRef.current.shift();
+        if (redRef.current.length > 1800) redRef.current.shift();
+        if (greenRef.current.length > 1800) greenRef.current.shift();
+        if (blueRef.current.length > 1800) blueRef.current.shift();
       }
       setFingerDetected(true);
     } else {
@@ -410,84 +369,109 @@ export default function VitalMonitoringPage() {
       redRef.current.push(avgR);
       greenRef.current.push(avgG);
       blueRef.current.push(avgB);
-      if (redRef.current.length > 180) redRef.current.shift();
-      if (greenRef.current.length > 180) greenRef.current.shift();
-      if (blueRef.current.length > 180) blueRef.current.shift();
+      if (redRef.current.length > 1800) redRef.current.shift();
+      if (greenRef.current.length > 1800) greenRef.current.shift();
+      if (blueRef.current.length > 1800) blueRef.current.shift();
     }
 
-    const redPI = computePerfusionIndex(redRef.current);
-    const greenPI = computePerfusionIndex(greenRef.current);
-    const bluePI = computePerfusionIndex(blueRef.current);
-    const quality = demoMode ? 0.5 : Math.min(redPI, greenPI, bluePI);
-    setSignalQuality(quality);
-
+    // Run comprehensive vitals analysis using centralized module
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
     const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 100000;
-    const qualityGate = 0;
+    
+    // Update signal quality and vitals every 2 seconds
+    const nowMs = Date.now();
+    if (nowMs - lastBpmUpdate.current > 2000) {
+      lastBpmUpdate.current = nowMs;
 
-    if (quality > qualityGate) {
-      const nowMs = Date.now();
-      if (nowMs - lastBpmUpdate.current > 2000) {
-        lastBpmUpdate.current = nowMs;
+      const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
+      const analysisSource = demoMode
+        ? syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, Math.floor(fs * 30)))
+        : ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
+      const analysis: VitalAnalysis = analyzeVitals(analysisSource, fs);
+      const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
 
-        const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
-        const analysisSource = demoMode
-          ? syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, Math.floor(fs * 30)))
-          : ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
-        const analysis: VitalAnalysis = analyzeVitals(analysisSource, fs);
-        const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
+      // Use SQI from analyzeVitals (0-100)
+      const sqi = analysis.heart.signalQuality;
+      setSignalQuality(sqi / 100);
 
-        const { ac: acR, dc: dcR } = computeAcDc(redRef.current, fs);
-        const { ac: acG, dc: dcG } = computeAcDc(greenRef.current, fs);
-        const { ac: acB, dc: dcB } = computeAcDc(blueRef.current, fs);
-        const Rratio = dcR > 0 && dcB > 0 ? (acR / dcR) / (acB / dcB) : 1;
-        let spo2Val = 110 - 25 * Rratio + spo2Offset;
-        spo2Val = Math.min(Math.max(spo2Val, 70), 100);
-        const HbRatio = dcR > 0 && dcG > 0 ? (acR / dcR) / (acG / dcG) : 0;
-        let hbVal = 18.2 - 6.8 * HbRatio;
-        hbVal = Math.min(Math.max(hbVal, 5), 20);
-        const bpSys = 110 + Math.floor(Math.random() * 20);
-        const bpDia = 70 + Math.floor(Math.random() * 15);
-        const sugarVal = 90 + Math.floor(Math.random() * 30);
+      // Compute SpO2 and Hb from bandpass-filtered color signals
+      // Note: Smartphone cameras lack IR (940nm), so SpO2 is an estimate only
+      let spo2Val: number | null = null;
+      let hbVal: number | null = null;
+      if (redRef.current.length >= fs * 3 && greenRef.current.length >= fs * 3 && blueRef.current.length >= fs * 3) {
+        // Bandpass filter color signals at 0.5-3.5 Hz for proper AC/DC
+        const redFiltered = butterworthBandpass(redRef.current, 0.5, 3.5, fs);
+        const greenFiltered = butterworthBandpass(greenRef.current, 0.5, 3.5, fs);
+        const blueFiltered = butterworthBandpass(blueRef.current, 0.5, 3.5, fs);
+        
+        const getAcDc = (raw: number[], filtered: number[]) => {
+          const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
+          let ac = 0;
+          for (const v of filtered) ac += Math.abs(v - (filtered.reduce((a, b) => a + b, 0) / filtered.length));
+          ac /= filtered.length;
+          return { ac, dc };
+        };
+        
+        const { ac: acR, dc: dcR } = getAcDc(redRef.current, redFiltered);
+        const { ac: acG, dc: dcG } = getAcDc(greenRef.current, greenFiltered);
+        const { ac: acB, dc: dcB } = getAcDc(blueRef.current, blueFiltered);
+        
+        // SpO2: R = (AC_Red/DC_Red) / (AC_Blue/DC_Blue) - Note: needs IR (940nm) for accuracy
+        // Using blue as proxy for IR (not clinically valid, for display only)
+        if (dcR > 0 && dcB > 0 && acR > 0 && acB > 0) {
+          const Rratio = (acR / dcR) / (acB / dcB);
+          // Standard formula: SpO2 = 110 - 25*R (calibrated for 660nm/940nm)
+          // With blue as IR proxy, values will be off - cap and offset
+          spo2Val = 110 - 25 * Rratio + spo2Offset;
+          spo2Val = Math.min(Math.max(spo2Val, 70), 100);
+        }
+        
+        // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
+        if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
+          const HbRatio = (acR / dcR) / (acG / dcG);
+          hbVal = 18.2 - 6.8 * HbRatio;
+          hbVal = Math.min(Math.max(hbVal, 5), 20);
+        }
+      }
 
-        if (hr !== null) {
-          setBpm(hr);
-          setHb(demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : hbVal);
-          setSpo2(demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : Math.round(spo2Val));
-          setBp(demoMode ? `${115 + Math.floor(Math.random() * 10)}/${75 + Math.floor(Math.random() * 8)}` : `${bpSys}/${bpDia}`);
-          setSugar(demoMode ? 95 + Math.floor(Math.random() * 20) : sugarVal);
-          if (analysis.respRate !== null) {
-            setRespRate(Math.round(analysis.respRate * 10) / 10);
-          } else if (demoMode) {
-            setRespRate(Math.round((15 + (Math.random() - 0.5) * 2) * 10) / 10);
-          }
-          if (analysis.hrv) {
-            setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
-          } else if (demoMode) {
-            const sdnn = baseHrvRef.current.sdnn + (Math.random() - 0.5) * 4;
-            const rmssd = baseHrvRef.current.rmssd + (Math.random() - 0.5) * 4;
-            const pnn50 = Math.max(0, baseHrvRef.current.pnn50 + (Math.random() - 0.5) * 4);
-            setHrv({ sdnn, rmssd, pnn50 });
-          }
-          setRhythm(analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm);
+      if (hr !== null) {
+        setBpm(hr);
+        setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
+        setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
+        // BP and Glucose cannot be reliably measured from PPG - display as unavailable
+        setBp(null);
+        setSugar(null);
+        if (analysis.respRate !== null) {
+          setRespRate(Math.round(analysis.respRate * 10) / 10);
+        } else if (demoMode) {
+          setRespRate(Math.round((15 + (Math.random() - 0.5) * 2) * 10) / 10);
+        }
+        if (analysis.hrv) {
+          setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
+        } else if (demoMode) {
+          const sdnn = baseHrvRef.current.sdnn + (Math.random() - 0.5) * 4;
+          const rmssd = baseHrvRef.current.rmssd + (Math.random() - 0.5) * 4;
+          const pnn50 = Math.max(0, baseHrvRef.current.pnn50 + (Math.random() - 0.5) * 4);
+          setHrv({ sdnn, rmssd, pnn50 });
+        }
+        setRhythm(analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm);
 
-          if (isMeasuring) {
-            samplesRef.current.push({
-              bpm: hr,
-              spo2: demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : Math.round(spo2Val),
-              hb: demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : hbVal,
-              bpSys: demoMode ? 115 + Math.floor(Math.random() * 10) : bpSys,
-              bpDia: demoMode ? 75 + Math.floor(Math.random() * 8) : bpDia,
-              sugar: demoMode ? 95 + Math.floor(Math.random() * 20) : sugarVal,
-              signalQuality: quality,
-              respRate: analysis.respRate ?? 15,
-              sdnn: analysis.hrv?.sdnn ?? baseHrvRef.current.sdnn,
-              rmssd: analysis.hrv?.rmssd ?? baseHrvRef.current.rmssd,
-              pnn50: analysis.hrv?.pnn50 ?? baseHrvRef.current.pnn50,
-              rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
-            });
-          }
+        if (isMeasuring) {
+          samplesRef.current.push({
+            bpm: hr,
+            spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
+            hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
+            bpSys: 0,
+            bpDia: 0,
+            sugar: 0,
+            signalQuality: sqi / 100,
+            respRate: analysis.respRate ?? 15,
+            sdnn: analysis.hrv?.sdnn ?? 0,
+            rmssd: analysis.hrv?.rmssd ?? 0,
+            pnn50: analysis.hrv?.pnn50 ?? 0,
+            rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
+          });
         }
       }
     } else {
@@ -606,9 +590,10 @@ export default function VitalMonitoringPage() {
         bpm: avg("bpm"),
         spo2: Math.round(avg("spo2")),
         hb: avg("hb"),
-        bpSys: bpSysAvg,
-        bpDia: bpDiaAvg,
-        sugar: Math.round(avg("sugar")),
+        // BP and Glucose not reliably measurable from PPG - set to 0
+        bpSys: 0,
+        bpDia: 0,
+        sugar: 0,
         signalQuality: avg("signalQuality"),
         respRate: avg("respRate"),
         sdnn: avg("sdnn"),
@@ -623,7 +608,7 @@ export default function VitalMonitoringPage() {
         hb: hb ?? 0,
         bpSys: 0,
         bpDia: 0,
-        sugar: sugar ?? 0,
+        sugar: 0,
         signalQuality: signalQuality ?? 0,
         respRate: respRate ?? 0,
         sdnn: hrv?.sdnn ?? 0,
@@ -653,7 +638,7 @@ export default function VitalMonitoringPage() {
       }, videoBlob);
       setReadingCount(getReadingCount());
     }
-  }, [bpm, hb, spo2, sugar, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient]);
+  }, [bpm, hb, spo2, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -988,12 +973,12 @@ export default function VitalMonitoringPage() {
               <p className="text-xl font-bold text-violet-400">{finalReading.sdnn > 0 ? finalReading.sdnn.toFixed(1) : "—"} ms</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
-              <p className="text-neutral-500 text-[10px] mb-1">BP</p>
-              <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys}/{finalReading.bpDia}</p>
+              <p className="text-neutral-500 text-[10px] mb-1">Hb</p>
+              <p className="text-xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
-              <p className="text-neutral-500 text-[10px] mb-1">Glucose</p>
-              <p className="text-xl font-bold text-amber-400">{finalReading.sugar} mg/dL</p>
+              <p className="text-neutral-500 text-[10px] mb-1">Signal Quality</p>
+              <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
             </div>
           </div>
           <div className="mt-3 flex flex-wrap gap-2 justify-center text-xs">
@@ -1171,15 +1156,16 @@ export default function VitalMonitoringPage() {
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">SpO₂</p>
               <p className="text-2xl font-bold text-cyan-400">{spo2 !== null ? `${spo2}%` : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
-              <p className="text-neutral-400 mb-1">BP</p>
-              <p className="text-xl font-bold text-emerald-400">{bp || "--"}</p>
-            </div>
-            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
-              <p className="text-neutral-400 mb-1">Hb / Glucose</p>
+              <p className="text-neutral-400 mb-1">Hb</p>
               <p className="text-base font-bold text-rose-400">{hb !== null ? `${hb.toFixed(1)} g/dL` : "--"}</p>
-              <p className="text-base font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
+            </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">Signal Quality</p>
+              <p className="text-2xl font-bold text-violet-400">{signalQuality !== null ? `${(signalQuality * 100).toFixed(1)}%` : "--"}</p>
             </div>
           </div>
         )}
@@ -1247,11 +1233,11 @@ export default function VitalMonitoringPage() {
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">BP</p>
-                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys}/{finalReading.bpDia}</p>
+                  <p className="text-xl font-bold text-emerald-400">N/A</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Glucose</p>
-                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar} mg/dL</p>
+                  <p className="text-xl font-bold text-amber-400">N/A</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Signal</p>
