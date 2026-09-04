@@ -314,17 +314,42 @@ class VitalSignController extends ChangeNotifier {
   }
 
   double _estimateRespiratoryRate(List<double> signal) {
-    // Simplified respiratory rate estimation from baseline wander
-    // In production, use bandpass 0.1-0.5 Hz + autocorrelation/FFT
-    if (signal.length < 300) return 15.0; // Default
-    
-    // Detrend and lowpass filter around 0.1-0.5 Hz
+    // Respiratory rate estimation from baseline wander in PPG
+    // Breathing causes low-frequency modulation (0.1-0.5 Hz) of the DC level
+    if (signal.length < 180) return 15.0; // Need at least 6s at 30fps
+
+    // Detrend
     final mean = signal.reduce((a, b) => a + b) / signal.length;
     final detrended = signal.map((v) => v - mean).toList();
-    
-    // Simple peak detection on low-frequency component
-    // This is a placeholder - real implementation needs proper filtering
-    return 14.0 + (math.Random().nextDouble() - 0.5) * 4; // 12-16 range
+
+    // Simple exponential smoothing as a lowpass filter (~0.3 Hz cutoff at 30fps)
+    final alpha = 0.15;
+    final smoothed = <double>[];
+    double prev = detrended[0];
+    smoothed.add(prev);
+    for (int i = 1; i < detrended.length; i++) {
+      final val = alpha * detrended[i] + (1 - alpha) * prev;
+      smoothed.add(val);
+      prev = val;
+    }
+
+    // Find peaks in the smoothed baseline (min distance ~2s = 60 samples at 30fps)
+    final peaks = _findPeaks(smoothed, minDistance: 60, threshold: 0.0);
+    if (peaks.length < 2) return 15.0;
+
+    // Calculate intervals between consecutive peaks
+    final intervals = <double>[];
+    for (int i = 1; i < peaks.length; i++) {
+      intervals.add((peaks[i] - peaks[i - 1]) / 30.0); // seconds
+    }
+
+    // Filter physiologically plausible intervals (1s to 6s = 10-60 breaths/min)
+    final valid = intervals.where((t) => t >= 1.0 && t <= 6.0).toList();
+    if (valid.isEmpty) return 15.0;
+
+    final avgInterval = valid.reduce((a, b) => a + b) / valid.length;
+    final rate = 60.0 / avgInterval;
+    return rate.clamp(8.0, 35.0);
   }
 
   void _clearBuffers() {

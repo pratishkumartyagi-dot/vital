@@ -81,6 +81,10 @@ export default function ValidationPage() {
   const [loading, setLoading] = useState(true);
   const [showNewSession, setShowNewSession] = useState(false);
   const [showNewMeasurement, setShowNewMeasurement] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [newSession, setNewSession] = useState({
@@ -326,6 +330,77 @@ export default function ValidationPage() {
     }
   };
 
+  const handleImportCsv = async (file: File) => {
+    setImporting(true);
+    setImportError(null);
+    setImportSuccess(null);
+
+    try {
+      const text = await file.text();
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      if (lines.length < 2) {
+        throw new Error('CSV file is empty or has no data rows');
+      }
+
+      const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+      const expectedHeaders = ['timestamp', 'app_bpm', 'app_hb', 'app_spo2', 'gt_bpm', 'gt_spo2', 'gt_hb', 'gt_resp_rate'];
+      const missing = expectedHeaders.filter((h) => !header.includes(h));
+      if (missing.length > 0) {
+        throw new Error(`Missing required CSV columns: ${missing.join(', ')}`);
+      }
+
+      const session = await createValidationSession({
+        cameraMode: 'rear',
+        protocolNotes: `Imported from CSV: ${file.name}`,
+      });
+
+      let imported = 0;
+      for (let i = 1; i < lines.length; i++) {
+        const values = lines[i].split(',').map((v) => v.trim());
+        if (values.length < header.length) continue;
+
+        const row: Record<string, string> = {};
+        header.forEach((key, idx) => {
+          row[key] = values[idx] || '';
+        });
+
+        const appBpm = row.app_bpm ? parseFloat(row.app_bpm) : undefined;
+        const appHb = row.app_hb ? parseFloat(row.app_hb) : undefined;
+        const appSpo2 = row.app_spo2 ? parseFloat(row.app_spo2) : undefined;
+        const gtBpm = row.gt_bpm ? parseFloat(row.gt_bpm) : undefined;
+        const gtSpo2 = row.gt_spo2 ? parseFloat(row.gt_spo2) : undefined;
+        const gtHb = row.gt_hb ? parseFloat(row.gt_hb) : undefined;
+        const gtRespRate = row.gt_resp_rate ? parseFloat(row.gt_resp_rate) : undefined;
+
+        if (appBpm == null && gtBpm == null) continue;
+
+        await addValidationMeasurement({
+          sessionId: session.id,
+          appBpm,
+          appHb,
+          appSpo2,
+          gtBpm,
+          gtSpo2,
+          gtHb,
+          gtRespRate,
+          isValid: true,
+        });
+        imported++;
+      }
+
+      setImportSuccess(`Imported ${imported} measurements into new session ${session.id}`);
+      await loadData();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to import CSV';
+      setImportError(message);
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleString();
   };
@@ -396,13 +471,42 @@ export default function ValidationPage() {
           <div className="lg:col-span-2 bg-neutral-900 rounded-2xl border border-neutral-800 p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white">Sessions</h2>
-              <button
-                onClick={() => setShowNewSession(true)}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg transition"
-              >
-                New Session
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowNewSession(true)}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg transition"
+                >
+                  New Session
+                </button>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={importing}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm rounded-lg transition"
+                >
+                  {importing ? 'Importing...' : 'Import CSV'}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleImportCsv(file);
+                  }}
+                />
+              </div>
             </div>
+            {importError && (
+              <div className="mb-4 p-2 bg-red-900/30 border border-red-700 rounded text-red-300 text-xs">
+                {importError}
+              </div>
+            )}
+            {importSuccess && (
+              <div className="mb-4 p-2 bg-emerald-900/30 border border-emerald-700 rounded text-emerald-300 text-xs">
+                {importSuccess}
+              </div>
+            )}
 
             {loading ? (
               <div className="text-center py-8 text-neutral-400">Loading...</div>

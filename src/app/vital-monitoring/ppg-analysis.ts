@@ -144,7 +144,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[]):
   
   // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
   const pi = computePerfusionIndex(raw);
-  const piScore = Math.min(1, pi / 5); // PI > 5% is good
+  const piScore = Math.min(1, pi / 2); // PI > 2% is good for smartphone PPG
   
   // 2. Spectral SNR in cardiac band (0.7-3.5 Hz)
   const { freqs, psd } = powerSpectrum(filtered, 30);
@@ -154,7 +154,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[]):
     else if (freqs[i] > 3.5 && freqs[i] <= 15) noisePower += psd[i];
   }
   const snr = noisePower > 0 ? signalPower / noisePower : 0;
-  const snrScore = Math.min(1, snr / 10); // SNR > 10 is good
+  const snrScore = Math.min(1, snr / 4); // SNR > 4 is good for smartphone PPG
   
   // 3. Pulse regularity (CV of RR intervals)
   const rrMs: number[] = [];
@@ -165,7 +165,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[]):
   const regScore = Math.max(0, 1 - cv / 20); // CV < 20% is regular
   
   // Combined score (weighted average)
-  return Math.round((0.4 * piScore + 0.3 * snrScore + 0.3 * regScore) * 100);
+  return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * 100);
 }
 
 function computeHRV(rrMs: number[]): HRVMetrics {
