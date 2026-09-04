@@ -133,8 +133,27 @@ export default function VitalMonitoringPage() {
   });
   const [formError, setFormError] = useState<string | null>(null);
   const [readingCount, setReadingCount] = useState(0);
+  const [readings, setReadings] = useState<VitalReading[]>([]);
+  const [readingsLoading, setReadingsLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [exporting, setExporting] = useState(false);
+  
+  const loadReadings = useCallback(async () => {
+    setReadingsLoading(true);
+    try {
+      const data = await getVitalReadings({ limit: 50 });
+      setReadings(data);
+      setReadingCount(data.length);
+    } catch (error) {
+      console.error("Failed to load readings:", error);
+    } finally {
+      setReadingsLoading(false);
+    }
+  }, []);
+  
+  useEffect(() => {
+    loadReadings();
+  }, [loadReadings]);
   
   const videoChunksRef = useRef<Blob[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -160,10 +179,6 @@ export default function VitalMonitoringPage() {
         mediaRecorderRef.current.stop();
       }
     };
-  }, []);
-
-  useEffect(() => {
-    setReadingCount(getReadingCount());
   }, []);
 
   useEffect(() => {
@@ -626,7 +641,7 @@ export default function VitalMonitoringPage() {
 
     const videoBlob = await stopVideoRecording().catch(() => null);
     if (videoBlob && patient && computedReading) {
-      addVitalReading({
+      await addVitalReading({
         patient: {
           name: patient.name,
           age: patient.age,
@@ -635,10 +650,13 @@ export default function VitalMonitoringPage() {
           pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
         },
         vitals: computedReading,
+        cameraMode,
+        demoMode,
+        spo2Offset,
       }, videoBlob);
-      setReadingCount(getReadingCount());
+      await loadReadings();
     }
-  }, [bpm, hb, spo2, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient]);
+  }, [bpm, hb, spo2, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -1246,21 +1264,33 @@ export default function VitalMonitoringPage() {
               </div>
               <div className="mt-4 flex flex-col sm:flex-row gap-3">
                 <button
-                  onClick={() => {
-                    downloadReadings(getVitalReadings(), "csv");
-                    setReadingCount(getReadingCount());
+                  onClick={async () => {
+                    setExporting(true);
+                    try {
+                      const data = await getVitalReadings({ limit: 1000 });
+                      await downloadReadings(data, "csv");
+                      await loadReadings();
+                    } finally {
+                      setExporting(false);
+                    }
                   }}
-                  disabled={exporting}
+                  disabled={exporting || readingsLoading}
                   className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition"
                 >
                   {exporting ? "Exporting..." : "Export CSV & Clear"}
                 </button>
                 <button
-                  onClick={() => {
-                    downloadReadings(getVitalReadings(), "excel");
-                    setReadingCount(getReadingCount());
+                  onClick={async () => {
+                    setExporting(true);
+                    try {
+                      const data = await getVitalReadings({ limit: 1000 });
+                      await downloadReadings(data, "excel");
+                      await loadReadings();
+                    } finally {
+                      setExporting(false);
+                    }
                   }}
-                  disabled={exporting}
+                  disabled={exporting || readingsLoading}
                   className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 transition"
                 >
                   {exporting ? "Exporting..." : "Export Excel & Clear"}
@@ -1305,53 +1335,66 @@ export default function VitalMonitoringPage() {
                 <span className="text-[10px] text-neutral-400">{readingCount}/{getMaxReadings()} readings</span>
               </div>
               <div className="max-h-64 overflow-y-auto space-y-2">
-                {getVitalReadings().map((reading: VitalReading) => (
-                  <div key={reading.id} className="bg-neutral-800 rounded-lg p-3 border border-neutral-700 text-xs">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-neutral-100 font-medium">{reading.patient.name}</p>
-                        <p className="text-neutral-400">
-                          {new Date(reading.timestamp).toLocaleString()} • {reading.vitals.bpm.toFixed(0)} BPM • SpO₂ {reading.vitals.spo2}% • {reading.vitals.rhythm}
-                        </p>
+                {readings.length > 0 ? (
+                  readings.map((reading: VitalReading) => (
+                    <div key={reading.id} className="bg-neutral-800 rounded-lg p-3 border border-neutral-700 text-xs">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-neutral-100 font-medium">{reading.patient.name}</p>
+                          <p className="text-neutral-400">
+                            {new Date(reading.timestamp).toLocaleString()} • {reading.vitals.bpm.toFixed(0)} BPM • SpO₂ {reading.vitals.spo2}% • {reading.vitals.rhythm}
+                          </p>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            await deleteVitalReading(reading.id);
+                            await loadReadings();
+                          }}
+                          className="px-2 py-1 text-[10px] text-neutral-400 hover:text-red-400 transition"
+                        >
+                          Delete
+                        </button>
                       </div>
-                      <button
-                        onClick={() => {
-                          deleteVitalReading(reading.id);
-                          setReadingCount(getReadingCount());
-                        }}
-                        className="px-2 py-1 text-[10px] text-neutral-400 hover:text-red-400 transition"
-                      >
-                        Delete
-                      </button>
+                      {reading.videoData && (
+                        <div className="mt-2">
+                          <video src={reading.videoData} controls className="w-full max-h-32 rounded bg-black" />
+                        </div>
+                      )}
                     </div>
-                    {reading.videoData && (
-                      <div className="mt-2">
-                        <video src={reading.videoData} controls className="w-full max-h-32 rounded bg-black" />
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {getVitalReadings().length === 0 && (
+                  ))
+                ) : (
                   <p className="text-neutral-500 text-center py-4">No readings stored yet</p>
                 )}
               </div>
               <div className="mt-3 flex gap-2">
                 <button
-                  onClick={() => {
-                    downloadReadings(getVitalReadings(), "csv");
-                    setReadingCount(getReadingCount());
+                  onClick={async () => {
+                    setExporting(true);
+                    try {
+                      const data = await getVitalReadings({ limit: 1000 });
+                      await downloadReadings(data, "csv");
+                      await loadReadings();
+                    } finally {
+                      setExporting(false);
+                    }
                   }}
-                  disabled={getVitalReadings().length === 0 || exporting}
+                  disabled={readings.length === 0 || exporting || readingsLoading}
                   className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition"
                 >
                   Export All as CSV & Clear
                 </button>
                 <button
-                  onClick={() => {
-                    downloadReadings(getVitalReadings(), "excel");
-                    setReadingCount(getReadingCount());
+                  onClick={async () => {
+                    setExporting(true);
+                    try {
+                      const data = await getVitalReadings({ limit: 1000 });
+                      await downloadReadings(data, "excel");
+                      await loadReadings();
+                    } finally {
+                      setExporting(false);
+                    }
                   }}
-                  disabled={getVitalReadings().length === 0 || exporting}
+                  disabled={readings.length === 0 || exporting || readingsLoading}
                   className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-sky-600 hover:bg-sky-700 disabled:opacity-50 transition"
                 >
                   Export All as Excel & Clear

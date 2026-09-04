@@ -9,8 +9,16 @@ class PpgSignalProcessor(
     private val maxBufferSize = (sampleRateHz * windowSizeSeconds).toInt()
     private val rawSignalBuffer = ArrayList<Double>()
 
-    private val bCoeffs = doubleArrayOf(0.0048, 0.0, -0.0096, 0.0, 0.0048)
-    private val aCoeffs = doubleArrayOf(1.0, -3.2815, 4.0906, -2.3168, 0.5103)
+    // 4th-order Butterworth bandpass filter (0.5-3.5 Hz @ 30 Hz)
+    // SOS coefficients from scipy.signal.butter(4, [0.5/15, 3.5/15], btype='band', output='sos')
+    // Section 1: [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916]
+    // Section 2: [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327]
+    private val sos = doubleArrayOf(
+        // Section 1: b0, b1, b2, a1, a2
+        0.00295136, 0.0, -0.00295136, -1.891408, 0.897916,
+        // Section 2: b0, b1, b2, a1, a2
+        1.0, 2.0, 1.0, -1.882394, 0.906327
+    )
 
     fun addSample(value: Double) {
         if (rawSignalBuffer.size >= maxBufferSize) {
@@ -29,30 +37,38 @@ class PpgSignalProcessor(
         val mean = rawSignalBuffer.average()
         val detrended = rawSignalBuffer.map { it - mean }.toDoubleArray()
 
-        val filtered = applyIirFilter(detrended)
+        val filtered = applySosFilter(detrended)
 
         return calculateHeartRate(filtered)
     }
 
-    private fun applyIirFilter(input: DoubleArray): DoubleArray {
-        val output = DoubleArray(input.size)
-        val x = DoubleArray(5)
-        val y = DoubleArray(5)
-
-        for (i in input.indices) {
-            for (j in 4 downTo 1) x[j] = x[j - 1]
-            x[0] = input[i]
-
-            var filteredValue = bCoeffs[0] * x[0] + bCoeffs[1] * x[1] + bCoeffs[2] * x[2] + bCoeffs[3] * x[3] + bCoeffs[4] * x[4]
-            filteredValue -= aCoeffs[1] * y[1] + aCoeffs[2] * y[2] + aCoeffs[3] * y[3] + aCoeffs[4] * y[4]
-            filteredValue /= aCoeffs[0]
-
-            for (j in 4 downTo 1) y[j] = y[j - 1]
-            y[0] = filteredValue
-
-            output[i] = filteredValue
+    private fun applySosFilter(input: DoubleArray): DoubleArray {
+        var stage = input.copyOf()
+        
+        // Process two cascaded biquad sections
+        for (sectionIdx in 0..1) {
+            val offset = sectionIdx * 5
+            val b0 = sos[offset]
+            val b1 = sos[offset + 1]
+            val b2 = sos[offset + 2]
+            val a1 = sos[offset + 3]
+            val a2 = sos[offset + 4]
+            
+            val output = DoubleArray(stage.size)
+            var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
+            
+            for (i in stage.indices) {
+                val x0 = stage[i]
+                val y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                
+                output[i] = y0
+                x2 = x1; x1 = x0
+                y2 = y1; y1 = y0
+            }
+            stage = output
         }
-        return output
+        
+        return stage
     }
 
     private fun calculateHeartRate(signal: DoubleArray): Double? {

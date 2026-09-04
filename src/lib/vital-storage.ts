@@ -24,6 +24,40 @@ export interface VitalReading {
   };
   videoData?: string;
   videoMimeType?: string;
+  cameraMode?: "front" | "rear";
+  demoMode?: boolean;
+  spo2Offset?: number;
+}
+
+export interface ValidationStats {
+  count: number;
+  bpm: ValidationMetricStats;
+  spo2: ValidationMetricStats;
+  hb: ValidationMetricStats;
+  respRate: ValidationMetricStats;
+  bpSys: ValidationMetricStats;
+  bpDia: ValidationMetricStats;
+  sugar: ValidationMetricStats;
+  sdnn: ValidationMetricStats;
+  rmssd: ValidationMetricStats;
+  pnn50: ValidationMetricStats;
+}
+
+export interface ValidationMetricStats {
+  count: number;
+  meanBias: number;
+  mae: number;
+  rmse: number;
+  std: number;
+  median: number;
+  loaLower: number;
+  loaUpper: number;
+  within5?: number;
+  within10?: number;
+  within2?: number;
+  within3?: number;
+  within1?: number;
+  within2Hb?: number;
 }
 
 const MAX_READINGS = 50;
@@ -48,10 +82,39 @@ function saveReadings(readings: VitalReading[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(readings));
 }
 
-export function addVitalReading(
+export async function addVitalReading(
   reading: Omit<VitalReading, "id" | "timestamp">,
   videoBlob?: Blob
-): VitalReading {
+): Promise<VitalReading> {
+  // Try to save to database first
+  try {
+    const videoBase64 = videoBlob 
+      ? await blobToBase64(videoBlob)
+      : undefined;
+    
+    const response = await fetch("/api/readings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        patient: reading.patient,
+        vitals: reading.vitals,
+        cameraMode: reading.cameraMode,
+        demoMode: reading.demoMode,
+        spo2Offset: reading.spo2Offset,
+        videoBlob: videoBase64,
+        videoMimeType: videoBlob?.type,
+      }),
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      return { ...reading, id: result.id, timestamp: new Date().toISOString() } as VitalReading;
+    }
+  } catch (error) {
+    console.warn("Database save failed, falling back to localStorage:", error);
+  }
+  
+  // Fallback to localStorage
   const readings = getStoredReadings();
   
   const newReading: VitalReading = {
@@ -75,15 +138,121 @@ export function addVitalReading(
   return newReading;
 }
 
-export function getVitalReadings(): VitalReading[] {
+async function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+export async function getVitalReadings(params?: {
+  limit?: number;
+  offset?: number;
+  cameraMode?: "front" | "rear";
+  demoMode?: boolean;
+  startDate?: string;
+  endDate?: string;
+}): Promise<VitalReading[]> {
+  // Try database first
+  try {
+    const searchParams = new URLSearchParams();
+    if (params?.limit) searchParams.set("limit", params.limit.toString());
+    if (params?.offset) searchParams.set("offset", params.offset.toString());
+    if (params?.cameraMode) searchParams.set("cameraMode", params.cameraMode);
+    if (params?.demoMode !== undefined) searchParams.set("demoMode", params.demoMode.toString());
+    if (params?.startDate) searchParams.set("startDate", params.startDate);
+    if (params?.endDate) searchParams.set("endDate", params.endDate);
+    
+    const response = await fetch(`/api/readings?${searchParams}`);
+    if (response.ok) {
+      const result = await response.json();
+      return result.readings.map((r: any) => ({
+        ...r,
+        patient: {
+          name: r.patientName,
+          age: r.patientAge,
+          sex: r.patientSex,
+          lmp: r.patientLmp || undefined,
+          pregnancy: r.patientPregnancy || undefined,
+        },
+        vitals: {
+          bpm: r.bpm,
+          spo2: r.spo2,
+          hb: r.hb,
+          bpSys: r.bpSys,
+          bpDia: r.bpDia,
+          sugar: r.sugar,
+          signalQuality: r.signalQuality,
+          respRate: r.respRate,
+          sdnn: r.sdnn,
+          rmssd: r.rmssd,
+          pnn50: r.pnn50,
+          rhythm: r.rhythm,
+        },
+        cameraMode: r.cameraMode,
+        demoMode: r.demoMode,
+        spo2Offset: r.spo2Offset,
+      }));
+    }
+  } catch (error) {
+    console.warn("Database fetch failed, falling back to localStorage:", error);
+  }
+  
+  // Fallback to localStorage
   return getStoredReadings();
 }
 
-export function getVitalReading(id: string): VitalReading | undefined {
+export async function getVitalReading(id: string): Promise<VitalReading | undefined> {
+  try {
+    const response = await fetch(`/api/readings?id=${id}`);
+    if (response.ok) {
+      const result = await response.json();
+      const r = result.readings[0];
+      if (r) {
+        return {
+          ...r,
+          patient: {
+            name: r.patientName,
+            age: r.patientAge,
+            sex: r.patientSex,
+            lmp: r.patientLmp || undefined,
+            pregnancy: r.patientPregnancy || undefined,
+          },
+          vitals: {
+            bpm: r.bpm,
+            spo2: r.spo2,
+            hb: r.hb,
+            bpSys: r.bpSys,
+            bpDia: r.bpDia,
+            sugar: r.sugar,
+            signalQuality: r.signalQuality,
+            respRate: r.respRate,
+            sdnn: r.sdnn,
+            rmssd: r.rmssd,
+            pnn50: r.pnn50,
+            rhythm: r.rhythm,
+          },
+        };
+      }
+    }
+  } catch (error) {
+    console.warn("Database fetch failed:", error);
+  }
+  
   return getStoredReadings().find(r => r.id === id);
 }
 
-export function deleteVitalReading(id: string): boolean {
+export async function deleteVitalReading(id: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/readings?id=${id}`, { method: "DELETE" });
+    if (response.ok) return true;
+  } catch (error) {
+    console.warn("Database delete failed:", error);
+  }
+  
+  // Fallback
   const readings = getStoredReadings();
   const index = readings.findIndex(r => r.id === id);
   if (index === -1) return false;
@@ -94,7 +263,13 @@ export function deleteVitalReading(id: string): boolean {
   return true;
 }
 
-export function clearAllReadings(): void {
+export async function clearAllReadings(): Promise<void> {
+  try {
+    // Could add a bulk delete endpoint if needed
+  } catch (error) {
+    console.warn("Database clear failed:", error);
+  }
+  
   const readings = getStoredReadings();
   readings.forEach(r => {
     if (r.videoData) URL.revokeObjectURL(r.videoData);
@@ -113,6 +288,8 @@ export function exportReadingsToCSV(readings: VitalReading[]): string {
     "Sex",
     "LMP",
     "Pregnancy",
+    "Camera Mode",
+    "Demo Mode",
     "Heart Rate (BPM)",
     "SpO2 (%)",
     "Hemoglobin (g/dL)",
@@ -136,6 +313,8 @@ export function exportReadingsToCSV(readings: VitalReading[]): string {
     r.patient.sex,
     r.patient.lmp || "",
     r.patient.pregnancy || "",
+    r.cameraMode || "front",
+    r.demoMode ? "Yes" : "No",
     r.vitals.bpm.toFixed(1),
     r.vitals.spo2.toString(),
     r.vitals.hb.toFixed(1),
@@ -163,7 +342,7 @@ export function exportReadingsToExcel(readings: VitalReading[]): Blob {
   return new Blob([csv], { type: "application/vnd.ms-excel" });
 }
 
-export function downloadReadings(readings: VitalReading[], format: "csv" | "excel" = "csv"): void {
+export async function downloadReadings(readings: VitalReading[], format: "csv" | "excel" = "csv"): Promise<void> {
   if (readings.length === 0) return;
   
   let blob: Blob;
@@ -187,13 +366,120 @@ export function downloadReadings(readings: VitalReading[], format: "csv" | "exce
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
   
-  clearAllReadings();
+  await clearAllReadings();
 }
 
-export function getReadingCount(): number {
+export async function getReadingCount(): Promise<number> {
+  try {
+    const readings = await getVitalReadings({ limit: 1 });
+    // This is a rough count - could add a count endpoint
+    const response = await fetch("/api/readings?limit=1000");
+    if (response.ok) {
+      const result = await response.json();
+      return result.readings.length;
+    }
+  } catch (error) {
+    console.warn("Database count failed:", error);
+  }
   return getStoredReadings().length;
 }
 
 export function getMaxReadings(): number {
   return MAX_READINGS;
+}
+
+// Validation API
+export async function createValidationSession(data: {
+  subjectId?: string;
+  deviceInfo?: string;
+  cameraMode: "front" | "rear";
+  referenceDevice?: string;
+  protocolNotes?: string;
+}) {
+  const response = await fetch("/api/validation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "createSession", ...data }),
+  });
+  return response.json();
+}
+
+export async function addValidationMeasurement(data: {
+  sessionId: string;
+  appBpm?: number;
+  appSpo2?: number;
+  appHb?: number;
+  appRespRate?: number;
+  appBpSys?: number;
+  appBpDia?: number;
+  appSugar?: number;
+  appSignalQuality?: number;
+  appRhythm?: string;
+  appSdnn?: number;
+  appRmssd?: number;
+  appPnn50?: number;
+  gtBpm?: number;
+  gtSpo2?: number;
+  gtHb?: number;
+  gtRespRate?: number;
+  gtBpSys?: number;
+  gtBpDia?: number;
+  gtSugar?: number;
+  gtRhythm?: string;
+  gtSdnn?: number;
+  gtRmssd?: number;
+  gtPnn50?: number;
+  isValid?: boolean;
+  exclusionReason?: string;
+}) {
+  const response = await fetch("/api/validation", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "addMeasurement", ...data }),
+  });
+  return response.json();
+}
+
+export async function getValidationStatistics(params?: {
+  sessionId?: string;
+  cameraMode?: "front" | "rear";
+}): Promise<ValidationStats | null> {
+  try {
+    const response = await fetch("/api/validation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "getStatistics", ...params }),
+    });
+    if (response.ok) {
+      const result = await response.json();
+      return result.statistics;
+    }
+  } catch (error) {
+    console.warn("Validation statistics fetch failed:", error);
+  }
+  return null;
+}
+
+export async function getValidationSessions(limit = 50) {
+  try {
+    const response = await fetch(`/api/validation?limit=${limit}`);
+    if (response.ok) {
+      return (await response.json()).sessions;
+    }
+  } catch (error) {
+    console.warn("Validation sessions fetch failed:", error);
+  }
+  return [];
+}
+
+export async function getValidationMeasurements(sessionId: string, limit = 100) {
+  try {
+    const response = await fetch(`/api/validation?sessionId=${sessionId}&limit=${limit}`);
+    if (response.ok) {
+      return (await response.json()).measurements;
+    }
+  } catch (error) {
+    console.warn("Validation measurements fetch failed:", error);
+  }
+  return [];
 }
