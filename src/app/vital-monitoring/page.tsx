@@ -452,54 +452,47 @@ export default function VitalMonitoringPage() {
         }
       }
 
+      // Always update with new values when available, preserving last valid otherwise
+      setBpm(hr);
       if (hr !== null) {
-        setBpm(hr);
+        // Update Hb and SpO2 when heart rate is valid, preserving last valid value if new one unavailable
         setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
         setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
-        // BP and Glucose cannot be reliably measured from PPG - display as unavailable
-        setBp(null);
-        setSugar(null);
-        if (analysis.respRate !== null) {
-          setRespRate(Math.round(analysis.respRate * 10) / 10);
-        } else if (demoMode) {
-          setRespRate(Math.round((15 + (Math.random() - 0.5) * 2) * 10) / 10);
-        }
-        if (analysis.hrv) {
-          setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
-        } else if (demoMode) {
-          const sdnn = baseHrvRef.current.sdnn + (Math.random() - 0.5) * 4;
-          const rmssd = baseHrvRef.current.rmssd + (Math.random() - 0.5) * 4;
-          const pnn50 = Math.max(0, baseHrvRef.current.pnn50 + (Math.random() - 0.5) * 4);
-          setHrv({ sdnn, rmssd, pnn50 });
-        }
-        setRhythm(analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm);
-
-        if (isMeasuring) {
-          samplesRef.current.push({
-            bpm: hr,
-            spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
-            hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
-            bpSys: 0,
-            bpDia: 0,
-            sugar: 0,
-            signalQuality: sqi / 100,
-            respRate: analysis.respRate ?? 15,
-            sdnn: analysis.hrv?.sdnn ?? 0,
-            rmssd: analysis.hrv?.rmssd ?? 0,
-            pnn50: analysis.hrv?.pnn50 ?? 0,
-            rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
-          });
-        }
       }
-    } else {
-      setBpm(null);
-      setHb(null);
-      setHrv(null);
-      setRespRate(null);
-      setRhythm("unknown");
-      setSpo2(null);
+      // BP and Glucose cannot be reliably measured from PPG - display as unavailable
       setBp(null);
       setSugar(null);
+      if (analysis.respRate !== null) {
+        setRespRate(Math.round(analysis.respRate * 10) / 10);
+      } else if (demoMode) {
+        setRespRate(Math.round((15 + (Math.random() - 0.5) * 2) * 10) / 10);
+      }
+      if (analysis.hrv) {
+        setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
+      } else if (demoMode) {
+        const sdnn = baseHrvRef.current.sdnn + (Math.random() - 0.5) * 4;
+        const rmssd = baseHrvRef.current.rmssd + (Math.random() - 0.5) * 4;
+        const pnn50 = Math.max(0, baseHrvRef.current.pnn50 + (Math.random() - 0.5) * 4);
+        setHrv({ sdnn, rmssd, pnn50 });
+      }
+      setRhythm(analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm);
+
+      if (isMeasuring && hr !== null) {
+        samplesRef.current.push({
+          bpm: hr,
+          spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
+          hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
+          bpSys: 0,
+          bpDia: 0,
+          sugar: 0,
+          signalQuality: sqi / 100,
+          respRate: analysis.respRate ?? 15,
+          sdnn: analysis.hrv?.sdnn ?? 0,
+          rmssd: analysis.hrv?.rmssd ?? 0,
+          pnn50: analysis.hrv?.pnn50 ?? 0,
+          rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
+        });
+      }
     }
 
     drawWaveform();
