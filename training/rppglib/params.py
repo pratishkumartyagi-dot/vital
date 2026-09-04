@@ -4,7 +4,7 @@ class Config:
     def __init__(self):
         self.fps = 30
         self.ppg_low_freq = 0.5
-        self.ppg_high_freq = 10
+        self.ppg_high_freq = 3.5
         self.batch_size = 36
         self.num_workers = 0
         self.train_dataset = 'mcd_rppg'

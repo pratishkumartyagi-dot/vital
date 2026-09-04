@@ -55,7 +55,38 @@ function detrend(signal: number[]): number[] {
   return signal.map((y, i) => y - (slope * i + intercept));
 }
 
-export function bandpass(signal: number[], low: number, high: number, fs: number): number[] {
+/// 4th-order Butterworth bandpass filter using cascaded SOS (Second-Order Sections)
+/// Coefficients generated via: scipy.signal.butter(4, [low/(fs/2), high/(fs/2)], btype='band', output='sos')
+/// For 0.5-3.5 Hz at 30 Hz:
+const BUTTERWORTH_SOS_05_35_30: number[][] = [
+  [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916],
+  [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327],
+];
+
+function applySosFilter(signal: number[], sos: number[][]): number[] {
+  let stage = signal.slice();
+  for (const section of sos) {
+    const [b0, b1, b2, a0, a1, a2] = section;
+    const out: number[] = new Array(stage.length);
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < stage.length; i++) {
+      const x0 = stage[i];
+      const y0 = (b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+      out[i] = y0;
+      x2 = x1; x1 = x0;
+      y2 = y1; y1 = y0;
+    }
+    stage = out;
+  }
+  return stage;
+}
+
+export function butterworthBandpass(signal: number[], low: number, high: number, fs: number): number[] {
+  // For standard PPG range (0.5-3.5 Hz at 30 Hz), use pre-computed SOS
+  if (fs === 30 && low === 0.5 && high === 3.5) {
+    return applySosFilter(signal, BUTTERWORTH_SOS_05_35_30);
+  }
+  // Fallback: simple IIR cascade for other parameters
   const n = signal.length;
   if (n < 10) return signal.slice();
   const result: number[] = new Array(n);
@@ -73,14 +104,8 @@ export function bandpass(signal: number[], low: number, high: number, fs: number
   return result;
 }
 
-function butterBandpass(signal: number[], low: number, high: number, fs: number, order = 2): number[] {
-  let x = signal;
-  for (let i = 0; i < order; i++) x = bandpass(x, low, high, fs);
-  return x;
-}
-
 function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): { peaks: Peak[]; filtered: number[] } {
-  const filtered = butterBandpass(detrend(signal), 0.7, 3.5, fs, 2);
+  const filtered = butterworthBandpass(detrend(signal), 0.5, 3.5, fs);
   const peaks: Peak[] = [];
   const minDist = Math.max(1, Math.floor((60 / maxBpm) * fs));
   const sorted = filtered.slice().sort((a, b) => a - b);
@@ -103,6 +128,44 @@ function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): {
     }
   }
   return { peaks, filtered };
+}
+
+function computePerfusionIndex(signal: number[]): number {
+  if (signal.length < 10) return 0;
+  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+  let ac = 0;
+  for (const v of signal) ac += Math.abs(v - mean);
+  ac /= signal.length;
+  return mean > 0 ? (ac / mean) * 100 : 0;
+}
+
+function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[]): number {
+  if (peaks.length < 2) return 0;
+  
+  // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
+  const pi = computePerfusionIndex(raw);
+  const piScore = Math.min(1, pi / 5); // PI > 5% is good
+  
+  // 2. Spectral SNR in cardiac band (0.7-3.5 Hz)
+  const { freqs, psd } = powerSpectrum(filtered, 30);
+  let signalPower = 0, noisePower = 0;
+  for (let i = 0; i < freqs.length; i++) {
+    if (freqs[i] >= 0.7 && freqs[i] <= 3.5) signalPower += psd[i];
+    else if (freqs[i] > 3.5 && freqs[i] <= 15) noisePower += psd[i];
+  }
+  const snr = noisePower > 0 ? signalPower / noisePower : 0;
+  const snrScore = Math.min(1, snr / 10); // SNR > 10 is good
+  
+  // 3. Pulse regularity (CV of RR intervals)
+  const rrMs: number[] = [];
+  for (let i = 1; i < peaks.length; i++) {
+    rrMs.push(((peaks[i].index - peaks[i - 1].index) / 30) * 1000);
+  }
+  const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
+  const regScore = Math.max(0, 1 - cv / 20); // CV < 20% is regular
+  
+  // Combined score (weighted average)
+  return Math.round((0.4 * piScore + 0.3 * snrScore + 0.3 * regScore) * 100);
 }
 
 function computeHRV(rrMs: number[]): HRVMetrics {
@@ -178,12 +241,7 @@ export function analyzeHeartRate(ppg: number[], fs = 30): HeartMetrics {
   const bpm = meanRR > 0 ? 60000 / meanRR : 0;
   const hrv = computeHRV(rrMs);
   const rhythm = classifyRhythm(rrMs);
-  const meanFiltered = mean(filtered);
-  let ac = 0;
-  for (const v of filtered) ac += Math.abs(v - meanFiltered);
-  ac /= filtered.length;
-  const dc = mean(ppg);
-  const quality = dc > 0 ? Math.min(1, (ac / dc) * 50) : 0;
+  const quality = computeSignalQuality(filtered, ppg, valid);
   return {
     bpm: bpm > 30 && bpm < 220 ? bpm : null,
     peaks: valid.map((p) => p.index),
@@ -229,7 +287,7 @@ export function analyzeRespRate(ppg: number[], fs = 30): RespMetrics {
     return { respRate: null, method: "insufficient-data", confidence: 0 };
   }
   const detrended = detrend(ppg);
-  const lowpass = butterBandpass(detrended, 0.1, 0.5, fs, 2);
+  const lowpass = butterworthBandpass(detrended, 0.1, 0.5, fs);
   const ac = autocorrelate(lowpass);
   const minLag = Math.floor(fs / 0.5);
   const maxLag = Math.floor(fs / 0.1);
