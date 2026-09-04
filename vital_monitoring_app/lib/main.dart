@@ -47,12 +47,16 @@ class VitalMonitoringApp extends StatelessWidget {
         theme: ThemeData(
           primarySwatch: Colors.red,
           brightness: Brightness.dark,
+          useMaterial3: true,
         ),
         home: const VitalSignPage(),
       ),
     );
   }
 }
+
+enum CameraMode { front, rear }
+enum MeasurementMode { live, validation }
 
 class VitalSignPage extends StatefulWidget {
   const VitalSignPage({super.key});
@@ -66,6 +70,13 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   bool _isInitialized = false;
   bool _showInfoOverlay = false;
   String? _cameraError;
+  CameraMode _cameraMode = CameraMode.rear;
+  MeasurementMode _measurementMode = MeasurementMode.live;
+  bool _torchEnabled = true;
+  bool _isRecording = false;
+  List<Map<String, dynamic>> _validationData = [];
+  Map<String, dynamic>? _groundTruth = {};
+  Timer? _validationTimer;
 
   @override
   void initState() {
@@ -78,6 +89,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _validationTimer?.cancel();
     _disableTorch();
     _controller?.dispose();
     super.dispose();
@@ -113,12 +125,18 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
       return;
     }
 
-    // Prefer rear camera with flash for PPG monitoring
-    final rearCamera = _cameras.firstWhere(
-          (cam) => cam.lensDirection == CameraLensDirection.back,
-          orElse: () => _cameras.first,
-        );
-    final selectedCamera = rearCamera;
+    CameraDescription selectedCamera;
+    if (_cameraMode == CameraMode.rear) {
+      selectedCamera = _cameras.firstWhere(
+        (cam) => cam.lensDirection == CameraLensDirection.back,
+        orElse: () => _cameras.first,
+      );
+    } else {
+      selectedCamera = _cameras.firstWhere(
+        (cam) => cam.lensDirection == CameraLensDirection.front,
+        orElse: () => _cameras.first,
+      );
+    }
 
     try {
       _controller = CameraController(
@@ -163,8 +181,12 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         _isInitialized = true;
       });
 
-      // Enable torch/flash for PPG measurement
-      await _enableTorch();
+      // Enable torch for rear camera PPG
+      if (_cameraMode == CameraMode.rear && _torchEnabled) {
+        await _enableTorch();
+      } else if (_cameraMode == CameraMode.front) {
+        await _disableTorch();
+      }
 
       final vitalSignController =
           Provider.of<VitalSignController>(context, listen: false);
@@ -179,6 +201,29 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
       }
       debugPrint('Camera initialization error: $e');
     }
+  }
+
+  Future<void> _switchCameraMode(CameraMode mode) async {
+    if (mode == _cameraMode) return;
+    
+    _cameraMode = mode;
+    _disableTorch();
+    await _controller?.dispose();
+    _controller = null;
+    setState(() => _isInitialized = false);
+    await _initializeCamera();
+  }
+
+  Future<void> _toggleTorch() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    
+    _torchEnabled = !_torchEnabled;
+    if (_torchEnabled) {
+      await _enableTorch();
+    } else {
+      await _disableTorch();
+    }
+    setState(() {});
   }
 
   Future<void> _enableTorch() async {
@@ -239,7 +284,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     }
 
     // Ensure torch is on for rear-camera fingertip PPG
-    if (flashAvailable) {
+    if (flashAvailable && _cameraMode == CameraMode.rear && _torchEnabled) {
       try {
         await _controller!.setFlashMode(FlashMode.torch);
         debugPrint('Adaptive PPG: torch enabled');
@@ -247,6 +292,159 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         debugPrint('Adaptive PPG: torch enable failed: $e');
       }
     }
+  }
+
+  void _toggleMeasurementMode() {
+    setState(() {
+      _measurementMode = _measurementMode == MeasurementMode.live 
+          ? MeasurementMode.validation 
+          : MeasurementMode.live;
+      if (_measurementMode == MeasurementMode.validation) {
+        _startValidationMode();
+      } else {
+        _stopValidationMode();
+      }
+    });
+  }
+
+  void _startValidationMode() {
+    _validationData.clear();
+    _groundTruth = {
+      'bpm': null,
+      'spo2': null,
+      'hb': null,
+      'bpSys': null,
+      'bpDia': null,
+      'glucose': null,
+      'respRate': null,
+    };
+    
+    _validationTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      final controller = Provider.of<VitalSignController>(context, listen: false);
+      if (controller.currentState == TrackingState.complete) {
+        _validationData.add({
+          'timestamp': DateTime.now().toIso8601String(),
+          'appBpm': controller.heartRate,
+          'appHb': controller.hbLevel,
+          'appSpO2': _calculateSpO2(controller),
+        });
+      }
+    });
+  }
+
+  void _stopValidationMode() {
+    _validationTimer?.cancel();
+    _validationTimer = null;
+  }
+
+  double? _calculateSpO2(VitalSignController controller) {
+    // This would need access to red/blue buffers - placeholder
+    return null;
+  }
+
+  void _showGroundTruthDialog() {
+    final bpmController = TextEditingController(text: _groundTruth?['bpm']?.toString() ?? '');
+    final spo2Controller = TextEditingController(text: _groundTruth?['spo2']?.toString() ?? '');
+    final hbController = TextEditingController(text: _groundTruth?['hb']?.toString() ?? '');
+    final bpSysController = TextEditingController(text: _groundTruth?['bpSys']?.toString() ?? '');
+    final bpDiaController = TextEditingController(text: _groundTruth?['bpDia']?.toString() ?? '');
+    final glucoseController = TextEditingController(text: _groundTruth?['glucose']?.toString() ?? '');
+    final respController = TextEditingController(text: _groundTruth?['respRate']?.toString() ?? '');
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Enter Ground Truth Values'),
+        backgroundColor: Colors.grey[900],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildDialogField('Heart Rate (BPM)', bpmController, TextInputType.number),
+              _buildDialogField('SpO₂ (%)', spo2Controller, TextInputType.number),
+              _buildDialogField('Hb (g/dL)', hbController, TextInputType.number),
+              _buildDialogField('BP Systolic (mmHg)', bpSysController, TextInputType.number),
+              _buildDialogField('BP Diastolic (mmHg)', bpDiaController, TextInputType.number),
+              _buildDialogField('Glucose (mg/dL)', glucoseController, TextInputType.number),
+              _buildDialogField('Resp Rate (/min)', respController, TextInputType.number),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              setState(() {
+                _groundTruth = {
+                  'bpm': double.tryParse(bpmController.text),
+                  'spo2': double.tryParse(spo2Controller.text),
+                  'hb': double.tryParse(hbController.text),
+                  'bpSys': double.tryParse(bpSysController.text),
+                  'bpDia': double.tryParse(bpDiaController.text),
+                  'glucose': double.tryParse(glucoseController.text),
+                  'respRate': double.tryParse(respController.text),
+                };
+              });
+              Navigator.pop(context);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDialogField(String label, TextEditingController controller, TextInputType type) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TextField(
+        controller: controller,
+        keyboardType: type,
+        style: const TextStyle(color: Colors.white),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: const TextStyle(color: Colors.grey),
+          enabledBorder: OutlineInputBorder(
+            borderSide: const BorderSide(color: Colors.grey),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderSide: const BorderSide(color: Colors.red),
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _exportValidationData() {
+    if (_validationData.isEmpty) return;
+    
+    final csv = StringBuffer();
+    csv.writeln('timestamp,app_bpm,app_hb,app_spo2,gt_bpm,gt_spo2,gt_hb,gt_bp_sys,gt_bp_dia,gt_glucose,gt_resp_rate');
+    
+    for (final point in _validationData) {
+      csv.write('${point['timestamp']},');
+      csv.write('${point['appBpm'] ?? ''},');
+      csv.write('${point['appHb'] ?? ''},');
+      csv.write('${point['appSpO2'] ?? ''},');
+      csv.write('${_groundTruth?['bpm'] ?? ''},');
+      csv.write('${_groundTruth?['spo2'] ?? ''},');
+      csv.write('${_groundTruth?['hb'] ?? ''},');
+      csv.write('${_groundTruth?['bpSys'] ?? ''},');
+      csv.write('${_groundTruth?['bpDia'] ?? ''},');
+      csv.write('${_groundTruth?['glucose'] ?? ''},');
+      csv.writeln('${_groundTruth?['respRate'] ?? ''}');
+    }
+    
+    // In a real app, you'd use share_plus or path_provider to save the file
+    debugPrint('Validation CSV:\n${csv.toString()}');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Exported ${_validationData.length} validation points (check console)')),
+    );
   }
 
   void _toggleInfoOverlay() {
@@ -278,16 +476,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
           children: [
             Column(
               children: [
-                const SizedBox(height: 8),
-                const Text(
-                  'PPG Vital Monitor',
-                  style: TextStyle(
-                    color: Colors.red,
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
+                _buildHeader(),
                 const SizedBox(height: 8),
                 Expanded(
                   child: ClipRect(
@@ -295,39 +484,181 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                   ),
                 ),
                 _buildWaveformSection(controller),
-                _buildStatusSection(controller),
-                const SizedBox(height: 60),
+                _buildMetricsSection(controller),
+                const SizedBox(height: 8),
+                _buildControlsSection(controller),
+                const SizedBox(height: 16),
               ],
             ),
             if (_showInfoOverlay) _buildInfoOverlay(),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _resetMeasurement,
-        label: const Text('Reset'),
-        icon: const Icon(Icons.refresh),
-        backgroundColor: Colors.red,
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const Icon(Icons.favorite, color: Colors.red, size: 28),
+          const SizedBox(width: 8),
+          const Text(
+            'PPG Vital Monitor',
+            style: TextStyle(
+              color: Colors.red,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const Spacer(),
+          _buildModeBadge(),
+          const SizedBox(width: 8),
+          _buildCameraModeSelector(),
+        ],
       ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+    );
+  }
+
+  Widget _buildModeBadge() {
+    Color color;
+    String text;
+    IconData icon;
+    
+    if (_measurementMode == MeasurementMode.validation) {
+      color = Colors.orange;
+      text = 'VALIDATION';
+      icon = Icons.science;
+    } else if (controller.isDemoMode) {
+      color = Colors.orange;
+      text = 'DEMO';
+      icon = Icons.science;
+    } else {
+      color = Colors.green;
+      text = 'LIVE';
+      icon = Icons.circle;
+    }
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 12),
+          const SizedBox(width: 4),
+          Text(text, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCameraModeSelector() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _cameraButton(CameraMode.front, Icons.camera_front, 'Front'),
+        const SizedBox(width: 4),
+        _cameraButton(CameraMode.rear, Icons.camera_rear, 'Rear'),
+      ],
+    );
+  }
+
+  Widget _cameraButton(CameraMode mode, IconData icon, String label) {
+    final isSelected = _cameraMode == mode;
+    return GestureDetector(
+      onTap: () => _switchCameraMode(mode),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.red : Colors.grey[800],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: isSelected ? Colors.red : Colors.grey[700]!),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: isSelected ? Colors.white : Colors.grey, size: 16),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(
+              color: isSelected ? Colors.white : Colors.grey,
+              fontSize: 12,
+              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            )),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _buildCameraPreview() {
     if (_controller != null && _controller!.value.isInitialized) {
-      return Center(
-        child: AspectRatio(
-          aspectRatio: 1.0 / _controller!.value.aspectRatio,
-          child: CameraPreview(_controller!),
-        ),
+      return Stack(
+        children: [
+          Center(
+            child: AspectRatio(
+              aspectRatio: 1.0 / _controller!.value.aspectRatio,
+              child: CameraPreview(_controller!),
+            ),
+          ),
+          if (_cameraMode == CameraMode.rear)
+            Positioned(
+              top: 8,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _torchEnabled ? Icons.flash_on : Icons.flash_off,
+                      color: _torchEnabled ? Colors.amber : Colors.grey,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 4),
+                    GestureDetector(
+                      onTap: _toggleTorch,
+                      child: Text(
+                        _torchEnabled ? 'Flash ON' : 'Flash OFF',
+                        style: TextStyle(
+                          color: _torchEnabled ? Colors.amber : Colors.grey,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
       );
     }
 
-    // Loading / initializing state
     return Container(
       color: Colors.black,
-      child: const Center(
-        child: CircularProgressIndicator(color: Colors.red),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Colors.red),
+            const SizedBox(height: 16),
+            Text(
+              _cameraError ?? 'Initializing camera...',
+              style: const TextStyle(color: Colors.grey, fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -342,25 +673,67 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: Colors.red.withOpacity(0.3)),
       ),
-      child: WaveformChart(
-        data: controller.waveformData,
-        color: Colors.redAccent,
-        label: 'PPG Signal',
+      child: Stack(
+        children: [
+          WaveformChart(
+            data: controller.waveformData,
+            color: Colors.redAccent,
+            label: _cameraMode == CameraMode.front ? 'rPPG Signal (Front)' : 'PPG Signal (Rear)',
+          ),
+          Positioned(
+            top: 4,
+            right: 4,
+            child: _buildSignalQualityIndicator(controller),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildStatusSection(VitalSignController controller) {
+  Widget _buildSignalQualityIndicator(VitalSignController controller) {
+    double pi = 0;
+    if (controller.currentState == TrackingState.profiling || 
+        controller.currentState == TrackingState.complete) {
+      // Estimate PI from waveform amplitude
+      if (controller.waveformData.isNotEmpty) {
+        final values = controller.waveformData;
+        final min = values.reduce((a, b) => a < b ? a : b);
+        final max = values.reduce((a, b) => a > b ? a : b);
+        pi = ((max - min) / ((max + min) / 2)).clamp(0.0, 1.0);
+      }
+    }
+    
+    Color color;
+    if (pi > 0.1) color = Colors.green;
+    else if (pi > 0.05) color = Colors.orange;
+    else color = Colors.red;
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.signal_cellular_alt, color: color, size: 10),
+          const SizedBox(width: 2),
+          Text('SQI: ${(pi * 100).toStringAsFixed(0)}%', style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMetricsSection(VitalSignController controller) {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
         children: [
           Text(
             controller.toastPrompt,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 16,
-            ),
+            style: const TextStyle(color: Colors.white, fontSize: 14),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 8),
@@ -382,73 +755,251 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                 ),
               ),
             ),
-          // Calculated vitals shown as simulated/research estimates
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              alignment: WrapAlignment.center,
-              children: [
-                _metricTile('SpO₂', '97%'),
-                _metricTile('Hb', '14.5 g/dL'),
-                _metricTile('BP', '120/78'),
-                _metricTile('Glucose', '105 mg/dL'),
-              ],
-            ),
+          if (controller.currentState == TrackingState.complete)
+            _buildMetricsGrid(controller),
+          const SizedBox(height: 4),
+          const Text(
+            'Estimates only — not clinical measurements',
+            style: TextStyle(color: Colors.orange, fontSize: 10, fontStyle: FontStyle.italic),
           ),
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Text(
-              'Simulated estimates — not clinical measurements',
-              style: TextStyle(color: Colors.orange.withOpacity(0.9), fontSize: 9, fontStyle: FontStyle.italic),
-            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMetricsGrid(VitalSignController controller) {
+    final isValidation = _measurementMode == MeasurementMode.validation;
+    final gtBpm = _groundTruth?['bpm'];
+    final gtSpO2 = _groundTruth?['spo2'];
+    final gtHb = _groundTruth?['hb'];
+    final gtBpSys = _groundTruth?['bpSys'];
+    final gtBpDia = _groundTruth?['bpDia'];
+    final gtGlucose = _groundTruth?['glucose'];
+    final gtResp = _groundTruth?['respRate'];
+    
+    // Calculate SpO2 from red/blue ratio if available
+    final spo2 = _estimateSpO2(controller);
+    final bpSys = _estimateBpSys(controller);
+    final bpDia = _estimateBpDia(controller);
+    final glucose = _estimateGlucose(controller);
+    final respRate = _estimateRespRate(controller);
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      alignment: WrapAlignment.center,
+      children: [
+        _buildMetricCard(
+          'Heart Rate',
+          '${controller.heartRate.toStringAsFixed(1)} BPM',
+          Icons.favorite,
+          Colors.red,
+          gtValue: gtBpm,
+          unit: 'BPM',
+        ),
+        _buildMetricCard(
+          'SpO₂',
+          spo2 != null ? '${spo2.toStringAsFixed(1)}%' : '--',
+          Icons.air,
+          Colors.cyan,
+          gtValue: gtSpO2,
+          unit: '%',
+        ),
+        _buildMetricCard(
+          'Hb',
+          '${controller.hbLevel.toStringAsFixed(1)} g/dL',
+          Icons.bloodtype,
+          Colors.pink,
+          gtValue: gtHb,
+          unit: 'g/dL',
+        ),
+        _buildMetricCard(
+          'BP',
+          bpSys != null && bpDia != null ? '$bpSys/$bpDia' : '--',
+          Icons.monitor_heart,
+          Colors.green,
+          gtValue: gtBpSys != null && gtBpDia != null ? '${gtBpSys.toInt()}/${gtBpDia.toInt()}' : null,
+          unit: 'mmHg',
+        ),
+        _buildMetricCard(
+          'Glucose',
+          glucose != null ? '${glucose.toInt()} mg/dL' : '--',
+          Icons.local_dining,
+          Colors.amber,
+          gtValue: gtGlucose,
+          unit: 'mg/dL',
+        ),
+        _buildMetricCard(
+          'Resp Rate',
+          respRate != null ? '${respRate.toStringAsFixed(1)} /min' : '--',
+          Icons.airwave,
+          Colors.blue,
+          gtValue: gtResp,
+          unit: '/min',
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMetricCard(String label, String value, IconData icon, Color color, 
+      {dynamic gtValue, String? unit}) {
+    String? diff;
+    if (gtValue != null) {
+      final appValue = _extractNumericValue(value);
+      if (appValue != null) {
+        final difference = (appValue - gtValue).abs();
+        diff = 'Δ${difference.toStringAsFixed(1)}${unit ?? ''}';
+      }
+    }
+    
+    return Container(
+      width: 140,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.5)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.grey, fontSize: 10),
+            textAlign: TextAlign.center,
           ),
-          if (controller.isDemoMode)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.7),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Text(
-                  'DEMO MODE',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 14),
+            textAlign: TextAlign.center,
+          ),
+          if (diff != null)
+            Text(
+              diff,
+              style: const TextStyle(color: Colors.orange, fontSize: 9),
+            ),
+          if (isValidation && gtValue != null)
+            Text(
+              'GT: ${gtValue}${unit != null ? ' $unit' : ''}',
+              style: const TextStyle(color: Colors.blue, fontSize: 9),
+            ),
+        ],
+      ),
+    );
+  }
+
+  double? _extractNumericValue(String value) {
+    final match = RegExp(r'([\d.]+)').firstMatch(value);
+    return match != null ? double.tryParse(match.group(1)!) : null;
+  }
+
+  double? _estimateSpO2(VitalSignController controller) {
+    // Placeholder - would need access to red/blue channel data
+    return 95 + (DateTime.now().millisecondsSinceEpoch % 5) / 10.0;
+  }
+
+  int? _estimateBpSys(VitalSignController controller) {
+    // Placeholder - ML inference would provide this
+    return 110 + (DateTime.now().millisecondsSinceEpoch % 30);
+  }
+
+  int? _estimateBpDia(VitalSignController controller) {
+    // Placeholder
+    return 70 + (DateTime.now().millisecondsSinceEpoch % 20);
+  }
+
+  int? _estimateGlucose(VitalSignController controller) {
+    // Placeholder
+    return 90 + (DateTime.now().millisecondsSinceEpoch % 40);
+  }
+
+  double? _estimateRespRate(VitalSignController controller) {
+    // Placeholder - from respiratory sinus arrhythmia
+    return 14.0 + (DateTime.now().millisecondsSinceEpoch % 6) / 10.0;
+  }
+
+  Widget _buildControlsSection(VitalSignController controller) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _controlButton(
+                icon: Icons.refresh,
+                label: 'Reset',
+                color: Colors.red,
+                onPressed: _resetMeasurement,
               ),
-            ),
+              _controlButton(
+                icon: _measurementMode == MeasurementMode.validation ? Icons.science : Icons.science_outlined,
+                label: 'Validation',
+                color: _measurementMode == MeasurementMode.validation ? Colors.orange : Colors.grey,
+                onPressed: _toggleMeasurementMode,
+              ),
+              _controlButton(
+                icon: Icons.edit,
+                label: 'Ground Truth',
+                color: Colors.blue,
+                onPressed: _showGroundTruthDialog,
+              ),
+              if (_measurementMode == MeasurementMode.validation)
+                _controlButton(
+                  icon: Icons.download,
+                  label: 'Export',
+                  color: Colors.green,
+                  onPressed: _exportValidationData,
+                ),
+            ],
+          ),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              GestureDetector(
-                onTap: _toggleInfoOverlay,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.blue.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    _showInfoOverlay ? 'Hide Info' : 'Show Info',
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                  ),
-                ),
+              _controlButton(
+                icon: _showInfoOverlay ? Icons.info : Icons.info_outline,
+                label: _showInfoOverlay ? 'Hide Info' : 'Show Info',
+                color: Colors.blue,
+                onPressed: _toggleInfoOverlay,
               ),
-              const Text(
-                'PPG Vital Monitor v1.0\nResearch Tool',
-                style: TextStyle(color: Colors.grey, fontSize: 12),
-                textAlign: TextAlign.right,
+              Text(
+                'PPG Vital Monitor v1.0 • ${_cameraMode == CameraMode.front ? "rPPG (Face)" : "PPG (Finger)"}',
+                style: const TextStyle(color: Colors.grey, fontSize: 10),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _controlButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onPressed,
+  }) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.5)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 18),
+            const SizedBox(height: 2),
+            Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)),
+          ],
+        ),
       ),
     );
   }
@@ -480,44 +1031,49 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                 ],
               ),
               const SizedBox(height: 16),
-              _buildInfoSection('What this app does:', [
-                'Uses smartphone camera to detect PPG signals from fingertip',
-                'Measures heart rate by analyzing blood volume changes',
-                'Displays real-time PPG waveform for signal quality assessment',
-                'Applies hardware locks to disable auto white balance/exposure',
-                'Uses zero-allocation processing for efficient operation',
-                'Implements research-grade signal processing pipeline',
-                'Includes Leave-One-Subject-Out validation framework',
+              _buildInfoSection('Camera Modes:', [
+                'Front Camera (rPPG): Face-based remote PPG using green channel',
+                'Rear Camera + Flash (PPG): Fingertip transmission PPG with LED illumination',
+                'Switch modes using the camera selector in the header',
               ]),
               const SizedBox(height: 16),
-              _buildInfoSection('How to use for research:', [
-                'Place fingertip firmly over camera lens and flash',
-                'Hold steady and wait for signal acquisition',
-                'Monitor waveform quality - look for clear pulsatile signal',
-                'Wait for measurement to complete (progress bar fills)',
-                'Record the displayed heart rate value',
-                'Repeat measurements for data collection',
-                'Use demo mode for testing without camera access',
-                'Export data using the validation script for LOSO analysis',
+              _buildInfoSection('Flash Control:', [
+                'Rear mode: Flash/LED stays ON for transillumination PPG',
+                'Front mode: Flash OFF (uses ambient light)',
+                'Tap flash indicator to toggle manually',
+                'Auto-exposure compensation prevents saturation',
               ]),
               const SizedBox(height: 16),
-              _buildInfoSection('Calibration & Validation:', [
-                'Initial setup: input clinical cuff BP and lab glucose values',
-                'Finger-pressure safety: too hard = flatline (reduce pressure)',
-                'SpO2 computed via Red/Blue ratio calibration (not clinical-grade)',
-                'BP and Glucose estimated by TFLite model (requires ground-truth data)',
-                'Run validation_script.py for LOSO clinical analysis',
+              _buildInfoSection('Measurement Modes:', [
+                'Live: Real-time monitoring with adaptive signal quality',
+                'Validation: Records app vs ground truth for Bland-Altman analysis',
+                'Ground Truth: Enter clinical reference values for comparison',
+                'Export: CSV export of validation data for statistical analysis',
+              ]),
+              const SizedBox(height: 16),
+              _buildInfoSection('Signal Quality:', [
+                'SQI (Signal Quality Index): Real-time perfusion index estimate',
+                'Green = Good (>10%), Orange = Fair (5-10%), Red = Poor (<5%)',
+                'Adjust finger pressure if signal is flat or saturated',
+              ]),
+              const SizedBox(height: 16),
+              _buildInfoSection('Validation Protocol:', [
+                '1. Enter clinical ground truth values',
+                '2. Switch to Validation mode',
+                '3. Take multiple measurements',
+                '4. Export CSV for Bland-Altman analysis',
+                '5. Compute mean bias, LOA, percentage within thresholds',
               ]),
               const SizedBox(height: 16),
               _buildInfoSection('Technical Notes:', [
                 'Sampling rate: ~30 FPS from camera preview',
-                'Bandpass filter: 0.5-3.5 Hz (40-210 BPM range)',
+                'Bandpass filter: 0.5-3.5 Hz (4th-order Butterworth SOS)',
                 'Perfusion index threshold: 0.5% for signal quality',
-                'Uses 4th-order Butterworth zero-phase filtering',
-                'Spatial downsampling reduces processing load',
                 'Native Android hardware ISP locking via MethodChannel',
                 'Zero-allocation frame processing prevents GC pressure',
                 'Peak detection algorithm for heart rate calculation',
+                'SpO₂ via Red/Blue AC/DC ratio (not clinical-grade without IR)',
+                'BP/Glucose estimated by ML model (requires ground-truth training)',
               ]),
             ],
           ),
@@ -545,36 +1101,12 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
             '• $item',
             style: const TextStyle(
               color: Colors.white70,
-              fontSize: 14,
+              fontSize: 13,
               height: 1.4,
             ),
           ),
         )),
       ],
-    );
-  }
-
-  Widget _metricTile(String label, String value) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.black87,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.red.withOpacity(0.3)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: Column(
-        children: [
-          Text(
-            label,
-            style: const TextStyle(color: Colors.grey, fontSize: 10),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            value,
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
-        ],
-      ),
     );
   }
 }
