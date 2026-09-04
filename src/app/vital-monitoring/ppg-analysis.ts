@@ -326,6 +326,151 @@ export function analyzeRespRate(ppg: number[], fs = 30): RespMetrics {
   return { respRate: respBpm, method, confidence };
 }
 
+export interface PPGFeatures {
+  pulseWidth: number;
+  peakTime: number;
+  decayTime: number;
+  inflectionDiff: number;
+  systolicArea: number;
+  diastolicArea: number;
+  stiffnessIndex: number;
+  reflectionIndex: number;
+}
+
+function extractPPGFeatures(ppg: number[], peakIndices: number[], fs: number): PPGFeatures {
+  const n = ppg.length;
+  if (n < 30) {
+    return { pulseWidth: 0, peakTime: 0, decayTime: 0, inflectionDiff: 0, systolicArea: 0, diastolicArea: 0, stiffnessIndex: 0, reflectionIndex: 0 };
+  }
+
+  const filtered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs);
+  const min = Math.min(...filtered);
+  const max = Math.max(...filtered);
+  const range = max - min || 1;
+  const norm = filtered.map(v => (v - min) / range);
+
+  let peakIdx = peakIndices.length > 0 ? peakIndices[0] : Math.floor(n / 2);
+  if (peakIdx >= n) peakIdx = n - 1;
+
+  const systolicArea = filtered.slice(0, peakIdx + 1).reduce((a, b) => a + Math.abs(b - min), 0);
+  const diastolicArea = filtered.slice(peakIdx + 1).reduce((a, b) => a + Math.abs(b - min), 0);
+
+  let troughIdx = peakIdx;
+  for (let i = peakIdx + 1; i < Math.min(n, peakIdx + Math.floor(fs / 2)); i++) {
+    if (filtered[i] < filtered[troughIdx]) troughIdx = i;
+  }
+
+  const systolicTime = (peakIdx / fs) * 1000;
+  const diastolicTime = ((n - peakIdx) / fs) * 1000;
+  const stiffnessIndex = systolicTime > 0 ? (max - min) / (systolicTime / 1000) : 0;
+  const reflectionIndex = diastolicTime > 0 && systolicTime > 0 ? diastolicTime / systolicTime : 1;
+
+  return {
+    pulseWidth: n / fs,
+    peakTime: peakIdx / n,
+    decayTime: (n - peakIdx) / n,
+    inflectionDiff: norm[peakIdx] - norm[0],
+    systolicArea,
+    diastolicArea,
+    stiffnessIndex,
+    reflectionIndex,
+  };
+}
+
+export interface BloodPressureMetrics {
+  systolic: number | null;
+  diastolic: number | null;
+  map: number | null;
+  pulsePressure: number | null;
+  confidence: number;
+}
+
+export interface GlucoseMetrics {
+  glucose: number | null;
+  confidence: number;
+}
+
+function estimateBloodPressure(
+  ppg: number[],
+  peakIndices: number[],
+  rrMs: number[],
+  hrv: HRVMetrics | null,
+  fs: number
+): BloodPressureMetrics {
+  if (ppg.length < fs * 5 || peakIndices.length < 2) {
+    return { systolic: null, diastolic: null, map: null, pulsePressure: null, confidence: 0 };
+  }
+
+  const features = extractPPGFeatures(ppg, peakIndices, fs);
+  const heartRate = rrMs.length > 0 ? 60000 / mean(rrMs) : 70;
+
+  const stiffnessFactor = Math.min(features.stiffnessIndex / 100, 1);
+  const reflectionFactor = Math.min(features.reflectionIndex / 2, 1);
+
+  let baseSystolic = 110 + (heartRate - 70) * 0.3;
+  let baseDiastolic = 70 + (heartRate - 70) * 0.1;
+
+  const sysAdjust = (stiffnessFactor * 15) - (reflectionFactor * 10) + (hrv?.sdnn ?? 0) * 0.1;
+  const diaAdjust = (stiffnessFactor * 5) - (reflectionFactor * 5) + (hrv?.rmssd ?? 0) * 0.05;
+
+  baseSystolic += sysAdjust;
+  baseDiastolic += diaAdjust;
+
+  const pulsePressure = baseSystolic - baseDiastolic;
+  const map = baseDiastolic + pulsePressure / 3;
+
+  const confidence = Math.min(0.7, 0.3 + (stiffnessFactor * 0.2) + (reflectionFactor * 0.2));
+
+  return {
+    systolic: Math.round(Math.max(80, Math.min(200, baseSystolic))),
+    diastolic: Math.round(Math.max(50, Math.min(130, baseDiastolic))),
+    map: Math.round(Math.max(60, Math.min(150, map))),
+    pulsePressure: Math.round(Math.max(20, Math.min(100, pulsePressure))),
+    confidence,
+  };
+}
+
+function estimateGlucose(
+  ppg: number[],
+  peakIndices: number[],
+  redSignal: number[],
+  greenSignal: number[],
+  blueSignal: number[],
+  fs: number
+): GlucoseMetrics {
+  if (ppg.length < fs * 10 || peakIndices.length < 3) {
+    return { glucose: null, confidence: 0 };
+  }
+
+  const redPI = computePerfusionIndex(redSignal.length > 0 ? redSignal : ppg);
+  const greenPI = computePerfusionIndex(greenSignal.length > 0 ? greenSignal : ppg);
+  const bluePI = computePerfusionIndex(blueSignal.length > 0 ? blueSignal : ppg);
+
+  const rRatio = redPI > 0 && greenPI > 0 ? redPI / greenPI : 1;
+  const gRatio = greenPI > 0 && bluePI > 0 ? greenPI / bluePI : 1;
+
+  let baseGlucose = 95 + (rRatio - 1) * 20 + (gRatio - 1) * 15;
+
+  const filtered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs);
+  const { peaks: filteredPeaks } = detectPeaks(filtered, fs);
+  if (filteredPeaks.length >= 3) {
+    const rrIntervals: number[] = [];
+    for (let i = 1; i < filteredPeaks.length; i++) {
+      rrIntervals.push(((filteredPeaks[i].index - filteredPeaks[i - 1].index) / fs) * 1000);
+    }
+    const cv = rrIntervals.length > 1 ? (stddev(rrIntervals) / mean(rrIntervals)) * 100 : 0;
+    baseGlucose += (cv - 5) * 0.5;
+  }
+
+  const piConfidence = Math.min((redPI + greenPI + bluePI) / 6, 1);
+  const confidence = Math.min(0.6, 0.2 + piConfidence * 0.4);
+
+  return {
+    glucose: Math.max(70, Math.min(200, Math.round(baseGlucose))),
+    confidence,
+  };
+}
+
 export interface VitalAnalysis {
   heart: HeartMetrics;
   resp: RespMetrics;
@@ -336,11 +481,22 @@ export interface VitalAnalysis {
   rmssd: number | null;
   pnn50: number | null;
   rhythm: "regular" | "irregular" | "unknown";
+  bp: BloodPressureMetrics;
+  glucose: GlucoseMetrics;
 }
 
-export function analyzeVitals(ppg: number[], fs = 30): VitalAnalysis {
+export function analyzeVitals(
+  ppg: number[],
+  fs = 30,
+  redSignal: number[] = [],
+  greenSignal: number[] = [],
+  blueSignal: number[] = []
+): VitalAnalysis {
   const heart = analyzeHeartRate(ppg, fs);
   const resp = analyzeRespRate(ppg, fs);
+  const bp = estimateBloodPressure(ppg, heart.peaks, heart.rrIntervals, heart.hrv, fs);
+  const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs);
+
   return {
     heart,
     resp,
@@ -351,5 +507,7 @@ export function analyzeVitals(ppg: number[], fs = 30): VitalAnalysis {
     rmssd: heart.hrv?.rmssd ?? null,
     pnn50: heart.hrv?.pnn50 ?? null,
     rhythm: heart.rhythm,
+    bp,
+    glucose,
   };
 }

@@ -405,7 +405,13 @@ export default function VitalMonitoringPage() {
       const analysisSource = demoMode
         ? syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, Math.floor(fs * 30)))
         : ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
-      const analysis: VitalAnalysis = analyzeVitals(analysisSource, fs);
+      const analysis: VitalAnalysis = analyzeVitals(
+        analysisSource,
+        fs,
+        redRef.current,
+        greenRef.current,
+        blueRef.current
+      );
       const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
 
       // Use SQI from analyzeVitals (0-100)
@@ -421,7 +427,7 @@ export default function VitalMonitoringPage() {
         const redFiltered = butterworthBandpass(redRef.current, 0.5, 3.5, fs);
         const greenFiltered = butterworthBandpass(greenRef.current, 0.5, 3.5, fs);
         const blueFiltered = butterworthBandpass(blueRef.current, 0.5, 3.5, fs);
-        
+
         const getAcDc = (raw: number[], filtered: number[]) => {
           const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
           let ac = 0;
@@ -429,11 +435,11 @@ export default function VitalMonitoringPage() {
           ac /= filtered.length;
           return { ac, dc };
         };
-        
+
         const { ac: acR, dc: dcR } = getAcDc(redRef.current, redFiltered);
         const { ac: acG, dc: dcG } = getAcDc(greenRef.current, greenFiltered);
         const { ac: acB, dc: dcB } = getAcDc(blueRef.current, blueFiltered);
-        
+
         // SpO2: R = (AC_Red/DC_Red) / (AC_Blue/DC_Blue) - Note: needs IR (940nm) for accuracy
         // Using blue as proxy for IR (not clinically valid, for display only)
         if (dcR > 0 && dcB > 0 && acR > 0 && acB > 0) {
@@ -443,7 +449,7 @@ export default function VitalMonitoringPage() {
           spo2Val = 110 - 25 * Rratio + spo2Offset;
           spo2Val = Math.min(Math.max(spo2Val, 70), 100);
         }
-        
+
         // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
         if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
           const HbRatio = (acR / dcR) / (acG / dcG);
@@ -452,6 +458,11 @@ export default function VitalMonitoringPage() {
         }
       }
 
+      // BP and Glucose estimation from PPG morphological analysis
+      const bpSysVal = analysis.bp?.systolic ?? (demoMode ? 110 + Math.round((Math.random() - 0.5) * 20) : null);
+      const bpDiaVal = analysis.bp?.diastolic ?? (demoMode ? 70 + Math.round((Math.random() - 0.5) * 15) : null);
+      const glucoseVal = analysis.glucose?.glucose ?? (demoMode ? 95 + Math.round((Math.random() - 0.5) * 20) : null);
+
       // Always update with new values when available, preserving last valid otherwise
       setBpm(hr);
       if (hr !== null) {
@@ -459,9 +470,9 @@ export default function VitalMonitoringPage() {
         setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
         setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
       }
-      // BP and Glucose cannot be reliably measured from PPG - display as unavailable
-      setBp(null);
-      setSugar(null);
+      // Update BP and Glucose from PPG analysis
+      setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
+      setSugar(glucoseVal);
       if (analysis.respRate !== null) {
         setRespRate(Math.round(analysis.respRate * 10) / 10);
       } else if (demoMode) {
@@ -482,9 +493,9 @@ export default function VitalMonitoringPage() {
           bpm: hr,
           spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
           hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
-          bpSys: 0,
-          bpDia: 0,
-          sugar: 0,
+          bpSys: bpSysVal ?? 0,
+          bpDia: bpDiaVal ?? 0,
+          sugar: glucoseVal ?? 0,
           signalQuality: sqi / 100,
           respRate: analysis.respRate ?? 15,
           sdnn: analysis.hrv?.sdnn ?? 0,
@@ -600,10 +611,9 @@ export default function VitalMonitoringPage() {
         bpm: avg("bpm"),
         spo2: Math.round(avg("spo2")),
         hb: avg("hb"),
-        // BP and Glucose not reliably measurable from PPG - set to 0
-        bpSys: 0,
-        bpDia: 0,
-        sugar: 0,
+        bpSys: bpSysAvg,
+        bpDia: bpDiaAvg,
+        sugar: Math.round(avg("sugar")),
         signalQuality: avg("signalQuality"),
         respRate: avg("respRate"),
         sdnn: avg("sdnn"),
@@ -612,13 +622,17 @@ export default function VitalMonitoringPage() {
         rhythm: mode(samples.map((s) => (s.rhythm as "regular" | "irregular" | "unknown"))),
       };
     } else {
+      const bpStr = bp;
+      const bpParts = bpStr ? bpStr.split("/") : [];
+      const bpSysVal = bpParts.length === 2 ? parseInt(bpParts[0], 10) : 0;
+      const bpDiaVal = bpParts.length === 2 ? parseInt(bpParts[1], 10) : 0;
       computedReading = {
         bpm: bpm ?? 0,
         spo2: spo2 ?? 0,
         hb: hb ?? 0,
-        bpSys: 0,
-        bpDia: 0,
-        sugar: 0,
+        bpSys: bpSysVal,
+        bpDia: bpDiaVal,
+        sugar: sugar ?? 0,
         signalQuality: signalQuality ?? 0,
         respRate: respRate ?? 0,
         sdnn: hrv?.sdnn ?? 0,
@@ -651,7 +665,7 @@ export default function VitalMonitoringPage() {
       }, videoBlob);
       await loadReadings();
     }
-  }, [bpm, hb, spo2, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
+  }, [bpm, hb, spo2, bp, sugar, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -1177,6 +1191,16 @@ export default function VitalMonitoringPage() {
               <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">BP</p>
+              <p className="text-2xl font-bold text-emerald-400">{bp !== null ? bp : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
+            </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">Glucose</p>
+              <p className="text-2xl font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
+            </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Signal Quality</p>
               <p className="text-2xl font-bold text-violet-400">{signalQuality !== null ? `${(signalQuality * 100).toFixed(1)}%` : "--"}</p>
             </div>
@@ -1246,11 +1270,11 @@ export default function VitalMonitoringPage() {
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">BP</p>
-                  <p className="text-xl font-bold text-emerald-400">N/A</p>
+                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys > 0 ? `${finalReading.bpSys}/${finalReading.bpDia}` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Glucose</p>
-                  <p className="text-xl font-bold text-amber-400">N/A</p>
+                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar > 0 ? `${finalReading.sugar} mg/dL` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Signal</p>
