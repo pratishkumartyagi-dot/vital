@@ -14,6 +14,12 @@ export default function Home() {
             Launch Monitor
           </a>
           <a
+            href="/validation"
+            className="inline-block px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+          >
+            Validation
+          </a>
+          <a
             href="/training"
             className="inline-block px-6 py-3 bg-neutral-800 text-white rounded-lg hover:bg-neutral-700 transition"
           >

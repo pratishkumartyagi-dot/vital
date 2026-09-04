@@ -47,8 +47,13 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 |----------------|---------|--------|
 | `src/app/page.tsx` | Home page with navigation | ✅ Ready |
 | `src/app/vital-monitoring/page.tsx` | Real-time PPG monitoring page | ✅ Ready |
+| `src/app/validation/page.tsx` | Validation dashboard with Bland-Altman analysis | ✅ Ready |
 | `src/app/training/page.tsx` | Training dashboard | ✅ Ready |
 | `src/app/api/training/route.ts` | Training API endpoint | ✅ Ready |
+| `src/app/api/readings/route.ts` | Vital readings CRUD API | ✅ Ready |
+| `src/app/api/validation/route.ts` | Validation session/measurement API | ✅ Ready |
+| `src/lib/vital-storage.ts` | Database integration with localStorage fallback | ✅ Ready |
+| `src/db/schema.ts` | Drizzle ORM schema | ✅ Ready |
 | `src/app/globals.css` | Global styles | ✅ Ready |
 | `src/app/layout.tsx` | Root layout | ✅ Ready |
 | `training/rppglib/` | MCD-rPPG library code | ✅ Ready |
@@ -64,15 +69,15 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 ## Current Focus
 
 The application is now a complete research platform for rPPG with:
-1. **Web-based PPG Monitoring**: Real-time camera-based vital sign estimation
-2. **MCD-rPPG Training Pipeline**: Full training infrastructure for SCNN_8rois and other models
-3. **Training Dashboard**: Web UI for monitoring training configuration and results
+1. **Web-based PPG Monitoring**: Real-time camera-based vital sign estimation (100s session: 10s warmup + 90s measurement)
+2. **Validation Dashboard**: Bland-Altman analysis with session management, measurement entry, and canvas-based plot visualization
+3. **MCD-rPPG Training Pipeline**: Full training infrastructure for SCNN_8rois and other models
 4. **Signal Processing**: FFT-based HR estimation, bandpass filtering, perfusion index calculation
 5. **Multi-ROI Extraction**: 5-region face ROI extraction for improved signal quality
 6. **Patient Intake**: Name, Age, Sex, LMP (if female), Pregnancy status before measurement
-7. **Timed 70s Session**: 10s warm-up discard, 60s averaging, auto-stop, final reading card
-8. **Heart Rate + HRV**: Peak-detection-based HR, RR-interval HRV (SDNN/RMSSD/pNN50), rhythm regularity
-9. **Respiratory Rate**: Autocorrelation + FFT fusion in 0.1–0.5 Hz band, browser-native
+7. **Heart Rate + HRV**: Peak-detection-based HR, RR-interval HRV (SDNN/RMSSD/pNN50), rhythm regularity
+8. **Respiratory Rate**: Autocorrelation + FFT fusion in 0.1–0.5 Hz band, browser-native
+9. **Database Persistence**: SQLite with Drizzle ORM for readings and validation data
 
 ## Session History
 
@@ -97,6 +102,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-04 | Corrected signal strength (strength of signal) calculations and mathematical formulas: Fixed Butterworth bandpass filter coefficients in Dart (`ppg_signal_engine.dart`) using proper 4th-order SOS cascaded biquads (0.5-3.5 Hz @ 30 Hz). Fixed perfusion index calculation to use proper AC/DC from individual pulse peak-to-trough amplitudes. Fixed TypeScript signal quality index (SQI) in `ppg-analysis.ts` to use multi-component scoring (perfusion index, spectral SNR, pulse regularity). Fixed frequency range inconsistency in `params.py` (ppg_high_freq: 10 Hz → 3.5 Hz) and TypeScript (0.7 Hz → 0.5 Hz lower cutoff). Verified haemoglobin formula (Hgb = 18.2 - 6.8*R_Hb) is consistent with dual-wavelength PPG literature. |
 | 2026-09-04 | Deep audit & correction of measured parameters: Removed all duplicate signal processing functions from `page.tsx` (computePerfusionIndex, bandpassFilter, computeAcDc) - now uses centralized `ppg-analysis.ts` module exclusively. Fixed SpO2 calculation: uses proper bandpass-filtered (0.5-3.5 Hz) AC/DC from red/blue channels with clear disclaimer that smartphone cameras lack IR (940nm) so SpO2 is estimate only. Fixed Hb calculation: uses proper bandpass-filtered AC/DC from red/green channels per dual-wavelength PPG literature. Fixed signal quality: now uses SQI from `analyzeVitals` (0-100 multi-component score: 40% perfusion index + 30% spectral SNR + 30% pulse regularity) instead of arbitrary Math.min(PIs). Removed random/fake BP and Glucose values (not measurable from PPG). Increased color buffer caps from 180 to 1800 samples to support 90s analysis window. Unified filter to 0.5-3.5 Hz everywhere (was 0.7-3.5 Hz in page.tsx). UI updated to show "estimate only" for SpO2/Hb and "N/A" for BP/Glucose. All changes verified with `bun typecheck` and `bun lint` passing. |
 | 2026-09-04 | Database integration with Drizzle ORM: Added SQLite database with Drizzle ORM for persistent storage of vital readings. Created tables: `vital_readings` (35 columns), `validation_sessions`, `validation_measurements`. Added API routes: `/api/readings` (CRUD), `/api/validation` (session management, measurements, statistics with Bland-Altman analysis). Updated `vital-storage.ts` to use database with localStorage fallback. Added validation statistics with mean bias, MAE, RMSE, LOA (95% limits of agreement), and percentage within clinical thresholds. UI updated to use async data loading with loading states. |
+| 2026-09-04 | Created web validation page (`src/app/validation/page.tsx`): Full Bland-Altman analysis dashboard with session management, measurement entry forms (app + ground truth), canvas-based Bland-Altman plot visualization, camera mode filtering (all/front/rear), statistics panel showing mean bias/MAE/RMSE/95% LOA for each metric. Includes clinical threshold guidance and disclaimer about SpO2 estimation limitations. Home page updated with navigation link to validation dashboard. `bun typecheck` and `bun lint` pass. |
 
 ## Technical Specifications
 
