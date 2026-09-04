@@ -7,6 +7,7 @@ export interface VitalReading {
     sex: "male" | "female";
     lmp?: string;
     pregnancy?: "pregnant" | "non-pregnant";
+    menopause?: "yes" | "no";
   };
   vitals: {
     bpm: number;
@@ -168,15 +169,16 @@ export async function getVitalReadings(params?: {
     const response = await fetch(`/api/readings?${searchParams}`);
     if (response.ok) {
       const result = await response.json();
-      return result.readings.map((r: any) => ({
-        ...r,
-        patient: {
-          name: r.patientName,
-          age: r.patientAge,
-          sex: r.patientSex,
-          lmp: r.patientLmp || undefined,
-          pregnancy: r.patientPregnancy || undefined,
-        },
+       return result.readings.map((r: any) => ({
+         ...r,
+         patient: {
+           name: r.patientName,
+           age: r.patientAge,
+           sex: r.patientSex,
+           lmp: r.patientLmp || undefined,
+           pregnancy: r.patientPregnancy || undefined,
+           menopause: r.patientMenopause || undefined,
+         },
         vitals: {
           bpm: r.bpm,
           spo2: r.spo2,
@@ -211,15 +213,16 @@ export async function getVitalReading(id: string): Promise<VitalReading | undefi
       const result = await response.json();
       const r = result.readings[0];
       if (r) {
-        return {
-          ...r,
-          patient: {
-            name: r.patientName,
-            age: r.patientAge,
-            sex: r.patientSex,
-            lmp: r.patientLmp || undefined,
-            pregnancy: r.patientPregnancy || undefined,
-          },
+         return {
+           ...r,
+           patient: {
+             name: r.patientName,
+             age: r.patientAge,
+             sex: r.patientSex,
+             lmp: r.patientLmp || undefined,
+             pregnancy: r.patientPregnancy || undefined,
+             menopause: r.patientMenopause || undefined,
+           },
           vitals: {
             bpm: r.bpm,
             spo2: r.spo2,

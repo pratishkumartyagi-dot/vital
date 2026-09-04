@@ -139,31 +139,31 @@ function computePerfusionIndex(signal: number[]): number {
   return mean > 0 ? (ac / mean) * 100 : 0;
 }
 
-function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[]): number {
+function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], fs: number): number {
   if (peaks.length < 2) return 0;
-  
+
   // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
   const pi = computePerfusionIndex(raw);
   const piScore = Math.min(1, pi / 2); // PI > 2% is good for smartphone PPG
-  
-  // 2. Spectral SNR in cardiac band (0.7-3.5 Hz)
-  const { freqs, psd } = powerSpectrum(filtered, 30);
+
+  // 2. Spectral SNR in cardiac band (0.5-3.5 Hz)
+  const { freqs, psd } = powerSpectrum(filtered, fs);
   let signalPower = 0, noisePower = 0;
   for (let i = 0; i < freqs.length; i++) {
-    if (freqs[i] >= 0.7 && freqs[i] <= 3.5) signalPower += psd[i];
-    else if (freqs[i] > 3.5 && freqs[i] <= 15) noisePower += psd[i];
+    if (freqs[i] >= 0.5 && freqs[i] <= 3.5) signalPower += psd[i];
+    else if (freqs[i] > 3.5 && freqs[i] <= fs * 0.4) noisePower += psd[i];
   }
   const snr = noisePower > 0 ? signalPower / noisePower : 0;
   const snrScore = Math.min(1, snr / 4); // SNR > 4 is good for smartphone PPG
-  
+
   // 3. Pulse regularity (CV of RR intervals)
   const rrMs: number[] = [];
   for (let i = 1; i < peaks.length; i++) {
-    rrMs.push(((peaks[i].index - peaks[i - 1].index) / 30) * 1000);
+    rrMs.push(((peaks[i].index - peaks[i - 1].index) / fs) * 1000);
   }
   const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
   const regScore = Math.max(0, 1 - cv / 20); // CV < 20% is regular
-  
+
   // Combined score (weighted average)
   return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * 100);
 }
@@ -241,7 +241,7 @@ export function analyzeHeartRate(ppg: number[], fs = 30): HeartMetrics {
   const bpm = meanRR > 0 ? 60000 / meanRR : 0;
   const hrv = computeHRV(rrMs);
   const rhythm = classifyRhythm(rrMs);
-  const quality = computeSignalQuality(filtered, ppg, valid);
+  const quality = computeSignalQuality(filtered, ppg, valid, fs);
   return {
     bpm: bpm > 30 && bpm < 220 ? bpm : null,
     peaks: valid.map((p) => p.index),

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Vital Monitoring App",
+  title: "Vital Scan App",
   description: "Research-grade PPG vital signs monitor",
 };
 

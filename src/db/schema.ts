@@ -10,6 +10,7 @@ export const vitalReadings = sqliteTable("vital_readings", {
   patientSex: text("patient_sex", { enum: ["male", "female"] }).notNull(),
   patientLmp: text("patient_lmp"),
   patientPregnancy: text("patient_pregnancy", { enum: ["pregnant", "non-pregnant"] }),
+  patientMenopause: text("patient_menopause", { enum: ["yes", "no"] }),
 
   // Vitals
   bpm: real("bpm"),

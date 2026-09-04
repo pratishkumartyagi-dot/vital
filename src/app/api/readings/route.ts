@@ -56,14 +56,15 @@ export async function POST(request: Request) {
     const timestamp = new Date();
     
     const reading = {
-      id,
-      timestamp,
-      patientName: patient.name,
-      patientAge: patient.age,
-      patientSex: patient.sex,
-      patientLmp: patient.lmp || null,
-      patientPregnancy: patient.pregnancy || null,
-      bpm: vitals.bpm || null,
+       id,
+       timestamp,
+       patientName: patient.name,
+       patientAge: patient.age,
+       patientSex: patient.sex,
+       patientLmp: patient.lmp || null,
+       patientPregnancy: patient.pregnancy || null,
+       patientMenopause: patient.menopause || null,
+       bpm: vitals.bpm || null,
       spo2: vitals.spo2 || null,
       hb: vitals.hb || null,
       bpSys: vitals.bpSys || null,
