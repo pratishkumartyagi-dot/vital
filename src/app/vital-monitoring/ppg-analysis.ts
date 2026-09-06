@@ -144,7 +144,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
 
   // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
   const pi = computePerfusionIndex(raw);
-  const piScore = Math.min(1, pi / 1); // PI > 1% is good for smartphone camera PPG
+  const piScore = Math.min(1, pi / 1.5); // PI > 1.5% is good for smartphone camera PPG
 
   // 2. Spectral SNR in cardiac band (0.5-3.5 Hz)
   const { freqs, psd } = powerSpectrum(filtered, fs);
