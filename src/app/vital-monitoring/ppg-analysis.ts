@@ -144,7 +144,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
 
   // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
   const pi = computePerfusionIndex(raw);
-  const piScore = Math.min(1, pi / 2); // PI > 2% is good for smartphone PPG
+  const piScore = Math.min(1, pi / 1); // PI > 1% is good for smartphone camera PPG
 
   // 2. Spectral SNR in cardiac band (0.5-3.5 Hz)
   const { freqs, psd } = powerSpectrum(filtered, fs);
@@ -162,7 +162,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
     rrMs.push(((peaks[i].index - peaks[i - 1].index) / fs) * 1000);
   }
   const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
-  const regScore = Math.max(0, 1 - cv / 20); // CV < 20% is regular
+  const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30); // regular rhythm scores 1.0; decreases for CV > 10%
 
   // Combined score (weighted average)
   return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * 100);

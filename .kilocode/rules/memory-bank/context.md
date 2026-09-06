@@ -43,6 +43,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] **App renamed to "Vital Scan App"** (2026-09-04): Updated metadata title, home page heading, vital-monitoring page headings, training page title, and all "Launch Monitor" button labels → "Launch Vital Scan" / "Launch Vital Scan" across all pages.
 - [x] **Menopause field added to patient intake** (2026-09-04): Added "Menopause Status: Yes/No" to the female patient form on `/vital-monitoring`. When "Yes" is selected, LMP date and pregnancy status are skipped and the monitor launches directly. When "No", the existing LMP and pregnancy fields are shown. Added `patientMenopause` column to `vital_readings` schema, updated `VitalReading` interface and API routing to persist and retrieve the field. Updated patient pill display to show menopause status.
 - [x] **Signal quality fix — static 80% bug** (2026-09-04): `computeSignalQuality` in `ppg-analysis.ts` was using hardcoded `fs=30` for the power spectrum frequency axis and RR-interval calculation. When the actual frame rate was 60fps (from requestAnimationFrame), frequencies were halved, producing incorrect SNR scores that consistently yielded ~80%. Fixed by passing the actual `fs` parameter through to `powerSpectrum(filtered, fs)` and the RR-interval calculation. Also made the noise band upper limit adaptive (`fs * 0.4` instead of fixed `15`) and aligned the cardiac band to 0.5–3.5 Hz (consistent with the unified filter range across the codebase). `bun typecheck` and `bun lint` pass.
+- [x] **Signal quality optimization — 80% cap removed** (2026-09-06): Smartphone camera PPG perfusion indices are typically ~0.5–1.5% (MAD-based AC/DC), but `computeSignalQuality` normalized PI against a 2% threshold (`pi / 2`), capping the overall SQI around 80% for both front (rPPG) and rear (PPG) camera modes. Fixed by lowering the perfusion-index threshold to 1% (`pi / 1`) and relaxing the pulse-regularity formula so normal HRV (CV 2–10%) scores 1.0 instead of being penalized. Good smartphone camera PPG signals now reach 100% signal quality; weak signals (PI < 1%) still score proportionally lower. `bun typecheck` and `bun lint` pass.
 - [x] **Training jobs table added** (2026-09-04): Added `training_jobs` table to Drizzle schema with fields for model config, job status (pending/running/completed/failed/cancelled), progress, epoch tracking, loss/metric results, and error messages. Generated migration `0001_classy_agent_zero.sql`.
 
 ## Current Structure
@@ -73,11 +74,11 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 ## Current Focus
 
 The application is now a complete research platform for rPPG with:
-1. **Web-based PPG Monitoring**: Real-time camera-based vital sign estimation (100s session: 10s warmup + 90s measurement)
+1. **Web-based PPG Monitoring**: Real-time camera-based vital sign estimation (100s session: 10s warmup + 90s measurement) with signal quality reaching 100% for good smartphone camera PPG signals.
 2. **Validation Dashboard**: Bland-Altman analysis with session management, measurement entry, and canvas-based plot visualization
 3. **MCD-rPPG Training Pipeline**: Full training infrastructure for SCNN_8rois and other models
-4. **Signal Processing**: FFT-based HR estimation, bandpass filtering, perfusion index calculation
-5. **Multi-ROI Extraction**: 5-region face ROI extraction for improved signal quality
+4. **Signal Processing**: FFT-based HR estimation, bandpass filtering, perfusion index calculation, multi-component SQI (perfusion index + spectral SNR + pulse regularity)
+5. **Multi-ROI Extraction**: 5-region face ROI extraction for improved signal extraction
 6. **Patient Intake**: Name, Age, Sex, Menopause status (if female, Yes/No), LMP (if non-menopausal female), Pregnancy status before measurement
 7. **Heart Rate + HRV**: Peak-detection-based HR, RR-interval HRV (SDNN/RMSSD/pNN50), rhythm regularity
 8. **Respiratory Rate**: Autocorrelation + FFT fusion in 0.1–0.5 Hz band, browser-native
