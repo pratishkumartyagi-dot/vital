@@ -9,6 +9,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 ## Recently Completed
 
 - [x] **Reverted to stable pre-Sep 25 (2026-09-27)**: Reset branch to `1c5d75d` and force-pushed to fix broken "Launch Vital Scan" caused by post-Sep 25 commits.
+- [x] **Pinned @kilocode/app-builder-db to commit 186d1c1**: Updated `package.json` dependency from `github:Kilo-Org/app-builder-db#main` to `git+https://github.com/Kilo-Org/app-builder-db#186d1c1` for reproducible builds.
 - [x] Project setup with Next.js 16, React 19, TypeScript, Tailwind CSS 4
 - [x] Web-based vital monitoring page with real-time PPG signal acquisition
 - [x] POS-like bandpass filter and FFT-based heart rate calculation in browser
@@ -116,6 +117,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-04 | **Fixed signal quality static 80% bug**: `computeSignalQuality` in `ppg-analysis.ts` hardcoded `fs=30` for power spectrum and RR-interval calculations. With 60fps rAF, frequencies were halved, producing static ~80% SQI. Fixed by passing actual `fs` parameter through; noise band made adaptive (`fs*0.4`); cardiac band aligned to 0.5–3.5 Hz. |
 | 2026-09-04 | **Added training_jobs table**: New Drizzle schema table with fields for model config, job status (pending/running/completed/failed/cancelled), progress, epoch tracking, loss/metrics, and error messages. Generated migration `0001_classy_agent_zero.sql`. |
 | 2026-09-27 | **Reverted to stable pre-Sep 25**: "Launch Vital Scan" broken by post-Sep 25 commits (SpO2 disabled, signal-quality thresholds changed in `ppg-analysis.ts`). Reset branch to `1c5d75d` (2026-09-06) and force-pushed. |
+| 2026-09-27 | **Pinned @kilocode/app-builder-db to commit 186d1c1**: Updated `package.json` dependency from `github:Kilo-Org/app-builder-db#main` to `git+https://github.com/Kilo-Org/app-builder-db#186d1c1` for reproducible builds. |
 
 ## Technical Specifications
 

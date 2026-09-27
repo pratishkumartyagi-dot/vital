@@ -9,6 +9,7 @@
 | TypeScript   | 5.9.x   | Type-safe JavaScript            |
 | Tailwind CSS | 4.x     | Utility-first CSS               |
 | Bun          | Latest  | Package manager & runtime       |
+| Drizzle ORM  | 0.45.x  | SQLite database ORM             |
 | PyTorch      | 2.6.0   | Deep learning framework         |
 | Python       | 3.10+   | Training pipeline               |
 
