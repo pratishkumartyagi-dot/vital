@@ -32,6 +32,7 @@ interface ValidationMeasurement {
   appBpSys: number | null;
   appBpDia: number | null;
   appSugar: number | null;
+  appCreatinine: number | null;
   appSignalQuality: number | null;
   appRhythm: string | null;
   appSdnn: number | null;
@@ -44,6 +45,7 @@ interface ValidationMeasurement {
   gtBpSys: number | null;
   gtBpDia: number | null;
   gtSugar: number | null;
+  gtCreatinine: number | null;
   gtRhythm: string | null;
   gtSdnn: number | null;
   gtRmssd: number | null;
@@ -55,6 +57,7 @@ interface ValidationMeasurement {
   diffBpSys: number | null;
   diffBpDia: number | null;
   diffSugar: number | null;
+  diffCreatinine: number | null;
   diffSdnn: number | null;
   diffRmssd: number | null;
   diffPnn50: number | null;
@@ -62,13 +65,14 @@ interface ValidationMeasurement {
   exclusionReason: string | null;
 }
 
-type MetricKey = 'bpm' | 'spo2' | 'hb' | 'respRate';
+type MetricKey = 'bpm' | 'spo2' | 'hb' | 'respRate' | 'creatinine';
 
 const METRIC_LABELS: Record<MetricKey, { label: string; unit: string; appLabel: string; gtLabel: string }> = {
   bpm: { label: 'Heart Rate', unit: 'BPM', appLabel: 'appBpm', gtLabel: 'gtBpm' },
   spo2: { label: 'SpO2', unit: '%', appLabel: 'appSpo2', gtLabel: 'gtSpo2' },
   hb: { label: 'Hemoglobin', unit: 'g/dL', appLabel: 'appHb', gtLabel: 'gtHb' },
   respRate: { label: 'Respiratory Rate', unit: '/min', appLabel: 'appRespRate', gtLabel: 'gtRespRate' },
+  creatinine: { label: 'Creatinine', unit: 'mg/dL', appLabel: 'appCreatinine', gtLabel: 'gtCreatinine' },
 };
 
 export default function ValidationPage() {
@@ -100,10 +104,12 @@ export default function ValidationPage() {
     appSpo2: '',
     appHb: '',
     appRespRate: '',
+    appCreatinine: '',
     gtBpm: '',
     gtSpo2: '',
     gtHb: '',
     gtRespRate: '',
+    gtCreatinine: '',
     appSignalQuality: '',
     appRhythm: '',
   });
@@ -300,10 +306,12 @@ export default function ValidationPage() {
         appSpo2: newMeasurement.appSpo2 ? parseFloat(newMeasurement.appSpo2) : undefined,
         appHb: newMeasurement.appHb ? parseFloat(newMeasurement.appHb) : undefined,
         appRespRate: newMeasurement.appRespRate ? parseFloat(newMeasurement.appRespRate) : undefined,
+        appCreatinine: newMeasurement.appCreatinine ? parseFloat(newMeasurement.appCreatinine) : undefined,
         gtBpm: newMeasurement.gtBpm ? parseFloat(newMeasurement.gtBpm) : undefined,
         gtSpo2: newMeasurement.gtSpo2 ? parseFloat(newMeasurement.gtSpo2) : undefined,
         gtHb: newMeasurement.gtHb ? parseFloat(newMeasurement.gtHb) : undefined,
         gtRespRate: newMeasurement.gtRespRate ? parseFloat(newMeasurement.gtRespRate) : undefined,
+        gtCreatinine: newMeasurement.gtCreatinine ? parseFloat(newMeasurement.gtCreatinine) : undefined,
         appSignalQuality: newMeasurement.appSignalQuality ? parseFloat(newMeasurement.appSignalQuality) : undefined,
         appRhythm: newMeasurement.appRhythm || undefined,
       });
@@ -313,10 +321,12 @@ export default function ValidationPage() {
         appSpo2: '',
         appHb: '',
         appRespRate: '',
+        appCreatinine: '',
         gtBpm: '',
         gtSpo2: '',
         gtHb: '',
         gtRespRate: '',
+        gtCreatinine: '',
         appSignalQuality: '',
         appRhythm: '',
       });
@@ -371,6 +381,8 @@ export default function ValidationPage() {
         const gtSpo2 = row.gt_spo2 ? parseFloat(row.gt_spo2) : undefined;
         const gtHb = row.gt_hb ? parseFloat(row.gt_hb) : undefined;
         const gtRespRate = row.gt_resp_rate ? parseFloat(row.gt_resp_rate) : undefined;
+        const appCreatinine = row.app_creatinine ? parseFloat(row.app_creatinine) : undefined;
+        const gtCreatinine = row.gt_creatinine ? parseFloat(row.gt_creatinine) : undefined;
 
         if (appBpm == null && gtBpm == null) continue;
 
@@ -379,10 +391,12 @@ export default function ValidationPage() {
           appBpm,
           appHb,
           appSpo2,
+          appCreatinine,
           gtBpm,
           gtSpo2,
           gtHb,
           gtRespRate,
+          gtCreatinine,
           isValid: true,
         });
         imported++;
@@ -548,7 +562,7 @@ export default function ValidationPage() {
             <h2 className="text-xl font-bold text-white mb-4">Statistics</h2>
             {stats && stats.count > 0 ? (
               <div className="space-y-4">
-                {(['bpm', 'spo2', 'hb', 'respRate'] as MetricKey[]).map((key) => {
+                {(['bpm', 'spo2', 'hb', 'respRate', 'creatinine'] as MetricKey[]).map((key) => {
                   const metric = stats[key];
                   if (!metric || metric.count === 0) return null;
                   return (
@@ -596,7 +610,7 @@ export default function ValidationPage() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white">Bland-Altman Plot</h2>
               <div className="flex gap-2">
-                {(['bpm', 'spo2', 'hb', 'respRate'] as MetricKey[]).map((key) => (
+                {(['bpm', 'spo2', 'hb', 'respRate', 'creatinine'] as MetricKey[]).map((key) => (
                   <button
                     key={key}
                     onClick={() => setActiveMetric(key)}
@@ -667,8 +681,11 @@ export default function ValidationPage() {
                       <th className="text-right py-3 px-2 text-neutral-400 font-medium">Ref SpO2</th>
                       <th className="text-right py-3 px-2 text-neutral-400 font-medium">App Hb</th>
                       <th className="text-right py-3 px-2 text-neutral-400 font-medium">Ref Hb</th>
+                      <th className="text-right py-3 px-2 text-neutral-400 font-medium">App Cr</th>
+                      <th className="text-right py-3 px-2 text-neutral-400 font-medium">Ref Cr</th>
                       <th className="text-right py-3 px-2 text-neutral-400 font-medium">Diff BPM</th>
                       <th className="text-right py-3 px-2 text-neutral-400 font-medium">Diff SpO2</th>
+                      <th className="text-right py-3 px-2 text-neutral-400 font-medium">Diff Cr</th>
                       <th className="text-right py-3 px-2 text-neutral-400 font-medium">Valid</th>
                     </tr>
                   </thead>
@@ -687,6 +704,8 @@ export default function ValidationPage() {
                         <td className="py-2 px-2 text-right text-white">{m.gtSpo2?.toFixed(0) ?? '-'}</td>
                         <td className="py-2 px-2 text-right text-white">{m.appHb?.toFixed(1) ?? '-'}</td>
                         <td className="py-2 px-2 text-right text-white">{m.gtHb?.toFixed(1) ?? '-'}</td>
+                        <td className="py-2 px-2 text-right text-white">{m.appCreatinine?.toFixed(2) ?? '-'}</td>
+                        <td className="py-2 px-2 text-right text-white">{m.gtCreatinine?.toFixed(2) ?? '-'}</td>
                         <td
                           className={`py-2 px-2 text-right ${
                             m.diffBpm !== null
@@ -708,6 +727,17 @@ export default function ValidationPage() {
                           }`}
                         >
                           {m.diffSpo2?.toFixed(1) ?? '-'}
+                        </td>
+                        <td
+                          className={`py-2 px-2 text-right ${
+                            m.diffCreatinine !== null
+                              ? Math.abs(m.diffCreatinine) > 0.3
+                                ? 'text-red-400'
+                                : 'text-green-400'
+                              : 'text-neutral-500'
+                          }`}
+                        >
+                          {m.diffCreatinine?.toFixed(2) ?? '-'}
                         </td>
                         <td className="py-2 px-2 text-right">
                           {m.isValid ? (
@@ -852,6 +882,17 @@ export default function ValidationPage() {
                     placeholder="16"
                   />
                 </div>
+                <div>
+                  <label className="block text-xs text-neutral-400 mb-1">Serum Creatinine (mg/dL)</label>
+                  <input
+                    type="number"
+                    value={newMeasurement.appCreatinine}
+                    onChange={(e) => setNewMeasurement({ ...newMeasurement, appCreatinine: e.target.value })}
+                    className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:outline-none focus:border-red-500"
+                    placeholder="1.0"
+                    step="0.01"
+                  />
+                </div>
 
                 <div className="col-span-2 border-b border-neutral-700 pb-2 mt-2 mb-1">
                   <span className="text-sm text-green-400 font-medium">Reference (Ground Truth)</span>
@@ -895,6 +936,17 @@ export default function ValidationPage() {
                     onChange={(e) => setNewMeasurement({ ...newMeasurement, gtRespRate: e.target.value })}
                     className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:outline-none focus:border-green-500"
                     placeholder="15"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-neutral-400 mb-1">Serum Creatinine (mg/dL)</label>
+                  <input
+                    type="number"
+                    value={newMeasurement.gtCreatinine}
+                    onChange={(e) => setNewMeasurement({ ...newMeasurement, gtCreatinine: e.target.value })}
+                    className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-white focus:outline-none focus:border-green-500"
+                    placeholder="1.0"
+                    step="0.01"
                   />
                 </div>
 
@@ -979,14 +1031,17 @@ export default function ValidationPage() {
                 <li>SpO2: ±2% (clinical), ±3% (acceptable)</li>
                 <li>Hemoglobin: ±1 g/dL (clinical), ±2 g/dL (acceptable)</li>
                 <li>Respiratory Rate: ±2 /min (clinical)</li>
+                <li>Serum Creatinine: ±0.3 mg/dL (research target)</li>
               </ul>
             </div>
           </div>
           <div className="mt-4 p-3 bg-neutral-800 rounded-lg border border-neutral-700">
             <p className="text-xs text-neutral-500">
-              <span className="text-yellow-400 font-medium">Note:</span> SpO2 and Hemoglobin measurements from
-              smartphone cameras are estimates only. SpO2 lacks the near-infrared (940nm) wavelength required for
-              clinical-grade pulse oximetry. Blood pressure and glucose cannot be measured from PPG signals.
+              <span className="text-yellow-400 font-medium">Note:</span> SpO2, Hemoglobin and Serum Creatinine
+              measurements from smartphone cameras are research estimates only. SpO2 lacks the near-infrared
+              (940nm) wavelength required for clinical-grade pulse oximetry, and creatinine estimation from PPG/rPPG
+              requires laboratory calibration (Sridevi et al., Smart Health 2025 / Healthcare Analytics 2025) before
+              any diagnostic use.
             </p>
           </div>
         </div>

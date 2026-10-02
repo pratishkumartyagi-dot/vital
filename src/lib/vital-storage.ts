@@ -21,6 +21,8 @@ export interface VitalReading {
     sdnn: number;
     rmssd: number;
     pnn50: number;
+    creatinine: number;
+    egfr: number;
     rhythm: "regular" | "irregular" | "unknown";
   };
   videoData?: string;
@@ -42,6 +44,7 @@ export interface ValidationStats {
   sdnn: ValidationMetricStats;
   rmssd: ValidationMetricStats;
   pnn50: ValidationMetricStats;
+  creatinine: ValidationMetricStats;
 }
 
 export interface ValidationMetricStats {
@@ -59,6 +62,7 @@ export interface ValidationMetricStats {
   within3?: number;
   within1?: number;
   within2Hb?: number;
+  withinCreatinine?: number;
 }
 
 const MAX_READINGS = 50;
@@ -191,6 +195,8 @@ export async function getVitalReadings(params?: {
           sdnn: r.sdnn,
           rmssd: r.rmssd,
           pnn50: r.pnn50,
+          creatinine: r.creatinine ?? 0,
+          egfr: r.egfr ?? 0,
           rhythm: r.rhythm,
         },
         cameraMode: r.cameraMode,
@@ -235,6 +241,8 @@ export async function getVitalReading(id: string): Promise<VitalReading | undefi
             sdnn: r.sdnn,
             rmssd: r.rmssd,
             pnn50: r.pnn50,
+            creatinine: r.creatinine ?? 0,
+            egfr: r.egfr ?? 0,
             rhythm: r.rhythm,
           },
         };
@@ -304,6 +312,8 @@ export function exportReadingsToCSV(readings: VitalReading[]): string {
     "HRV SDNN (ms)",
     "HRV RMSSD (ms)",
     "HRV pNN50 (%)",
+    "Serum Creatinine (mg/dL)",
+    "eGFR (mL/min/1.73m2)",
     "Rhythm",
     "Video Available",
   ];
@@ -329,6 +339,8 @@ export function exportReadingsToCSV(readings: VitalReading[]): string {
     r.vitals.sdnn.toFixed(1),
     r.vitals.rmssd.toFixed(1),
     r.vitals.pnn50.toFixed(1),
+    r.vitals.creatinine ? r.vitals.creatinine.toFixed(2) : "",
+    r.vitals.egfr ? r.vitals.egfr.toFixed(0) : "",
     r.vitals.rhythm,
     r.videoData ? "Yes" : "No",
   ]);
@@ -421,6 +433,7 @@ export async function addValidationMeasurement(data: {
   appSdnn?: number;
   appRmssd?: number;
   appPnn50?: number;
+  appCreatinine?: number;
   gtBpm?: number;
   gtSpo2?: number;
   gtHb?: number;
@@ -432,6 +445,7 @@ export async function addValidationMeasurement(data: {
   gtSdnn?: number;
   gtRmssd?: number;
   gtPnn50?: number;
+  gtCreatinine?: number;
   isValid?: boolean;
   exclusionReason?: string;
 }) {

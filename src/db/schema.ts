@@ -24,6 +24,8 @@ export const vitalReadings = sqliteTable("vital_readings", {
   sdnn: real("sdnn"),
   rmssd: real("rmssd"),
   pnn50: real("pnn50"),
+  creatinine: real("creatinine"),
+  egfr: real("egfr"),
   rhythm: text("rhythm", { enum: ["regular", "irregular", "unknown"] }).notNull(),
 
   // Camera mode and metadata
@@ -43,6 +45,7 @@ export const vitalReadings = sqliteTable("vital_readings", {
   groundTruthBpSys: real("ground_truth_bp_sys"),
   groundTruthBpDia: real("ground_truth_bp_dia"),
   groundTruthSugar: real("ground_truth_sugar"),
+  groundTruthCreatinine: real("ground_truth_creatinine"),
   validationNotes: text("validation_notes"),
 
   // Session info
@@ -79,6 +82,7 @@ export const validationMeasurements = sqliteTable("validation_measurements", {
   appSdnn: real("app_sdnn"),
   appRmssd: real("app_rmssd"),
   appPnn50: real("app_pnn50"),
+  appCreatinine: real("app_creatinine"),
 
   // Ground truth
   gtBpm: real("gt_bpm"),
@@ -92,6 +96,7 @@ export const validationMeasurements = sqliteTable("validation_measurements", {
   gtSdnn: real("gt_sdnn"),
   gtRmssd: real("gt_rmssd"),
   gtPnn50: real("gt_pnn50"),
+  gtCreatinine: real("gt_creatinine"),
 
   // Differences
   diffBpm: real("diff_bpm"),
@@ -104,6 +109,7 @@ export const validationMeasurements = sqliteTable("validation_measurements", {
   diffSdnn: real("diff_sdnn"),
   diffRmssd: real("diff_rmssd"),
   diffPnn50: real("diff_pnn50"),
+  diffCreatinine: real("diff_creatinine"),
 
   // Quality flags
   isValid: integer("is_valid", { mode: "boolean" }).notNull().default(true),

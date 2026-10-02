@@ -12,6 +12,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - [x] **Pinned @kilocode/app-builder-db to commit 186d1c1**: Updated `package.json` dependency from `github:Kilo-Org/app-builder-db#main` to `git+https://github.com/Kilo-Org/app-builder-db#186d1c1` for reproducible builds.
 - [x] **Vendored @kilocode/app-builder-db (2026-10-02)**: Replaced git dependency (`git+https://github.com/Kilo-Org/app-builder-db#186d1c1`, ConnectionRefused on tarball download during sandbox setup) with local `file:./vendor/app-builder-db` (dist + package.json only, same 186d1c1 build). `bun install` now succeeds offline.
 - [x] **Fixed `next build` DB crash (2026-10-02)**: `src/db/index.ts` created the DB client at module load, throwing `Missing database configuration` during page-data collection when `DB_URL`/`DB_TOKEN` are unset. Replaced eager `export const db` with lazy `export function getDb()` called inside each API handler (`/api/readings`, `/api/validation` with `force-dynamic`), and updated `src/db/migrate.ts`. `bun typecheck`, `bun lint`, and `bun run build` all pass.
+- [x] **Serum Creatinine parameter (2026-10-02)**: Added a research-grade serum creatinine estimator driven by PPG/rPPG morphology, per Sridevi et al. (*Smart Health* 2025, rear fingertip PPG regression RF MAE 0.102 mg/dL; *Healthcare Analytics* 2025, front facial rPPG classification XGBoost+Optuna 85.2% acc / ROC-AUC 0.86). Implemented `extractCreatinineFeatures` (19 descriptors incl. peak/dicrotic amplitude, pulse interval, RR CV, augmentation index, stiffness ratio, rise slope, second-derivative/inflection timings, perfusion index, red-green/red-blue ratios, harmonic ratio) + `estimateCreatinine` (camera-mode aware: rear cap 0.80 confidence, front `modeScale=0.5` cap 0.55) + `estimateEgfr` (CKD-EPI 2021 race-free) + `kdigoStage` (G1–G5) in `src/app/vital-monitoring/ppg-analysis.ts`; `analyzeVitals()` now takes `AnalyzeOptions {cameraMode, ageYears, sex}`. Persisted `creatinine`/`egfr` on `vital_readings` and `appCreatinine`/`gtCreatinine`/`diffCreatinine` on `validation_measurements` (migration `0002_huge_shadow_king.sql`). Wired live tile, final reading card (method panel), history line, CSV export, validation dashboard (form inputs, table columns, `calculateStats` + `withinCreatinine` ±0.3 mg/dL). Added a matching `extract_creatinine_features`/`estimate_creatinine` reference to `training/ppg_analysis.py`. Clearly labeled **research estimate — not a substitute for a blood test**. `bun typecheck`, `bun lint`, `bun run build` all pass; Python `py_compile` OK.
 - [x] Project setup with Next.js 16, React 19, TypeScript, Tailwind CSS 4
 - [x] Web-based vital monitoring page with real-time PPG signal acquisition
 - [x] POS-like bandpass filter and FFT-based heart rate calculation in browser
@@ -87,6 +88,7 @@ The application is now a complete research platform for rPPG with:
 7. **Heart Rate + HRV**: Peak-detection-based HR, RR-interval HRV (SDNN/RMSSD/pNN50), rhythm regularity
 8. **Respiratory Rate**: Autocorrelation + FFT fusion in 0.1–0.5 Hz band, browser-native
 9. **Database Persistence**: SQLite with Drizzle ORM for readings and validation data
+10. **Serum Creatinine (research estimate)**: PPG/rPPG morphology-driven creatinine surrogate (Sridevi et al. 2025) with CKD-EPI 2021 eGFR + KDIGO staging, camera-mode-aware confidence, and validation-dashboard comparison against lab ground truth (±0.3 mg/dL). Labeled *not a substitute for a blood test*.
 
 ## Session History
 
@@ -121,13 +123,14 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-27 | **Reverted to stable pre-Sep 25**: "Launch Vital Scan" broken by post-Sep 25 commits (SpO2 disabled, signal-quality thresholds changed in `ppg-analysis.ts`). Reset branch to `1c5d75d` (2026-09-06) and force-pushed. |
 | 2026-09-27 | **Pinned @kilocode/app-builder-db to commit 186d1c1**: Updated `package.json` dependency from `github:Kilo-Org/app-builder-db#main` to `git+https://github.com/Kilo-Org/app-builder-db#186d1c1` for reproducible builds. |
 | 2026-10-02 | **Vendored @kilocode/app-builder-db**: `bun install` failed with `ConnectionRefused downloading tarball @kilocode` on the git dependency. Vendored the identical 186d1c1 build into `vendor/app-builder-db/` (dist + package.json) and switched `package.json` to `file:./vendor/app-builder-db`. Fresh `bun install` (node_modules + lockfile deleted) succeeds; `bun typecheck` passes. |
+| 2026-10-02 | **Serum Creatinine parameter**: Added PPG/rPPG-derived serum creatinine estimation (Sridevi et al., *Smart Health* 2025 + *Healthcare Analytics* 2025) with 19 morphology features, camera-mode-aware confidence, CKD-EPI 2021 eGFR, and KDIGO staging in `ppg-analysis.ts`; persisted `creatinine`/`egfr` + validation `appCreatinine`/`gtCreatinine`/`diffCreatinine` (migration `0002_huge_shadow_king.sql`); wired vital-monitoring UI, validation dashboard, CSV export, and `training/ppg_analysis.py`. `bun typecheck`, `bun lint`, `bun run build`, and `py_compile` all pass. |
 
 ## Technical Specifications
 
 - **Framework**: Next.js 16 + React 19 + TypeScript
 - **Styling**: Tailwind CSS 4
 - **Signal Processing**: FFT-based HR estimation (0.5-3.5 Hz bandpass)
-- **Analysis Module**: `src/app/vital-monitoring/ppg-analysis.ts` — HeartPy-style peak detection + HRV (SDNN/RMSSD/pNN50) + RRest-style respiratory rate (autocorr/FFT fusion)
+- **Analysis Module**: `src/app/vital-monitoring/ppg-analysis.ts` — HeartPy-style peak detection + HRV (SDNN/RMSSD/pNN50) + RRest-style respiratory rate (autocorr/FFT fusion) + creatinine morphology features (`extractCreatinineFeatures`/`estimateCreatinine`) with CKD-EPI 2021 eGFR (`estimateEgfr`) and KDIGO staging (`kdigoStage`)
 - **Python Reference**: `training/ppg_analysis.py` using `heartpy` + `RRest` for offline validation
 - **Model**: SCNN_8rois (1D CNN with attention over 8 ROIs)
 - **Training**: PyTorch with 5-fold cross-validation

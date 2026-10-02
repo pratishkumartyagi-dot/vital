@@ -75,6 +75,10 @@ export async function POST(request: Request) {
       const diffSdnn = data.appSdnn !== null && data.gtSdnn !== null ? data.appSdnn - data.gtSdnn : null;
       const diffRmssd = data.appRmssd !== null && data.gtRmssd !== null ? data.appRmssd - data.gtRmssd : null;
       const diffPnn50 = data.appPnn50 !== null && data.gtPnn50 !== null ? data.appPnn50 - data.gtPnn50 : null;
+      const diffCreatinine =
+        typeof data.appCreatinine === "number" && typeof data.gtCreatinine === "number"
+          ? data.appCreatinine - data.gtCreatinine
+          : null;
       
       const measurement = {
         id,
@@ -92,6 +96,7 @@ export async function POST(request: Request) {
         appSdnn: data.appSdnn || null,
         appRmssd: data.appRmssd || null,
         appPnn50: data.appPnn50 || null,
+        appCreatinine: data.appCreatinine || null,
         gtBpm: data.gtBpm || null,
         gtSpo2: data.gtSpo2 || null,
         gtHb: data.gtHb || null,
@@ -103,6 +108,7 @@ export async function POST(request: Request) {
         gtSdnn: data.gtSdnn || null,
         gtRmssd: data.gtRmssd || null,
         gtPnn50: data.gtPnn50 || null,
+        gtCreatinine: data.gtCreatinine || null,
         diffBpm,
         diffSpo2,
         diffHb,
@@ -113,6 +119,7 @@ export async function POST(request: Request) {
         diffSdnn,
         diffRmssd,
         diffPnn50,
+        diffCreatinine,
         isValid: data.isValid !== false,
         exclusionReason: data.exclusionReason || null,
       };
@@ -156,6 +163,7 @@ export async function POST(request: Request) {
         sdnn: calculateStats(valid, "sdnn"),
         rmssd: calculateStats(valid, "rmssd"),
         pnn50: calculateStats(valid, "pnn50"),
+        creatinine: calculateStats(valid, "creatinine"),
       };
       
       return NextResponse.json({ statistics: stats });
@@ -196,6 +204,7 @@ function calculateStats(measurements: any[], field: string) {
   const within3 = field === "spo2" ? diffs.filter(d => Math.abs(d) <= 3).length / diffs.length * 100 : 0;
   const within1 = field === "hb" ? diffs.filter(d => Math.abs(d) <= 1).length / diffs.length * 100 : 0;
   const within2Hb = field === "hb" ? diffs.filter(d => Math.abs(d) <= 2).length / diffs.length * 100 : 0;
+  const withinCreatinine = field === "creatinine" ? diffs.filter(d => Math.abs(d) <= 0.3).length / diffs.length * 100 : 0;
   
   return {
     count: diffs.length,
@@ -212,5 +221,6 @@ function calculateStats(measurements: any[], field: string) {
     within3: within3 || undefined,
     within1: within1 || undefined,
     within2Hb: within2Hb || undefined,
+    withinCreatinine: withinCreatinine || undefined,
   };
 }

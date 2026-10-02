@@ -61,6 +61,13 @@ python run_training.py --model SCNN_8rois
 - CSV metadata with fold assignments
 - Supports MCD-rPPG, MMPD, SCAMPS, UBFC_rPPG
 
+## PPG Vital-Sign Models (browser + `training/ppg_analysis.py`)
+
+- **Heart Rate / HRV**: HeartPy-style peak detection, RR-interval SDNN/RMSSD/pNN50, rhythm regularity.
+- **Respiratory Rate**: RRest-style autocorrelation + FFT fusion (0.1–0.5 Hz).
+- **SpO₂ / Hb**: bandpass-filtered (0.5–3.5 Hz) AC/DC ratios (red/blue, red/green). Estimate only — no 940 nm IR channel.
+- **Serum Creatinine (research estimate)**: PPG/rPPG morphology regression/classification per Sridevi et al. — *Smart Health* 2025 (rear fingertip PPG, RF MAE 0.102 mg/dL, n=213, 0.6–1.4 mg/dL) and *Healthcare Analytics* 2025 (front facial rPPG, MIMIC-III, XGBoost+Optuna 85.2% acc / ROC-AUC 0.86; classes <0.6 / 0.6–1.3 / >1.3 mg/dL). Camera-mode-aware confidence (rear cap 0.80; front `modeScale=0.5`, cap 0.55). eGFR via **CKD-EPI 2021** (race-free); KDIGO G1–G5 staging. `creatinineUmol = creatinine × 88.4`. Validation target ±0.3 mg/dL. **Not a substitute for a laboratory blood test.**
+
 ## File Structure
 
 ```

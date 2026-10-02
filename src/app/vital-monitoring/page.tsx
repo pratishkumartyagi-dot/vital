@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, butterworthBandpass } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -63,6 +63,7 @@ export default function VitalMonitoringPage() {
   const [bp, setBp] = useState<string | null>(null);
   const [sugar, setSugar] = useState<number | null>(null);
   const [hb, setHb] = useState<number | null>(null);
+  const [creatinine, setCreatinine] = useState<CreatinineMetrics | null>(null);
   const [signalQuality, setSignalQuality] = useState<number | null>(null);
   const [phase, setPhase] = useState<"idle" | "warming" | "measuring" | "finalized">("idle");
   const [countdown, setCountdown] = useState<number>(0);
@@ -78,6 +79,11 @@ export default function VitalMonitoringPage() {
     sdnn: number;
     rmssd: number;
     pnn50: number;
+    creatinine: number;
+    egfr: number;
+    creatinineClass: string;
+    creatinineConfidence: number;
+    creatinineMethod: string;
     rhythm: string;
   } | null>(null);
   const [respRate, setRespRate] = useState<number | null>(null);
@@ -97,7 +103,7 @@ export default function VitalMonitoringPage() {
   const lastBpmUpdate = useRef<number>(0);
   const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
   const sessionStartRef = useRef<number>(0);
-  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
+  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
 
@@ -412,7 +418,12 @@ export default function VitalMonitoringPage() {
         fs,
         redRef.current,
         greenRef.current,
-        blueRef.current
+        blueRef.current,
+        {
+          cameraMode,
+          ageYears: patient ? parseInt(patient.age, 10) || null : null,
+          sex: patient ? (patient.sex as "male" | "female") : null,
+        }
       );
       const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
 
@@ -475,6 +486,7 @@ export default function VitalMonitoringPage() {
       // Update BP and Glucose from PPG analysis
       setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
       setSugar(glucoseVal);
+      setCreatinine(analysis.creatinine);
       if (analysis.respRate !== null) {
         setRespRate(Math.round(analysis.respRate * 10) / 10);
       } else if (demoMode) {
@@ -498,6 +510,7 @@ export default function VitalMonitoringPage() {
           bpSys: bpSysVal ?? 0,
           bpDia: bpDiaVal ?? 0,
           sugar: glucoseVal ?? 0,
+          creatinine: analysis.creatinine.creatinine ?? (demoMode ? 1.0 + (Math.random() - 0.5) * 0.3 : 0),
           signalQuality: sqi / 100,
           respRate: analysis.respRate ?? 15,
           sdnn: analysis.hrv?.sdnn ?? 0,
@@ -512,7 +525,7 @@ export default function VitalMonitoringPage() {
     if (cameraOnRef.current) {
       animFrame.current = requestAnimationFrame(processFrame);
     }
-  }, [drawWaveform, spo2Offset, cameraMode, demoMode]);
+  }, [drawWaveform, spo2Offset, cameraMode, demoMode, patient]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -532,6 +545,7 @@ export default function VitalMonitoringPage() {
       setSpo2(null);
       setBp(null);
       setSugar(null);
+      setCreatinine(null);
       setFingerDetected(false);
     }
     return () => cancelAnimationFrame(animFrame.current);
@@ -604,11 +618,24 @@ export default function VitalMonitoringPage() {
       return best;
     };
 
-    let computedReading: { bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
+    let computedReading: { bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; egfr: number; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
+
+    const ageYears = patient ? parseInt(patient.age, 10) || null : null;
+    const patientSex = patient ? (patient.sex as "male" | "female") : null;
+    const assignCreatinine = (cr: number) => {
+      const rounded = Math.round(cr * 100) / 100;
+      const egfr = estimateEgfr(rounded > 0 ? rounded : null, ageYears, patientSex);
+      return {
+        creatinine: rounded,
+        egfr: egfr === null ? 0 : Math.round(egfr),
+        creatinineClass: rounded > 1.3 ? "high" : rounded < 0.6 ? "low" : "normal",
+      };
+    };
 
     if (samples.length > 0) {
       const bpSysAvg = Math.round(avg("bpSys"));
       const bpDiaAvg = Math.round(avg("bpDia"));
+      const cr = assignCreatinine(avg("creatinine"));
       computedReading = {
         bpm: avg("bpm"),
         spo2: Math.round(avg("spo2")),
@@ -616,6 +643,11 @@ export default function VitalMonitoringPage() {
         bpSys: bpSysAvg,
         bpDia: bpDiaAvg,
         sugar: Math.round(avg("sugar")),
+        creatinine: cr.creatinine,
+        egfr: cr.egfr,
+        creatinineClass: cr.creatinineClass,
+        creatinineConfidence: creatinine?.confidence ?? 0,
+        creatinineMethod: creatinine?.method ?? cameraMode,
         signalQuality: avg("signalQuality"),
         respRate: avg("respRate"),
         sdnn: avg("sdnn"),
@@ -628,6 +660,7 @@ export default function VitalMonitoringPage() {
       const bpParts = bpStr ? bpStr.split("/") : [];
       const bpSysVal = bpParts.length === 2 ? parseInt(bpParts[0], 10) : 0;
       const bpDiaVal = bpParts.length === 2 ? parseInt(bpParts[1], 10) : 0;
+      const cr = assignCreatinine(creatinine?.creatinine ?? 0);
       computedReading = {
         bpm: bpm ?? 0,
         spo2: spo2 ?? 0,
@@ -635,6 +668,11 @@ export default function VitalMonitoringPage() {
         bpSys: bpSysVal,
         bpDia: bpDiaVal,
         sugar: sugar ?? 0,
+        creatinine: cr.creatinine,
+        egfr: cr.egfr,
+        creatinineClass: cr.creatinineClass,
+        creatinineConfidence: creatinine?.confidence ?? 0,
+        creatinineMethod: creatinine?.method ?? cameraMode,
         signalQuality: signalQuality ?? 0,
         respRate: respRate ?? 0,
         sdnn: hrv?.sdnn ?? 0,
@@ -668,7 +706,7 @@ export default function VitalMonitoringPage() {
       }, videoBlob);
       await loadReadings();
     }
-  }, [bpm, hb, spo2, bp, sugar, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
+  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -1049,6 +1087,14 @@ export default function VitalMonitoringPage() {
               <p className="text-xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">Creatinine</p>
+              <p className="text-xl font-bold text-teal-400">{finalReading.creatinine > 0 ? finalReading.creatinine.toFixed(2) : "—"} mg/dL</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
+              <p className="text-neutral-500 text-[10px] mb-1">eGFR</p>
+              <p className="text-xl font-bold text-teal-300">{finalReading.egfr > 0 ? finalReading.egfr : "—"}</p>
+            </div>
+            <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Signal Quality</p>
               <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
             </div>
@@ -1066,6 +1112,16 @@ export default function VitalMonitoringPage() {
             </span>
             <span className="px-2 py-1 rounded-full border text-rose-400 border-rose-500 bg-rose-500/10">
               Hb: {finalReading.hb.toFixed(1)} g/dL
+            </span>
+            <span className={`px-2 py-1 rounded-full border ${
+              finalReading.creatinineClass === "high" ? "text-red-400 border-red-500 bg-red-500/10" :
+              finalReading.creatinineClass === "low" ? "text-sky-400 border-sky-500 bg-sky-500/10" :
+              "text-teal-400 border-teal-500 bg-teal-500/10"
+            }`}>
+              Creatinine: {finalReading.creatinine > 0 ? finalReading.creatinine.toFixed(2) : "—"} mg/dL ({finalReading.creatinineClass})
+            </span>
+            <span className="px-2 py-1 rounded-full border text-teal-300 border-teal-500 bg-teal-500/10">
+              eGFR: {finalReading.egfr > 0 ? finalReading.egfr : "—"} mL/min/1.73m²
             </span>
             <span className="px-2 py-1 rounded-full border text-violet-400 border-violet-500 bg-violet-500/10">
               Signal: {(finalReading.signalQuality * 100).toFixed(1)}%
@@ -1246,6 +1302,13 @@ export default function VitalMonitoringPage() {
               <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">Creatinine</p>
+              <p className="text-2xl font-bold text-teal-400">{creatinine?.creatinine != null ? `${creatinine.creatinine.toFixed(2)} mg/dL` : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">
+                {creatinine?.creatinineClass ? `Class: ${creatinine.creatinineClass} • ${cameraMode === "front" ? "rPPG" : "PPG"}` : "estimate only"}
+              </p>
+            </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Signal Quality</p>
               <p className="text-2xl font-bold text-violet-400">{signalQuality !== null ? `${(signalQuality * 100).toFixed(1)}%` : "--"}</p>
             </div>
@@ -1321,10 +1384,35 @@ export default function VitalMonitoringPage() {
                   <p className="text-neutral-400 mb-1">Glucose</p>
                   <p className="text-xl font-bold text-amber-400">{finalReading.sugar > 0 ? `${finalReading.sugar} mg/dL` : "--"}</p>
                 </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-teal-700/40">
+                  <p className="text-neutral-400 mb-1">Serum Creatinine</p>
+                  <p className="text-xl font-bold text-teal-400">{finalReading.creatinine > 0 ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "--"}</p>
+                  <p className={`text-[10px] mt-1 font-semibold ${
+                    finalReading.creatinineClass === "high" ? "text-red-400" :
+                    finalReading.creatinineClass === "low" ? "text-sky-400" : "text-emerald-400"
+                  }`}>
+                    {finalReading.creatinineClass === "high" ? "High (>1.3)" : finalReading.creatinineClass === "low" ? "Low (<0.6)" : "Normal (0.6–1.3)"}
+                  </p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-teal-700/40">
+                  <p className="text-neutral-400 mb-1">eGFR (CKD-EPI 2021)</p>
+                  <p className="text-xl font-bold text-teal-300">{finalReading.egfr > 0 ? `${finalReading.egfr}` : "--"}</p>
+                  <p className="text-[10px] mt-1 text-neutral-500">mL/min/1.73m²</p>
+                </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Signal</p>
                   <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
                 </div>
+              </div>
+              <div className="mt-3 mb-2 p-3 rounded-lg bg-neutral-900/80 border border-teal-700/40 text-[11px] text-neutral-400">
+                <p className="text-teal-300 font-semibold mb-1">Creatinine method</p>
+                <p>
+                  {finalReading.creatinineMethod === "rppg-front" ? "Front camera rPPG (facial)" : "Rear camera PPG (fingertip)"} • 45-feature PPG morphology ensemble
+                  {" • "}confidence {(finalReading.creatinineConfidence * 100).toFixed(0)}%
+                </p>
+                <p className="mt-1 text-neutral-500">
+                  Research estimate based on Sridevi et al. (Smart Health 2025; Healthcare Analytics 2025). Not a substitute for a blood test.
+                </p>
               </div>
               <div className="mt-4 flex flex-col sm:flex-row gap-3">
                 <button
@@ -1376,6 +1464,7 @@ export default function VitalMonitoringPage() {
                   setBpm(null);
                   setBp(null);
                   setSugar(null);
+                  setCreatinine(null);
                   setSignalQuality(null);
                   setRespRate(null);
                   setHrv(null);
@@ -1407,6 +1496,7 @@ export default function VitalMonitoringPage() {
                           <p className="text-neutral-100 font-medium">{reading.patient.name}</p>
                           <p className="text-neutral-400">
                             {new Date(reading.timestamp).toLocaleString()} • {reading.vitals.bpm.toFixed(0)} BPM • SpO₂ {reading.vitals.spo2}% • {reading.vitals.rhythm}
+                            {reading.vitals.creatinine ? ` • Cr ${reading.vitals.creatinine.toFixed(2)} mg/dL` : ""}
                           </p>
                         </div>
                         <button

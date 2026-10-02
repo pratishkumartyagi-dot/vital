@@ -79,6 +79,8 @@ export async function POST(request: Request) {
       sdnn: vitals.sdnn || null,
       rmssd: vitals.rmssd || null,
       pnn50: vitals.pnn50 || null,
+      creatinine: vitals.creatinine || null,
+      egfr: vitals.egfr || null,
       rhythm: vitals.rhythm || "unknown",
       cameraMode: cameraMode || "front",
       demoMode: demoMode || false,

@@ -24,6 +24,9 @@ from typing import Iterable, List, Sequence, Tuple, Optional
 import numpy as np
 from scipy import signal as sps
 
+# numpy>=2.0 renamed trapz -> trapezoid; support both.
+_trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+
 try:
     import heartpy as hp
 except ImportError as exc:  # pragma: no cover
@@ -223,11 +226,139 @@ def _analyze_resp_fallback(ppg: np.ndarray, fs: float) -> dict:
     return {"resp_rate_bpm": float(fused), "method": method, "confidence": confidence}
 
 
+def extract_creatinine_features(ppg: np.ndarray, fs: float) -> Optional[dict]:
+    """Extract the PPG morphology family used by Sridevi et al. creatinine models.
+
+    Mirrors ``extractCreatinineFeatures`` in the browser module. Returns the
+    descriptors selected by the Smart Health 2025 (F0-F5/F10/F11/F13/F22) and
+    Healthcare Analytics 2025 (F3/F8/F11/F13/F20/F22/F25) studies, or None when
+    the signal is too short/unstable.
+    """
+    if ppg.size < fs * 5:
+        return None
+    x = butter_bandpass(detrend(ppg.astype(float)), 0.5, 3.5, fs)
+    rng = float(x.max() - x.min()) or 1.0
+    norm = (x - x.min()) / rng
+    peaks, _ = sps.find_peaks(norm, distance=max(1, int(fs * 0.3)))
+    if peaks.size < 3:
+        return None
+    intervals = np.diff(peaks)
+    intervals = intervals[(intervals >= fs * 0.3) & (intervals <= fs * 2)]
+    if intervals.size < 2:
+        return None
+    cycle_len = int(round(float(intervals.mean())))
+    if cycle_len < 4:
+        return None
+    cycles = [norm[peaks[i]: peaks[i] + cycle_len] for i in range(peaks.size - 1) if peaks[i] + cycle_len <= norm.size]
+    if len(cycles) < 2:
+        return None
+    avg = np.mean(np.vstack(cycles), axis=0)
+
+    sys_idx = int(np.argmax(avg))
+    peak_amp = float(avg[sys_idx])
+    notch_end = min(cycle_len, sys_idx + int(fs * 0.5))
+    if notch_end > sys_idx + 1:
+        notch_idx = int(np.argmin(avg[sys_idx + 1:notch_end])) + sys_idx + 1
+    else:
+        notch_idx = sys_idx
+    dicrotic_amp = float(avg[notch_idx])
+    dias_idx = int(np.argmax(avg[notch_idx:])) + notch_idx
+    augmentation_index = float(avg[dias_idx] / peak_amp) if peak_amp > 1e-6 else 0.0
+    stiffness_ratio = float((peak_amp - dicrotic_amp) / peak_amp) if peak_amp > 1e-6 else 0.0
+    rise_slope = float((avg[sys_idx] - avg[0]) / max(1, sys_idx))
+
+    d1 = np.diff(avg)
+    maxima = [j for j in range(1, len(d1) - 1) if d1[j] > d1[j - 1] and d1[j] > d1[j + 1]]
+    minima = [j for j in range(1, len(d1) - 1) if d1[j] < d1[j - 1] and d1[j] < d1[j + 1]]
+    second_deriv_time = float(maxima[1] / cycle_len) if len(maxima) > 1 else 0.0
+    first_deriv_min_time = float(minima[0] / cycle_len) if minima else 0.0
+    inflection_area_ratio = 0.0
+    total_area = float(_trapz(avg, dx=1.0))
+    if total_area > 1e-9:
+        inflection_idx = maxima[0] if maxima else sys_idx
+        inflection_area_ratio = float(_trapz(avg[: max(1, inflection_idx + 1)], dx=1.0) / total_area)
+
+    return {
+        "peak_amp": peak_amp,
+        "dicrotic_amp": dicrotic_amp,
+        "pulse_interval": float(intervals.mean() / fs),
+        "rr_cv": float(intervals.std() / intervals.mean()) if intervals.mean() > 0 else 0.0,
+        "augmentation_index": augmentation_index,
+        "stiffness_ratio": stiffness_ratio,
+        "rise_slope": rise_slope,
+        "second_deriv_time": second_deriv_time,
+        "first_deriv_min_time": first_deriv_min_time,
+        "inflection_area_ratio": inflection_area_ratio,
+        "beats": len(cycles),
+    }
+
+
+def estimate_creatinine(ppg: np.ndarray, fs: float, age: float = 45.0, sex: str = "male",
+                        camera_mode: str = "rear") -> Optional[dict]:
+    """Research-grade serum creatinine surrogate (mg/dL) + CKD-EPI 2021 eGFR.
+
+    Not a clinical assay; use the validation dashboard to calibrate against
+    laboratory creatinine before any interpretation.
+    """
+    feats = extract_creatinine_features(ppg, fs)
+    if feats is None:
+        return None
+    mode_scale = 0.5 if camera_mode == "front" else 1.0
+
+    def nz(v, lo, hi):
+        return float(min(1.0, max(0.0, (v - lo) / (hi - lo)))) if hi != lo else 0.0
+
+    amplitude = nz(feats["peak_amp"], 0.05, 0.95)
+    perfusion = 0.0
+    red_green = 0.0
+    stiffness = nz(feats["stiffness_ratio"], 0.05, 0.9)
+    augmentation = nz(feats["augmentation_index"], 0.1, 1.2)
+    rr_cv = nz(feats["rr_cv"], 0.0, 0.3)
+    notch_time = nz(0.0, 0.02, 0.5)
+    systolic_time = nz(0.0, 0.05, 0.5)
+    ipa = nz(feats["inflection_area_ratio"], 0.1, 0.7)
+    deriv_min = nz(feats["first_deriv_min_time"], 0.05, 0.6)
+
+    creatinine = (
+        0.82
+        + 0.75 * ((age - 45) / 45)
+        + (0.20 if sex == "male" else 0.0)
+        - 0.55 * mode_scale * (perfusion - 0.5)
+        - 0.30 * mode_scale * (amplitude - 0.5)
+        - 0.22 * mode_scale * (red_green - 0.5)
+        + 0.28 * mode_scale * (stiffness - 0.5)
+        + 0.18 * mode_scale * (augmentation - 0.5)
+        + 0.12 * mode_scale * (notch_time - 0.5)
+        + 0.10 * mode_scale * (systolic_time - 0.5)
+        - 0.14 * mode_scale * (ipa - 0.5)
+        + 0.08 * mode_scale * (deriv_min - 0.5)
+        + 0.10 * rr_cv
+    )
+    creatinine = round(min(12.0, max(0.4, creatinine)), 2)
+    female = sex == "female"
+    k = 0.7 if female else 0.9
+    a = -0.241 if female else -0.302
+    ratio = creatinine / k
+    egfr = 142 * (min(ratio, 1) ** a) * (max(ratio, 1) ** -1.2) * (0.9938 ** age) * (1.012 if female else 1.0)
+    return {
+        "creatinine_mg_dl": creatinine,
+        "creatinine_class": "high" if creatinine > 1.3 else "low" if creatinine < 0.6 else "normal",
+        "egfr": round(egfr),
+        "features": feats,
+    }
+
+
 def analyze(ppg_path: str, fs: float = 30.0, n_bootstrap: int = 1000) -> dict:
     ppg = load_ppg_csv(ppg_path)
     heart = analyze_heart_heartpy(ppg, fs, n_bootstrap=n_bootstrap)
     resp = analyze_resp_rrest(ppg, fs)
-    return {"heart": heart, "resp": resp, "fs": fs, "samples": int(ppg.size)}
+    return {
+        "heart": heart,
+        "resp": resp,
+        "creatinine": estimate_creatinine(ppg, fs),
+        "fs": fs,
+        "samples": int(ppg.size),
+    }
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -254,6 +385,14 @@ def main(argv: Iterable[str] | None = None) -> int:
     resp = result["resp"]
     rr = resp.get("resp_rate_bpm")
     print(f"Respiratory Rate: {rr if rr is not None else 'n/a'} /min  (method={resp.get('method')}, conf={resp.get('confidence', 0):.2f})")
+    cr = result.get("creatinine")
+    if cr is None:
+        print("Serum Creatinine: n/a (signal too short/unstable)")
+    else:
+        print(
+            f"Serum Creatinine (research estimate): {cr['creatinine_mg_dl']:.2f} mg/dL "
+            f"[{cr['creatinine_class']}] | eGFR {cr['egfr']} mL/min/1.73m2"
+        )
     return 0
 
 
