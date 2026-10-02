@@ -691,21 +691,11 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   }
 
   Widget _buildSignalQualityIndicator(VitalSignController controller) {
-    double pi = 0;
-    if (controller.currentState == TrackingState.profiling || 
-        controller.currentState == TrackingState.complete) {
-      // Estimate PI from waveform amplitude
-      if (controller.waveformData.isNotEmpty) {
-        final values = controller.waveformData;
-        final min = values.reduce((a, b) => a < b ? a : b);
-        final max = values.reduce((a, b) => a > b ? a : b);
-        pi = ((max - min) / ((max + min) / 2)).clamp(0.0, 1.0);
-      }
-    }
+    final sqi = controller.signalQuality;
     
     Color color;
-    if (pi > 0.1) color = Colors.green;
-    else if (pi > 0.05) color = Colors.orange;
+    if (sqi > 60) color = Colors.green;
+    else if (sqi > 30) color = Colors.orange;
     else color = Colors.red;
     
     return Container(
@@ -720,7 +710,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         children: [
           Icon(Icons.signal_cellular_alt, color: color, size: 10),
           const SizedBox(width: 2),
-          Text('SQI: ${(pi * 100).toStringAsFixed(0)}%', style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold)),
+          Text('SQI: ${sqi.toStringAsFixed(0)}%', style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.bold)),
         ],
       ),
     );

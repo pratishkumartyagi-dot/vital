@@ -114,6 +114,35 @@ class PPGSignalEngine {
     
     return (ac / dc) * 100.0;
   }
+
+  /// Respiratory bandpass: 0.06-0.7 Hz, zero-phase (filtfilt).
+  /// Extracts respiratory baseline wander from cardiac PPG.
+  static List<double> applyRespiratoryFilter(List<double> input, [double fs = 30.0]) {
+    const double low = 0.06;
+    const double high = 0.7;
+
+    if (input.length < 10 || fs <= 0 || low <= 0 || high <= low || high >= fs / 2) {
+      return List<double>.from(input);
+    }
+
+    final hp = _highpassBiquad(low, fs);
+    final lp = _lowpassBiquad(high, fs);
+    final dc = input.reduce((a, b) => a + b) / input.length;
+
+    var y = _applyBiquad(input, hp, dc, 0.0);
+    y = _applyBiquad(y, lp, 0.0, 0.0);
+    y = y.reversed.toList();
+    y = _applyBiquad(y, hp, 0.0, 0.0);
+    y = _applyBiquad(y, lp, 0.0, 0.0);
+    y = y.reversed.toList();
+
+    return y;
+  }
+
+  /// Cardiac bandpass: 0.5-3.5 Hz (non zero-phase, for envelope extraction).
+  static List<double> applyCardiacFilter(List<double> input, [double fs = 30.0]) {
+    return applyBandpassFilter(input);
+  }
 }
 
 class _BiquadCoeffs {

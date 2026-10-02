@@ -32,6 +32,15 @@ class VitalSignController extends ChangeNotifier {
   bool get isDemoMode => _isDemoMode;
   CameraMode get cameraMode => _cameraMode;
 
+  /// Signal quality (0-100%) computed from perfusion index of the live
+  /// green buffer using the corrected zero-phase bandpass filter.
+  double get signalQuality {
+    if (_liveGreenBuffer.length < _minSamplesForHR) return 0.0;
+    final pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
+    // SQI saturates at PI ~ 1.5% (consistent with the web implementation)
+    return (pi / 1.5).clamp(0.0, 1.0) * 100.0;
+  }
+
   // Separate buffers for multi-wavelength analysis
   final List<double> _liveRedBuffer = [];
   final List<double> _liveGreenBuffer = [];
@@ -314,42 +323,130 @@ class VitalSignController extends ChangeNotifier {
   }
 
   double _estimateRespiratoryRate(List<double> signal) {
-    // Respiratory rate estimation from baseline wander in PPG
-    // Breathing causes low-frequency modulation (0.1-0.5 Hz) of the DC level
+    // Two-stage respiratory rate estimation:
+    // Stage 1: Cardiac bandpass (0.5-3.5 Hz) to isolate the pulse, then
+    //   extract the amplitude modulation (AM envelope) via peak-to-trough
+    //   tracking. Cardiac information is removed from the respiratory path.
+    // Stage 2: Respiratory bandpass (0.06-0.7 Hz) on the AM envelope and
+    //   raw baseline wander to isolate breathing, then peak/track fusion.
+    // The previous single-stage exponential smoothing (alpha=0.15, ~0.72 Hz
+    // cutoff) did not remove the cardiac component, causing aliasing to
+    // ~24 BPM on a 72 BPM heart signal.
     if (signal.length < 180) return 15.0; // Need at least 6s at 30fps
 
-    // Detrend
+    const double fs = 30.0;
+
+    // Stage 1: Extract cardiac pulse via bandpass, then derive AM envelope
+    final cardiac = PPGSignalEngine.applyCardiacFilter(signal);
+    final envelope = _amplitudeEnvelope(cardiac);
+
+    // Stage 2: Respiratory bandpass on envelope and raw baseline wander
+    final envelopeResp = PPGSignalEngine.applyRespiratoryFilter(envelope, fs);
+    final (double envFreq, double envPower) = _findDominantFreq(envelopeResp, fs, 0.1, 0.5);
+    final envPeaks = _findRespPeaks(envelopeResp);
+    final envRate = envPeaks.isNotEmpty ? _peaksToRate(envPeaks, fs) : 0.0;
+
+    // Also extract from baseline wander (detrended raw signal)
     final mean = signal.reduce((a, b) => a + b) / signal.length;
     final detrended = signal.map((v) => v - mean).toList();
+    final baseline = PPGSignalEngine.applyRespiratoryFilter(detrended, fs);
+    final (double baseFreq, double basePower) = _findDominantFreq(baseline, fs, 0.1, 0.5);
+    final basePeaks = _findRespPeaks(baseline);
+    final baseRate = basePeaks.isNotEmpty ? _peaksToRate(basePeaks, fs) : 0.0;
 
-    // Simple exponential smoothing as a lowpass filter (~0.3 Hz cutoff at 30fps)
-    final alpha = 0.15;
-    final smoothed = <double>[];
-    double prev = detrended[0];
-    smoothed.add(prev);
-    for (int i = 1; i < detrended.length; i++) {
-      final val = alpha * detrended[i] + (1 - alpha) * prev;
-      smoothed.add(val);
-      prev = val;
+    // Peak/track fusion
+    final candidates = <double>[];
+    if (envRate > 0) candidates.add(envRate);
+    if (baseRate > 0) candidates.add(baseRate);
+    if (envFreq > 0) candidates.add(envFreq * 60);
+    if (baseFreq > 0) candidates.add(baseFreq * 60);
+
+    double respBpm = 0;
+    if (candidates.isNotEmpty) {
+      // Use median of valid candidates to reject outliers
+      final sorted = List<double>.from(candidates)..sort();
+      final medianRate = sorted[sorted.length ~/ 2];
+      final valid = sorted.where((r) => (r - medianRate).abs() < 6).toList();
+      respBpm = valid.isNotEmpty
+          ? valid.reduce((a, b) => a + b) / valid.length
+          : medianRate;
     }
 
-    // Find peaks in the smoothed baseline (min distance ~2s = 60 samples at 30fps)
-    final peaks = _findPeaks(smoothed, minDistance: 60, threshold: 0.0);
-    if (peaks.length < 2) return 15.0;
+    if (respBpm < 5 || respBpm > 50) return 15.0;
+    return respBpm.clamp(8.0, 35.0);
+  }
 
-    // Calculate intervals between consecutive peaks
+  /// Extract amplitude envelope from a filtered cardiac signal.
+  /// Computes the instantaneous amplitude as half the peak-to-trough range
+  /// in overlapping windows.
+  List<double> _amplitudeEnvelope(List<double> signal) {
+    if (signal.isEmpty) return [];
+    const int winSize = 15; // ~0.5s at 30fps
+    final result = List<double>.filled(signal.length, 0.0);
+    for (int i = 0; i < signal.length; i++) {
+      final start = (i - winSize).clamp(0, signal.length - 1);
+      final end = (i + winSize + 1).clamp(0, signal.length);
+      double minVal = signal[start];
+      double maxVal = signal[start];
+      for (int j = start; j < end; j++) {
+        if (signal[j] < minVal) minVal = signal[j];
+        if (signal[j] > maxVal) maxVal = signal[j];
+      }
+      result[i] = (maxVal - minVal) / 2.0;
+    }
+    return result;
+  }
+
+  /// Find peaks in a respiratory signal (baseline wander).
+  List<int> _findRespPeaks(List<double> signal) {
+    return _findPeaks(signal, minDistance: 45, threshold: 0.1);
+  }
+
+  /// Convert peak indices to a rate in BPM.
+  double _peaksToRate(List<int> peaks, double fs) {
+    if (peaks.length < 2) return 0.0;
     final intervals = <double>[];
     for (int i = 1; i < peaks.length; i++) {
-      intervals.add((peaks[i] - peaks[i - 1]) / 30.0); // seconds
+      final interval = (peaks[i] - peaks[i - 1]) / fs; // seconds
+      if (interval >= 1.2 && interval <= 6.0) intervals.add(interval); // 10-50 BPM
     }
+    if (intervals.isEmpty) return 0.0;
+    final avgInterval = intervals.reduce((a, b) => a + b) / intervals.length;
+    if (avgInterval <= 0) return 0.0;
+    return 60.0 / avgInterval;
+  }
 
-    // Filter physiologically plausible intervals (1s to 6s = 10-60 breaths/min)
-    final valid = intervals.where((t) => t >= 1.0 && t <= 6.0).toList();
-    if (valid.isEmpty) return 15.0;
+  /// Find dominant frequency and its power in a given band using DFT.
+  (double, double) _findDominantFreq(
+      List<double> signal, double fs, double fLow, double fHigh) {
+    if (signal.length < 4) return (0.0, 0.0);
 
-    final avgInterval = valid.reduce((a, b) => a + b) / valid.length;
-    final rate = 60.0 / avgInterval;
-    return rate.clamp(8.0, 35.0);
+    final n = signal.length;
+    final mean = signal.reduce((a, b) => a + b) / n;
+    final centered = signal.map((v) => v - mean).toList();
+
+    double bestFreq = 0;
+    double bestPower = 0;
+    final freqRes = fs / n;
+    final kMin = (fLow / freqRes).ceil();
+    final kMax = (fHigh / freqRes).floor();
+
+    for (int k = kMin; k <= kMax && k < n ~/ 2; k++) {
+      double real = 0;
+      double imag = 0;
+      final angle = 2 * math.pi * k / n;
+      for (int i = 0; i < n; i++) {
+        final phi = angle * i;
+        real += centered[i] * math.cos(phi);
+        imag -= centered[i] * math.sin(phi);
+      }
+      final power = real * real + imag * imag;
+      if (power > bestPower) {
+        bestPower = power;
+        bestFreq = k * freqRes;
+      }
+    }
+    return (bestFreq, bestPower / (n * n));
   }
 
   void _clearBuffers() {
