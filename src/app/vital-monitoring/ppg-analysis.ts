@@ -38,6 +38,13 @@ function stddev(arr: number[]): number {
   return Math.sqrt(v);
 }
 
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const s = arr.slice().sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
 function detrend(signal: number[]): number[] {
   const n = signal.length;
   if (n < 3) return signal.slice();
@@ -55,74 +62,106 @@ function detrend(signal: number[]): number[] {
   return signal.map((y, i) => y - (slope * i + intercept));
 }
 
-/// 4th-order Butterworth bandpass filter using cascaded SOS (Second-Order Sections)
-/// Coefficients generated via: scipy.signal.butter(4, [low/(fs/2), high/(fs/2)], btype='band', output='sos')
-/// For 0.5-3.5 Hz at 30 Hz:
-const BUTTERWORTH_SOS_05_35_30: number[][] = [
-  [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916],
-  [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327],
-];
-
-function applySosFilter(signal: number[], sos: number[][]): number[] {
-  let stage = signal.slice();
-  for (const section of sos) {
-    const [b0, b1, b2, a0, a1, a2] = section;
-    const out: number[] = new Array(stage.length);
-    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-    for (let i = 0; i < stage.length; i++) {
-      const x0 = stage[i];
-      const y0 = (b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
-      out[i] = y0;
-      x2 = x1; x1 = x0;
-      y2 = y1; y1 = y0;
-    }
-    stage = out;
-  }
-  return stage;
+interface BiquadCoeffs {
+  b0: number;
+  b1: number;
+  b2: number;
+  a1: number;
+  a2: number;
 }
 
-export function butterworthBandpass(signal: number[], low: number, high: number, fs: number): number[] {
-  // For standard PPG range (0.5-3.5 Hz at 30 Hz), use pre-computed SOS
-  if (fs === 30 && low === 0.5 && high === 3.5) {
-    return applySosFilter(signal, BUTTERWORTH_SOS_05_35_30);
+/// Second-order Butterworth lowpass biquad (Q = 1/sqrt(2)) via the RBJ
+/// audio-EQ cookbook, which is the exact bilinear-transform design and therefore
+/// remains correct at any sampling rate (unlike the previous hardcoded SOS,
+/// whose passband was centred near 0.5 Hz and amplified it ~13x).
+function lowpassBiquad(fc: number, fs: number, q = Math.SQRT1_2): BiquadCoeffs {
+  const w0 = (2 * Math.PI * fc) / fs;
+  const cw = Math.cos(w0);
+  const sw = Math.sin(w0);
+  const alpha = sw / (2 * q);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 - cw) / 2 / a0,
+    b1: (1 - cw) / a0,
+    b2: (1 - cw) / 2 / a0,
+    a1: (-2 * cw) / a0,
+    a2: (1 - alpha) / a0,
+  };
+}
+
+/// Second-order Butterworth highpass biquad (Q = 1/sqrt(2)).
+function highpassBiquad(fc: number, fs: number, q = Math.SQRT1_2): BiquadCoeffs {
+  const w0 = (2 * Math.PI * fc) / fs;
+  const cw = Math.cos(w0);
+  const sw = Math.sin(w0);
+  const alpha = sw / (2 * q);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 + cw) / 2 / a0,
+    b1: -(1 + cw) / a0,
+    b2: (1 + cw) / 2 / a0,
+    a1: (-2 * cw) / a0,
+    a2: (1 - alpha) / a0,
+  };
+}
+
+function applyBiquad(signal: number[], c: BiquadCoeffs): number[] {
+  const out: number[] = new Array(signal.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < signal.length; i++) {
+    const y = c.b0 * signal[i] + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+    out[i] = y;
+    x2 = x1; x1 = signal[i];
+    y2 = y1; y1 = y;
   }
-  // Fallback: simple IIR cascade for other parameters
-  const n = signal.length;
-  if (n < 10) return signal.slice();
-  const result: number[] = new Array(n);
-  const tauH = 1 / (2 * Math.PI * low);
-  const tauL = 1 / (2 * Math.PI * high);
-  const alphaH = tauH / (tauH + 1 / fs);
-  const alphaL = tauL / (tauL + 1 / fs);
-  let hp = signal[0];
-  let lp = signal[0];
-  for (let i = 0; i < n; i++) {
-    hp = alphaH * (hp + signal[i] - (i > 0 ? signal[i - 1] : signal[0]));
-    lp = alphaL * lp + (1 - alphaL) * hp;
-    result[i] = lp;
+  return out;
+}
+
+/// Butterworth bandpass as a cascade of a 2nd-order highpass at `low` and a
+/// 2nd-order lowpass at `high`. With `zeroPhase` (default) the cascade is run
+/// forward and backward (filtfilt) so pulse peaks and the AC/DC ratios are not
+/// shifted by filter phase.
+export function butterworthBandpass(
+  signal: number[],
+  low: number,
+  high: number,
+  fs: number,
+  zeroPhase = true
+): number[] {
+  if (signal.length < 10 || !(fs > 0) || !(low > 0) || high <= low || high >= fs / 2) {
+    return signal.slice();
   }
-  return result;
+  const sections = [highpassBiquad(low, fs), lowpassBiquad(high, fs)];
+  let y = signal.slice();
+  for (const c of sections) y = applyBiquad(y, c);
+  if (zeroPhase) {
+    y = y.reverse();
+    for (const c of sections) y = applyBiquad(y, c);
+    y = y.reverse();
+  }
+  return y;
 }
 
 function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): { peaks: Peak[]; filtered: number[] } {
-  const filtered = butterworthBandpass(detrend(signal), 0.5, 3.5, fs);
+  const filtered = butterworthBandpass(detrend(signal), 0.5, 3.5, fs, true);
   const peaks: Peak[] = [];
   const minDist = Math.max(1, Math.floor((60 / maxBpm) * fs));
   const sorted = filtered.slice().sort((a, b) => a - b);
-  const loIdx = Math.floor(sorted.length * 0.10);
-  const hiIdx = Math.floor(sorted.length * 0.90);
-  const baseline = sorted[loIdx];
-  const peakCeil = sorted[hiIdx];
-  const minHeight = baseline + 0.20 * (peakCeil - baseline);
+  const n = sorted.length;
+  const p10 = sorted[Math.floor(n * 0.10)];
+  const p90 = sorted[Math.floor(n * 0.90)];
+  const p97 = sorted[Math.floor(n * 0.97)];
+  // Require peaks to be well above the interquartile baseline, not merely above
+  // the 20th percentile. This rejects dicrotic notches and residual noise that
+  // otherwise inflate the peak count and destroy HRV.
+  const minHeight = Math.max(p10 + 0.5 * (p90 - p10), 0.45 * p97);
   for (let i = 1; i < filtered.length - 1; i++) {
-    if (filtered[i] > filtered[i - 1] && filtered[i] > filtered[i + 1]) {
+    if (filtered[i] > filtered[i - 1] && filtered[i] >= filtered[i + 1]) {
       if (filtered[i] > minHeight) {
         if (peaks.length === 0 || i - peaks[peaks.length - 1].index >= minDist) {
           peaks.push({ index: i, value: filtered[i] });
-        } else {
-          if (filtered[i] > peaks[peaks.length - 1].value) {
-            peaks[peaks.length - 1] = { index: i, value: filtered[i] };
-          }
+        } else if (filtered[i] > peaks[peaks.length - 1].value) {
+          peaks[peaks.length - 1] = { index: i, value: filtered[i] };
         }
       }
     }
@@ -225,18 +264,29 @@ export function analyzeHeartRate(ppg: number[], fs = 30): HeartMetrics {
   if (peaks.length < 3) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
   }
-  const valid = peaks.filter((_, i) => {
-    if (i === 0) return true;
-    const dtMs = ((peaks[i].index - peaks[i - 1].index) / fs) * 1000;
-    return dtMs >= 300 && dtMs <= 2000;
-  });
+  // Accept a peak only if its interval from the last accepted peak is
+  // physiologic, so one spurious detection cannot corrupt all later intervals.
+  const valid: Peak[] = [];
+  for (const p of peaks) {
+    if (valid.length === 0) {
+      valid.push(p);
+      continue;
+    }
+    const dtMs = ((p.index - valid[valid.length - 1].index) / fs) * 1000;
+    if (dtMs >= 300 && dtMs <= 2000) valid.push(p);
+  }
   if (valid.length < 3) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
   }
-  const rrMs: number[] = [];
+  const rrAll: number[] = [];
   for (let i = 1; i < valid.length; i++) {
-    rrMs.push(((valid[i].index - valid[i - 1].index) / fs) * 1000);
+    rrAll.push(((valid[i].index - valid[i - 1].index) / fs) * 1000);
   }
+  // Reject ectopic / motion intervals (>30% from the median) before HRV, which
+  // is what previously produced SDNN/RMSSD values in the thousands of ms.
+  const med = median(rrAll);
+  const filteredRr = med > 0 ? rrAll.filter((d) => Math.abs(d - med) / med <= 0.3) : rrAll.slice();
+  const rrMs = filteredRr.length >= 2 ? filteredRr : rrAll;
   const meanRR = mean(rrMs);
   const bpm = meanRR > 0 ? 60000 / meanRR : 0;
   const hrv = computeHRV(rrMs);

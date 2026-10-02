@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "test:ppg": "bun run scripts/ppg-selfcheck.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts"
   },

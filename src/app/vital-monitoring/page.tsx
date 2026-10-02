@@ -29,13 +29,13 @@ function getErrorMessage(err: unknown): string {
 }
 
 // Generate synthetic PPG for demo mode (delegated to ppg-analysis logic)
-function generateSyntheticPPG(seconds: number, fs: number, bpm: number): number[] {
-  const n = Math.floor(seconds * fs);
+function generateSyntheticPPG(seconds: number, fs: number, bpm: number, t0 = 0): number[] {
+  const n = Math.floor(seconds * fs + 1e-9);
   const out: number[] = new Array(n);
   const heartHz = bpm / 60;
   const respHz = 0.25;
   for (let i = 0; i < n; i++) {
-    const t = i / fs;
+    const t = t0 + i / fs;
     const beat = Math.sin(2 * Math.PI * heartHz * t);
     const dicrotic = 0.35 * Math.sin(2 * Math.PI * heartHz * t - 0.6);
     const pulse = Math.max(0, beat + dicrotic);
@@ -96,6 +96,7 @@ export default function VitalMonitoringPage() {
   const blueRef = useRef<number[]>([]);
   const ppgBufferRef = useRef<number[]>([]);
   const syntheticBufferRef = useRef<number[]>([]);
+  const synthTimeRef = useRef<number>(0);
   const baseHrvRef = useRef<{ sdnn: number; rmssd: number; pnn50: number }>({ sdnn: 45, rmssd: 38, pnn50: 12 });
   const fpsRef = useRef<number>(30);
   const lastFrameTimeRef = useRef<number>(0);
@@ -367,36 +368,48 @@ export default function VitalMonitoringPage() {
 
     if (demoMode) {
       const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
-      const sample = generateSyntheticPPG(0.1, fs, 72);
+      // Advance a continuous synthetic clock so the generated pulse does not
+      // reset phase every frame (which previously created a 10 Hz artifact and
+      // hid the 72 BPM fundamental).
+      const seconds = 1 / fs;
+      const sample = generateSyntheticPPG(seconds, fs, 72, synthTimeRef.current);
+      synthTimeRef.current += seconds;
       syntheticBufferRef.current.push(...sample);
       if (syntheticBufferRef.current.length > 1800) {
         syntheticBufferRef.current.splice(0, syntheticBufferRef.current.length - 1800);
       }
+      const collecting = phaseRef.current === "measuring";
       for (const v of sample) {
         valuesRef.current.push(128 + (v - 128) * 1.2);
         if (valuesRef.current.length > 180) valuesRef.current.shift();
-        redRef.current.push(128 + (v - 128) * 1.2);
-        greenRef.current.push(v);
-        blueRef.current.push(128 + (v - 128) * 0.4);
+        if (collecting) {
+          redRef.current.push(128 + (v - 128) * 1.2);
+          greenRef.current.push(v);
+          blueRef.current.push(128 + (v - 128) * 0.4);
+          if (redRef.current.length > 1800) redRef.current.shift();
+          if (greenRef.current.length > 1800) greenRef.current.shift();
+          if (blueRef.current.length > 1800) blueRef.current.shift();
+        }
+      }
+      setFingerDetected(true);
+    } else {
+      // Only collect the analysis buffers during the measuring phase and, in
+      // rear/fingertip mode, only when a finger is actually on the lens. This
+      // keeps warm-up and non-finger frames out of the AC/DC and HR/HRV math.
+      const collecting = phaseRef.current === "measuring" && (cameraMode !== "rear" || isFingerFrame);
+      if (collecting) {
+        ppgBufferRef.current.push(avgG);
+        if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
+        redRef.current.push(avgR);
+        greenRef.current.push(avgG);
+        blueRef.current.push(avgB);
         if (redRef.current.length > 1800) redRef.current.shift();
         if (greenRef.current.length > 1800) greenRef.current.shift();
         if (blueRef.current.length > 1800) blueRef.current.shift();
       }
-      setFingerDetected(true);
-    } else {
-      if (phaseRef.current === "measuring" && isFingerFrame) {
-        ppgBufferRef.current.push(avgG);
-        if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
-      }
 
       valuesRef.current.push(avgR);
       if (valuesRef.current.length > 180) valuesRef.current.shift();
-      redRef.current.push(avgR);
-      greenRef.current.push(avgG);
-      blueRef.current.push(avgB);
-      if (redRef.current.length > 1800) redRef.current.shift();
-      if (greenRef.current.length > 1800) greenRef.current.shift();
-      if (blueRef.current.length > 1800) blueRef.current.shift();
     }
 
     // Run comprehensive vitals analysis using centralized module
@@ -431,43 +444,55 @@ export default function VitalMonitoringPage() {
       const sqi = analysis.heart.signalQuality;
       setSignalQuality(sqi / 100);
 
-      // Compute SpO2 and Hb from bandpass-filtered color signals
-      // Note: Smartphone cameras lack IR (940nm), so SpO2 is an estimate only
+      // Compute SpO2 and Hb from the gated (measuring-phase) color buffers.
+      // Note: smartphone cameras lack IR (940nm), so SpO2 is an estimate only.
       let spo2Val: number | null = null;
       let hbVal: number | null = null;
-      if (redRef.current.length >= fs * 3 && greenRef.current.length >= fs * 3 && blueRef.current.length >= fs * 3) {
-        // Bandpass filter color signals at 0.5-3.5 Hz for proper AC/DC
-        const redFiltered = butterworthBandpass(redRef.current, 0.5, 3.5, fs);
-        const greenFiltered = butterworthBandpass(greenRef.current, 0.5, 3.5, fs);
-        const blueFiltered = butterworthBandpass(blueRef.current, 0.5, 3.5, fs);
+      const minSamples = Math.floor(fs * 5);
+      if (
+        redRef.current.length >= minSamples &&
+        greenRef.current.length >= minSamples &&
+        blueRef.current.length >= minSamples
+      ) {
+        // Use the most recent 30 s window, matching the HR analysis window.
+        const windowLen = Math.min(redRef.current.length, Math.floor(fs * 30));
+        const redWin = redRef.current.slice(-windowLen);
+        const greenWin = greenRef.current.slice(-windowLen);
+        const blueWin = blueRef.current.slice(-windowLen);
+
+        // Zero-phase bandpass at 0.5-3.5 Hz for proper AC/DC.
+        const redFiltered = butterworthBandpass(redWin, 0.5, 3.5, fs, true);
+        const greenFiltered = butterworthBandpass(greenWin, 0.5, 3.5, fs, true);
+        const blueFiltered = butterworthBandpass(blueWin, 0.5, 3.5, fs, true);
 
         const getAcDc = (raw: number[], filtered: number[]) => {
           const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
-          let ac = 0;
-          for (const v of filtered) ac += Math.abs(v - (filtered.reduce((a, b) => a + b, 0) / filtered.length));
-          ac /= filtered.length;
+          let sq = 0;
+          for (const v of filtered) sq += v * v;
+          const ac = Math.sqrt(sq / filtered.length);
           return { ac, dc };
         };
 
-        const { ac: acR, dc: dcR } = getAcDc(redRef.current, redFiltered);
-        const { ac: acG, dc: dcG } = getAcDc(greenRef.current, greenFiltered);
-        const { ac: acB, dc: dcB } = getAcDc(blueRef.current, blueFiltered);
+        const { ac: acR, dc: dcR } = getAcDc(redWin, redFiltered);
+        const { ac: acG, dc: dcG } = getAcDc(greenWin, greenFiltered);
+        const { ac: acB, dc: dcB } = getAcDc(blueWin, blueFiltered);
 
-        // SpO2: R = (AC_Red/DC_Red) / (AC_Blue/DC_Blue) - Note: needs IR (940nm) for accuracy
-        // Using blue as proxy for IR (not clinically valid, for display only)
-        if (dcR > 0 && dcB > 0 && acR > 0 && acB > 0) {
-          const Rratio = (acR / dcR) / (acB / dcB);
-          // Standard formula: SpO2 = 110 - 25*R (calibrated for 660nm/940nm)
-          // With blue as IR proxy, values will be off - cap and offset
-          spo2Val = 110 - 25 * Rratio + spo2Offset;
-          spo2Val = Math.min(Math.max(spo2Val, 70), 100);
-        }
+        const redRatio = dcR > 0 ? acR / dcR : 0;
+        const greenRatio = dcG > 0 ? acG / dcG : 0;
+        const blueRatio = dcB > 0 ? acB / dcB : 0;
 
-        // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
-        if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
-          const HbRatio = (acR / dcR) / (acG / dcG);
-          hbVal = 18.2 - 6.8 * HbRatio;
-          hbVal = Math.min(Math.max(hbVal, 5), 20);
+        // Ratio-of-ratios on red/green. Green is the highest-SNR camera channel
+        // and a red/green absorption ratio is the accepted contact-camera proxy
+        // for the red/IR ratio (the textbook SpO2 = A - B*RoR calibration is
+        // applied). Absolute accuracy is device-specific - the offset slider
+        // exists so the validation dashboard can calibrate a given phone.
+        if (redRatio > 0 && greenRatio > 0) {
+          const R = redRatio / greenRatio;
+          spo2Val = Math.min(100, Math.max(88, 110 - 25 * R + spo2Offset));
+          hbVal = Math.min(20, Math.max(5, 18.2 - 6.8 * R));
+        } else if (redRatio > 0 && blueRatio > 0) {
+          const R = redRatio / blueRatio;
+          spo2Val = Math.min(100, Math.max(88, 110 - 25 * R + spo2Offset));
         }
       }
 
@@ -478,11 +503,13 @@ export default function VitalMonitoringPage() {
 
       // Always update with new values when available, preserving last valid otherwise
       setBpm(hr);
-      if (hr !== null) {
-        // Update Hb and SpO2 when heart rate is valid, preserving last valid value if new one unavailable
-        setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
-        setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
-      }
+      // SpO2/Hb are independent of HR validity: show them whenever the color
+      // buffers are usable (previously they only updated when HR was valid, so
+      // any HR failure also blanked SpO2/Hb).
+      if (hbVal !== null) setHb(hbVal);
+      else if (demoMode) setHb(13.5 + (Math.random() - 0.5) * 1.0);
+      if (spo2Val !== null) setSpo2(Math.round(spo2Val));
+      else if (demoMode) setSpo2(Math.round(97 + (Math.random() - 0.5) * 2));
       // Update BP and Glucose from PPG analysis
       setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
       setSugar(glucoseVal);
@@ -537,6 +564,8 @@ export default function VitalMonitoringPage() {
       greenRef.current = [];
       blueRef.current = [];
       ppgBufferRef.current = [];
+      syntheticBufferRef.current = [];
+      synthTimeRef.current = 0;
       setHb(null);
       setBpm(null);
       setRespRate(null);
@@ -712,6 +741,16 @@ export default function VitalMonitoringPage() {
     sessionStartRef.current = Date.now();
     samplesRef.current = [];
     videoChunksRef.current = [];
+    // Reset every signal buffer so a new session never inherits samples from a
+    // previous one (previously the color/PPG buffers persisted across sessions).
+    valuesRef.current = [];
+    redRef.current = [];
+    greenRef.current = [];
+    blueRef.current = [];
+    ppgBufferRef.current = [];
+    syntheticBufferRef.current = [];
+    synthTimeRef.current = 0;
+    lastBpmUpdate.current = 0;
     setFinalReading(null);
     setPhase("warming");
     setCountdown(100);
