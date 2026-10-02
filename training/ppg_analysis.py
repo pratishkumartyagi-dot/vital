@@ -226,6 +226,51 @@ def _analyze_resp_fallback(ppg: np.ndarray, fs: float) -> dict:
     return {"resp_rate_bpm": float(fused), "method": method, "confidence": confidence}
 
 
+def perfusion_index_filtered(sig: np.ndarray, fs: float) -> float:
+    """RMS of the bandpass-filtered pulse over the raw DC, in percent.
+
+    Mirrors ``filteredPerfusionIndex`` in the browser module: unlike a raw
+    MAD/mean ratio, baseline wander and respiration do not inflate AC.
+    """
+    if sig.size < fs * 2:
+        return 0.0
+    x = butter_bandpass(sig.astype(float), 0.5, 3.5, fs)
+    dc = float(np.mean(sig))
+    if dc <= 1e-9:
+        return 0.0
+    ac = float(np.sqrt(np.mean(x ** 2)))
+    return (ac / dc) * 100.0
+
+
+def compute_sqi(ppg: np.ndarray, fs: float) -> float:
+    """Composite signal-quality index (0-100) mirroring the browser module.
+
+    45% perfusion + 35% raw-signal spectral SNR + 20% pulse regularity, gated
+    by a pulse-presence factor so broadband noise cannot score highly.
+    """
+    if ppg.size < fs * 5:
+        return 0.0
+    pi = perfusion_index_filtered(ppg, fs)
+    pi_score = min(1.0, pi / 1.5)
+
+    freqs, psd = sps.periodogram(ppg.astype(float) - float(np.mean(ppg)), fs=fs)
+    in_band = float(np.sum(psd[(freqs >= 0.5) & (freqs <= 3.5)]))
+    out_band = float(np.sum(psd[(freqs > 3.5) & (freqs <= fs * 0.4)]))
+    snr = in_band / out_band if out_band > 1e-12 else (8.0 if in_band > 1e-12 else 0.0)
+    snr_score = min(1.0, snr / 4.0)
+
+    x = butter_bandpass(detrend(ppg.astype(float)), 0.5, 3.5, fs)
+    peaks, _ = sps.find_peaks(x, distance=max(1, int(fs * 0.3)))
+    if peaks.size < 2:
+        return 0.0
+    rr = np.diff(peaks) / fs * 1000.0
+    cv = (float(np.std(rr, ddof=1)) / float(np.mean(rr))) * 100.0 if rr.size > 1 and np.mean(rr) > 0 else 100.0
+    reg_score = 1.0 if cv < 10 else max(0.0, 1.0 - (cv - 10.0) / 30.0)
+
+    peak_gate = float(min(1.0, max(0.0, (snr - 0.5) / 1.0)))
+    return round((0.45 * pi_score + 0.35 * snr_score + 0.2 * reg_score) * peak_gate * 100.0)
+
+
 def extract_creatinine_features(ppg: np.ndarray, fs: float) -> Optional[dict]:
     """Extract the PPG morphology family used by Sridevi et al. creatinine models.
 
@@ -297,20 +342,34 @@ def estimate_creatinine(ppg: np.ndarray, fs: float, age: float = 45.0, sex: str 
                         camera_mode: str = "rear") -> Optional[dict]:
     """Research-grade serum creatinine surrogate (mg/dL) + CKD-EPI 2021 eGFR.
 
+    Design notes (mirroring ``estimateCreatinine`` in the browser module):
+    age is intentionally NOT a predictor term - the morphology descriptors
+    already carry vascular aging and age re-enters through CKD-EPI eGFR, so an
+    explicit age term double-counted aging; front-camera rPPG uses
+    mode-specific normalization bands instead of halving the signal terms
+    (which collapsed the estimate onto its demographic base); and the estimate
+    is gated on the composite SQI (>= 40).
+
     Not a clinical assay; use the validation dashboard to calibrate against
     laboratory creatinine before any interpretation.
     """
+    sqi = compute_sqi(ppg, fs)
+    if sqi < 40.0:
+        return None
     feats = extract_creatinine_features(ppg, fs)
     if feats is None:
         return None
-    mode_scale = 0.5 if camera_mode == "front" else 1.0
+    is_front = camera_mode == "front"
 
     def nz(v, lo, hi):
         return float(min(1.0, max(0.0, (v - lo) / (hi - lo)))) if hi != lo else 0.0
 
     amplitude = nz(feats["peak_amp"], 0.05, 0.95)
-    perfusion = 0.0
-    red_green = 0.0
+    perfusion = (
+        nz(perfusion_index_filtered(ppg, fs), 0.02, 0.8)
+        if is_front
+        else nz(perfusion_index_filtered(ppg, fs), 0.15, 3.0)
+    )
     stiffness = nz(feats["stiffness_ratio"], 0.05, 0.9)
     augmentation = nz(feats["augmentation_index"], 0.1, 1.2)
     rr_cv = nz(feats["rr_cv"], 0.0, 0.3)
@@ -320,18 +379,16 @@ def estimate_creatinine(ppg: np.ndarray, fs: float, age: float = 45.0, sex: str 
     deriv_min = nz(feats["first_deriv_min_time"], 0.05, 0.6)
 
     creatinine = (
-        0.82
-        + 0.75 * ((age - 45) / 45)
-        + (0.20 if sex == "male" else 0.0)
-        - 0.55 * mode_scale * (perfusion - 0.5)
-        - 0.30 * mode_scale * (amplitude - 0.5)
-        - 0.22 * mode_scale * (red_green - 0.5)
-        + 0.28 * mode_scale * (stiffness - 0.5)
-        + 0.18 * mode_scale * (augmentation - 0.5)
-        + 0.12 * mode_scale * (notch_time - 0.5)
-        + 0.10 * mode_scale * (systolic_time - 0.5)
-        - 0.14 * mode_scale * (ipa - 0.5)
-        + 0.08 * mode_scale * (deriv_min - 0.5)
+        0.85
+        + (0.15 if sex == "male" else 0.0)
+        - 0.55 * (perfusion - 0.5)
+        - 0.30 * (amplitude - 0.5)
+        + 0.28 * (stiffness - 0.5)
+        + 0.18 * (augmentation - 0.5)
+        + 0.12 * (notch_time - 0.5)
+        + 0.10 * (systolic_time - 0.5)
+        - 0.14 * (ipa - 0.5)
+        + 0.08 * (deriv_min - 0.5)
         + 0.10 * rr_cv
     )
     creatinine = round(min(12.0, max(0.4, creatinine)), 2)
@@ -340,10 +397,14 @@ def estimate_creatinine(ppg: np.ndarray, fs: float, age: float = 45.0, sex: str 
     a = -0.241 if female else -0.302
     ratio = creatinine / k
     egfr = 142 * (min(ratio, 1) ** a) * (max(ratio, 1) ** -1.2) * (0.9938 ** age) * (1.012 if female else 1.0)
+    confidence = min(0.55 if is_front else 0.8, 0.12 + 0.55 * (sqi / 100.0) + 0.15 * min(1.0, feats["beats"] / 15.0))
     return {
         "creatinine_mg_dl": creatinine,
         "creatinine_class": "high" if creatinine > 1.3 else "low" if creatinine < 0.6 else "normal",
         "egfr": round(egfr),
+        "sqi": sqi,
+        "confidence": round(confidence, 2),
+        "method": "rppg-front" if is_front else "ppg-rear-ftir",
         "features": feats,
     }
 

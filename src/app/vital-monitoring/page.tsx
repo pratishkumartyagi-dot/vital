@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -69,18 +69,18 @@ export default function VitalMonitoringPage() {
   const [countdown, setCountdown] = useState<number>(0);
   const [finalReading, setFinalReading] = useState<{
     bpm: number;
-    spo2: number;
-    hb: number;
-    bpSys: number;
-    bpDia: number;
-    sugar: number;
+    spo2: number | null;
+    hb: number | null;
+    bpSys: number | null;
+    bpDia: number | null;
+    sugar: number | null;
     signalQuality: number;
     respRate: number;
     sdnn: number;
     rmssd: number;
     pnn50: number;
-    creatinine: number;
-    egfr: number;
+    creatinine: number | null;
+    egfr: number | null;
     creatinineClass: string;
     creatinineConfidence: number;
     creatinineMethod: string;
@@ -90,6 +90,7 @@ export default function VitalMonitoringPage() {
   const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
   const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
   const [fingerDetected, setFingerDetected] = useState(false);
+  const [skinDetected, setSkinDetected] = useState(false);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
@@ -102,9 +103,8 @@ export default function VitalMonitoringPage() {
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
-  const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
   const sessionStartRef = useRef<number>(0);
-  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
+  const samplesRef = useRef<{ bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
 
@@ -203,66 +203,6 @@ export default function VitalMonitoringPage() {
     return () => clearTimeout(timer);
   }, [checkPermission, patient]);
 
-  const detectFaceROI = useCallback((video: HTMLVideoElement): { roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null => {
-    const canvas = document.createElement("canvas");
-    canvas.width = 64;
-    canvas.height = 64;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, 64, 64);
-    const imageData = ctx.getImageData(0, 0, 64, 64);
-    const data = imageData.data;
-    
-    let minX = 64, maxX = 0, minY = 64, maxY = 0;
-    let found = false;
-    
-    for (let y = 0; y < 64; y++) {
-      for (let x = 0; x < 64; x++) {
-        const r = data[(y * 64 + x) * 4];
-        const g = data[(y * 64 + x) * 4 + 1];
-        const b = data[(y * 64 + x) * 4 + 2];
-        const brightness = (r + g + b) / 3;
-        
-        if (brightness > 20 && brightness < 240) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-          found = true;
-        }
-      }
-    }
-    
-    if (!found || maxX - minX < 10 || maxY - minY < 10) return null;
-    
-    const roi: number[][] = [];
-    const regions = [
-      { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
-      { x: minX + (maxX - minX) * 0.6, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
-      { x: minX + (maxX - minX) * 0.35, y: minY + (maxY - minY) * 0.35, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
-      { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
-      { x: minX + (maxX - minX) * 0.55, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
-    ];
-    
-    for (const region of regions) {
-      const regionData: number[] = [];
-      const startX = Math.max(0, Math.floor(region.x));
-      const endX = Math.min(64, Math.floor(region.x + region.w));
-      const startY = Math.max(0, Math.floor(region.y));
-      const endY = Math.min(64, Math.floor(region.y + region.h));
-      
-      for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-          const idx = (y * 64 + x) * 4;
-          regionData.push(data[idx], data[idx + 1], data[idx + 2]);
-        }
-      }
-      roi.push(regionData);
-    }
-    
-    return { roi, coords: { x: minX, y: minY, w: maxX - minX, h: maxY - minY } };
-  }, []);
-
   const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -328,6 +268,7 @@ export default function VitalMonitoringPage() {
     const data = ctx.getImageData(0, 0, 64, 64).data;
 
     let r = 0, g = 0, b = 0, count = 0;
+    let frameOk = true;
     if (cameraMode === "rear") {
       const cx0 = 22, cy0 = 22, cx1 = 42, cy1 = 42;
       for (let y = cy0; y < cy1; y++) {
@@ -340,11 +281,47 @@ export default function VitalMonitoringPage() {
         }
       }
     } else {
-      for (let i = 0; i < data.length; i += 4) {
-        r += data[i];
-        g += data[i + 1];
-        b += data[i + 2];
-        count++;
+      // Skin-ROI sampling (front camera): average only skin-tone pixels
+      // (YCbCr band) so background, hair and clothing cannot dominate the
+      // pulse signal. The previous full-frame average diluted the facial
+      // rPPG waveform with scene content.
+      let skinR = 0, skinG = 0, skinB = 0, skinCount = 0;
+      for (let y = 0; y < 64; y++) {
+        for (let x = 0; x < 64; x++) {
+          const i = (y * 64 + x) * 4;
+          const pr = data[i];
+          const pg = data[i + 1];
+          const pb = data[i + 2];
+          const brightness = (pr + pg + pb) / 3;
+          if (brightness < 45 || brightness > 245) continue;
+          const cb = 128 - 0.168736 * pr - 0.331264 * pg + 0.5 * pb;
+          const cr = 128 + 0.5 * pr - 0.418688 * pg - 0.081312 * pb;
+          if (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173) {
+            skinR += pr;
+            skinG += pg;
+            skinB += pb;
+            skinCount++;
+          }
+        }
+      }
+      const hasSkin = skinCount >= 0.05 * 64 * 64;
+      if (cameraMode === "front" && !demoMode) setSkinDetected(hasSkin);
+      if (hasSkin) {
+        r = skinR;
+        g = skinG;
+        b = skinB;
+        count = skinCount;
+        frameOk = true;
+      } else {
+        // No meaningful skin region: fall back to the full frame for the
+        // waveform preview but do not collect analysis samples.
+        for (let i = 0; i < data.length; i += 4) {
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
+          count++;
+        }
+        frameOk = false;
       }
     }
     const avgR = count ? r / count : 128;
@@ -393,10 +370,11 @@ export default function VitalMonitoringPage() {
       }
       setFingerDetected(true);
     } else {
-      // Only collect the analysis buffers during the measuring phase and, in
-      // rear/fingertip mode, only when a finger is actually on the lens. This
-      // keeps warm-up and non-finger frames out of the AC/DC and HR/HRV math.
-      const collecting = phaseRef.current === "measuring" && (cameraMode !== "rear" || isFingerFrame);
+      // Only collect the analysis buffers during the measuring phase and only
+      // when the frame actually contains the signal source (finger on lens in
+      // rear mode, skin ROI in front mode). This keeps warm-up and unusable
+      // frames out of the AC/DC and HR/HRV math.
+      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || isFingerFrame);
       if (collecting) {
         ppgBufferRef.current.push(avgG);
         if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
@@ -423,15 +401,33 @@ export default function VitalMonitoringPage() {
       lastBpmUpdate.current = nowMs;
 
       const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
-      const analysisSource = demoMode
-        ? syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, Math.floor(fs * 30)))
-        : ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
+      // All buffers are cut to the same most-recent 30 s window so the pulse
+      // analysis, the POS projection and the AC/DC ratios always operate on
+      // exactly the same samples.
+      const windowLen = Math.floor(fs * 30);
+      const ppgWin = ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, windowLen));
+      const redWin = redRef.current.slice(-Math.min(redRef.current.length, windowLen));
+      const greenWin = greenRef.current.slice(-Math.min(greenRef.current.length, windowLen));
+      const blueWin = blueRef.current.slice(-Math.min(blueRef.current.length, windowLen));
+      let analysisSource: number[];
+      if (demoMode) {
+        analysisSource = syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, windowLen));
+      } else if (cameraMode === "front") {
+        // Front camera: drive the pulse analysis from the POS chrominance
+        // pulse, which rejects illumination/motion artifacts that a raw
+        // averaged channel keeps. Fall back to the green skin-ROI trace while
+        // the POS window is still filling.
+        const pos = posPulse(redWin, greenWin, blueWin, Math.max(16, Math.round(fs)));
+        analysisSource = pos.length >= Math.floor(fs * 5) ? pos : ppgWin;
+      } else {
+        analysisSource = ppgWin;
+      }
       const analysis: VitalAnalysis = analyzeVitals(
         analysisSource,
         fs,
-        redRef.current,
-        greenRef.current,
-        blueRef.current,
+        redWin,
+        greenWin,
+        blueWin,
         {
           cameraMode,
           ageYears: patient ? parseInt(patient.age, 10) || null : null,
@@ -444,22 +440,15 @@ export default function VitalMonitoringPage() {
       const sqi = analysis.heart.signalQuality;
       setSignalQuality(sqi / 100);
 
-      // Compute SpO2 and Hb from the gated (measuring-phase) color buffers.
+      // Compute SpO2 and Hb from the gated (measuring-phase) color buffers,
+      // but only when the composite signal quality is high enough for
+      // ratio-of-ratios math to be meaningful (weak/motion signals previously
+      // produced plausible-looking but worthless numbers).
       // Note: smartphone cameras lack IR (940nm), so SpO2 is an estimate only.
       let spo2Val: number | null = null;
       let hbVal: number | null = null;
       const minSamples = Math.floor(fs * 5);
-      if (
-        redRef.current.length >= minSamples &&
-        greenRef.current.length >= minSamples &&
-        blueRef.current.length >= minSamples
-      ) {
-        // Use the most recent 30 s window, matching the HR analysis window.
-        const windowLen = Math.min(redRef.current.length, Math.floor(fs * 30));
-        const redWin = redRef.current.slice(-windowLen);
-        const greenWin = greenRef.current.slice(-windowLen);
-        const blueWin = blueRef.current.slice(-windowLen);
-
+      if (sqi >= 60 && redWin.length >= minSamples && greenWin.length >= minSamples && blueWin.length >= minSamples) {
         // Zero-phase bandpass at 0.5-3.5 Hz for proper AC/DC.
         const redFiltered = butterworthBandpass(redWin, 0.5, 3.5, fs, true);
         const greenFiltered = butterworthBandpass(greenWin, 0.5, 3.5, fs, true);
@@ -532,12 +521,12 @@ export default function VitalMonitoringPage() {
       if (isMeasuring && hr !== null) {
         samplesRef.current.push({
           bpm: hr,
-          spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
-          hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
-          bpSys: bpSysVal ?? 0,
-          bpDia: bpDiaVal ?? 0,
-          sugar: glucoseVal ?? 0,
-          creatinine: analysis.creatinine.creatinine ?? (demoMode ? 1.0 + (Math.random() - 0.5) * 0.3 : 0),
+          spo2: spo2Val !== null ? Math.round(spo2Val) : null,
+          hb: hbVal !== null ? Math.round(hbVal * 10) / 10 : null,
+          bpSys: bpSysVal,
+          bpDia: bpDiaVal,
+          sugar: glucoseVal,
+          creatinine: analysis.creatinine.creatinine,
           signalQuality: sqi / 100,
           respRate: analysis.respRate ?? 15,
           sdnn: analysis.hrv?.sdnn ?? 0,
@@ -576,6 +565,7 @@ export default function VitalMonitoringPage() {
       setSugar(null);
       setCreatinine(null);
       setFingerDetected(false);
+      setSkinDetected(false);
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -631,8 +621,17 @@ export default function VitalMonitoringPage() {
 
   const finalizeSession = useCallback(async () => {
     const samples = samplesRef.current;
-    const avg = (key: keyof typeof samples[number]) =>
-      samples.length > 0 ? samples.reduce((a, s) => a + (s[key] as number), 0) / samples.length : 0;
+    // Average only over samples where the value was actually produced; gated
+    // metrics (SpO2/Hb/glucose/creatinine under low SQI) are null, and
+    // averaging them as 0 previously dragged the final reading toward zero.
+    const avg = (key: keyof typeof samples[number]): number | null => {
+      const vals: number[] = [];
+      for (const s of samples) {
+        const v = s[key];
+        if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
+      }
+      return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
     const mode = <T extends string>(items: T[]): T => {
       const m = new Map<T, number>();
       for (const it of items) m.set(it, (m.get(it) ?? 0) + 1);
@@ -647,41 +646,41 @@ export default function VitalMonitoringPage() {
       return best;
     };
 
-    let computedReading: { bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; egfr: number; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
+    let computedReading: { bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; egfr: number | null; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
 
     const ageYears = patient ? parseInt(patient.age, 10) || null : null;
     const patientSex = patient ? (patient.sex as "male" | "female") : null;
-    const assignCreatinine = (cr: number) => {
-      const rounded = Math.round(cr * 100) / 100;
-      const egfr = estimateEgfr(rounded > 0 ? rounded : null, ageYears, patientSex);
+    const assignCreatinine = (cr: number | null) => {
+      const rounded = cr !== null && cr > 0 ? Math.round(cr * 100) / 100 : null;
+      const egfr = estimateEgfr(rounded, ageYears, patientSex);
       return {
         creatinine: rounded,
-        egfr: egfr === null ? 0 : Math.round(egfr),
-        creatinineClass: rounded > 1.3 ? "high" : rounded < 0.6 ? "low" : "normal",
+        egfr: egfr === null ? null : Math.round(egfr),
+        creatinineClass: rounded === null ? "" : rounded > 1.3 ? "high" : rounded < 0.6 ? "low" : "normal",
       };
     };
 
     if (samples.length > 0) {
-      const bpSysAvg = Math.round(avg("bpSys"));
-      const bpDiaAvg = Math.round(avg("bpDia"));
+      const bpSysAvg = avg("bpSys");
+      const bpDiaAvg = avg("bpDia");
       const cr = assignCreatinine(avg("creatinine"));
       computedReading = {
-        bpm: avg("bpm"),
-        spo2: Math.round(avg("spo2")),
-        hb: avg("hb"),
-        bpSys: bpSysAvg,
-        bpDia: bpDiaAvg,
-        sugar: Math.round(avg("sugar")),
+        bpm: avg("bpm") ?? 0,
+        spo2: avg("spo2") !== null ? Math.round(avg("spo2") as number) : null,
+        hb: avg("hb") !== null ? Math.round((avg("hb") as number) * 10) / 10 : null,
+        bpSys: bpSysAvg !== null ? Math.round(bpSysAvg) : null,
+        bpDia: bpDiaAvg !== null ? Math.round(bpDiaAvg) : null,
+        sugar: avg("sugar") !== null ? Math.round(avg("sugar") as number) : null,
         creatinine: cr.creatinine,
         egfr: cr.egfr,
         creatinineClass: cr.creatinineClass,
         creatinineConfidence: creatinine?.confidence ?? 0,
         creatinineMethod: creatinine?.method ?? cameraMode,
-        signalQuality: avg("signalQuality"),
-        respRate: avg("respRate"),
-        sdnn: avg("sdnn"),
-        rmssd: avg("rmssd"),
-        pnn50: avg("pnn50"),
+        signalQuality: avg("signalQuality") ?? 0,
+        respRate: avg("respRate") ?? 0,
+        sdnn: avg("sdnn") ?? 0,
+        rmssd: avg("rmssd") ?? 0,
+        pnn50: avg("pnn50") ?? 0,
         rhythm: mode(samples.map((s) => (s.rhythm as "regular" | "irregular" | "unknown"))),
       };
     } else {
@@ -689,14 +688,14 @@ export default function VitalMonitoringPage() {
       const bpParts = bpStr ? bpStr.split("/") : [];
       const bpSysVal = bpParts.length === 2 ? parseInt(bpParts[0], 10) : 0;
       const bpDiaVal = bpParts.length === 2 ? parseInt(bpParts[1], 10) : 0;
-      const cr = assignCreatinine(creatinine?.creatinine ?? 0);
+      const cr = assignCreatinine(creatinine?.creatinine ?? null);
       computedReading = {
         bpm: bpm ?? 0,
-        spo2: spo2 ?? 0,
-        hb: hb ?? 0,
-        bpSys: bpSysVal,
-        bpDia: bpDiaVal,
-        sugar: sugar ?? 0,
+        spo2,
+        hb,
+        bpSys: bpSysVal > 0 ? bpSysVal : null,
+        bpDia: bpDiaVal > 0 ? bpDiaVal : null,
+        sugar,
         creatinine: cr.creatinine,
         egfr: cr.egfr,
         creatinineClass: cr.creatinineClass,
@@ -719,6 +718,24 @@ export default function VitalMonitoringPage() {
 
     const videoBlob = await stopVideoRecording().catch(() => null);
     if (videoBlob && patient && computedReading) {
+      // Storage keeps numbers (0 = not measurable this session); the on-screen
+      // final reading keeps nulls so gated metrics render as "—".
+      const storedVitals = {
+        bpm: computedReading.bpm,
+        spo2: computedReading.spo2 ?? 0,
+        hb: computedReading.hb ?? 0,
+        bpSys: computedReading.bpSys ?? 0,
+        bpDia: computedReading.bpDia ?? 0,
+        sugar: computedReading.sugar ?? 0,
+        signalQuality: computedReading.signalQuality,
+        respRate: computedReading.respRate,
+        sdnn: computedReading.sdnn,
+        rmssd: computedReading.rmssd,
+        pnn50: computedReading.pnn50,
+        creatinine: computedReading.creatinine ?? 0,
+        egfr: computedReading.egfr ?? 0,
+        rhythm: computedReading.rhythm,
+      };
       await addVitalReading({
         patient: {
           name: patient.name,
@@ -728,7 +745,7 @@ export default function VitalMonitoringPage() {
           pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
           menopause: patient.menopause as "yes" | "no" | undefined,
         },
-        vitals: computedReading,
+        vitals: storedVitals,
         cameraMode,
         demoMode,
         spo2Offset,
@@ -1111,7 +1128,7 @@ export default function VitalMonitoringPage() {
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">SpO₂</p>
-              <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2}%</p>
+              <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2 !== null ? `${finalReading.spo2}%` : "—"}</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Resp Rate</p>
@@ -1123,15 +1140,15 @@ export default function VitalMonitoringPage() {
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Hb</p>
-              <p className="text-xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
+              <p className="text-xl font-bold text-rose-400">{finalReading.hb !== null ? `${finalReading.hb.toFixed(1)} g/dL` : "—"}</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Creatinine</p>
-              <p className="text-xl font-bold text-teal-400">{finalReading.creatinine > 0 ? finalReading.creatinine.toFixed(2) : "—"} mg/dL</p>
+              <p className="text-xl font-bold text-teal-400">{finalReading.creatinine !== null ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "—"}</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">eGFR</p>
-              <p className="text-xl font-bold text-teal-300">{finalReading.egfr > 0 ? finalReading.egfr : "—"}</p>
+              <p className="text-xl font-bold text-teal-300">{finalReading.egfr !== null ? finalReading.egfr : "—"}</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Signal Quality</p>
@@ -1150,17 +1167,17 @@ export default function VitalMonitoringPage() {
               RMSSD: {finalReading.rmssd > 0 ? finalReading.rmssd.toFixed(1) : "—"} ms
             </span>
             <span className="px-2 py-1 rounded-full border text-rose-400 border-rose-500 bg-rose-500/10">
-              Hb: {finalReading.hb.toFixed(1)} g/dL
+              Hb: {finalReading.hb !== null ? `${finalReading.hb.toFixed(1)} g/dL` : "—"}
             </span>
             <span className={`px-2 py-1 rounded-full border ${
               finalReading.creatinineClass === "high" ? "text-red-400 border-red-500 bg-red-500/10" :
               finalReading.creatinineClass === "low" ? "text-sky-400 border-sky-500 bg-sky-500/10" :
               "text-teal-400 border-teal-500 bg-teal-500/10"
             }`}>
-              Creatinine: {finalReading.creatinine > 0 ? finalReading.creatinine.toFixed(2) : "—"} mg/dL ({finalReading.creatinineClass})
+              Creatinine: {finalReading.creatinine !== null ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "—"} ({finalReading.creatinineClass || "n/a"})
             </span>
             <span className="px-2 py-1 rounded-full border text-teal-300 border-teal-500 bg-teal-500/10">
-              eGFR: {finalReading.egfr > 0 ? finalReading.egfr : "—"} mL/min/1.73m²
+              eGFR: {finalReading.egfr !== null ? finalReading.egfr : "—"} mL/min/1.73m²
             </span>
             <span className="px-2 py-1 rounded-full border text-violet-400 border-violet-500 bg-violet-500/10">
               Signal: {(finalReading.signalQuality * 100).toFixed(1)}%
@@ -1174,6 +1191,11 @@ export default function VitalMonitoringPage() {
           {cameraOn && cameraMode === "rear" && (
             <div className={`absolute top-2 right-2 ${fingerDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"} text-xs px-2 py-1 rounded`}>
               {fingerDetected ? "Finger detected" : "Place fingertip over lens"}
+            </div>
+          )}
+          {cameraOn && cameraMode === "front" && !demoMode && (
+            <div className={`absolute top-2 right-2 ${skinDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"} text-xs px-2 py-1 rounded`}>
+              {skinDetected ? "Skin ROI locked" : "Looking for skin..."}
             </div>
           )}
           {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-500 text-sm">Camera off</span></div>}
@@ -1338,7 +1360,7 @@ export default function VitalMonitoringPage() {
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Glucose</p>
               <p className="text-2xl font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
-              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
+              <p className="text-[10px] mt-1 text-neutral-500">not measurable from RGB alone</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Creatinine</p>
@@ -1409,33 +1431,34 @@ export default function VitalMonitoringPage() {
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">SpO₂</p>
-                  <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2}%</p>
+                  <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2 !== null ? `${finalReading.spo2}%` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Hb</p>
-                  <p className="text-2xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
+                  <p className="text-2xl font-bold text-rose-400">{finalReading.hb !== null ? `${finalReading.hb.toFixed(1)} g/dL` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">BP</p>
-                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys > 0 ? `${finalReading.bpSys}/${finalReading.bpDia}` : "--"}</p>
+                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys !== null && finalReading.bpDia !== null ? `${finalReading.bpSys}/${finalReading.bpDia}` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Glucose</p>
-                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar > 0 ? `${finalReading.sugar} mg/dL` : "--"}</p>
+                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar !== null ? `${finalReading.sugar} mg/dL` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-teal-700/40">
                   <p className="text-neutral-400 mb-1">Serum Creatinine</p>
-                  <p className="text-xl font-bold text-teal-400">{finalReading.creatinine > 0 ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "--"}</p>
+                  <p className="text-xl font-bold text-teal-400">{finalReading.creatinine !== null ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "--"}</p>
                   <p className={`text-[10px] mt-1 font-semibold ${
                     finalReading.creatinineClass === "high" ? "text-red-400" :
-                    finalReading.creatinineClass === "low" ? "text-sky-400" : "text-emerald-400"
+                    finalReading.creatinineClass === "low" ? "text-sky-400" :
+                    finalReading.creatinineClass === "normal" ? "text-emerald-400" : "text-neutral-500"
                   }`}>
-                    {finalReading.creatinineClass === "high" ? "High (>1.3)" : finalReading.creatinineClass === "low" ? "Low (<0.6)" : "Normal (0.6–1.3)"}
+                    {finalReading.creatinineClass === "high" ? "High (>1.3)" : finalReading.creatinineClass === "low" ? "Low (<0.6)" : finalReading.creatinineClass === "normal" ? "Normal (0.6–1.3)" : "Signal quality too low"}
                   </p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-teal-700/40">
                   <p className="text-neutral-400 mb-1">eGFR (CKD-EPI 2021)</p>
-                  <p className="text-xl font-bold text-teal-300">{finalReading.egfr > 0 ? `${finalReading.egfr}` : "--"}</p>
+                  <p className="text-xl font-bold text-teal-300">{finalReading.egfr !== null ? `${finalReading.egfr}` : "--"}</p>
                   <p className="text-[10px] mt-1 text-neutral-500">mL/min/1.73m²</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">

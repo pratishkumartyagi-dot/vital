@@ -105,9 +105,9 @@ function highpassBiquad(fc: number, fs: number, q = Math.SQRT1_2): BiquadCoeffs 
   };
 }
 
-function applyBiquad(signal: number[], c: BiquadCoeffs): number[] {
+function applyBiquad(signal: number[], c: BiquadCoeffs, seedX = 0, seedY = 0): number[] {
   const out: number[] = new Array(signal.length);
-  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  let x1 = seedX, x2 = seedX, y1 = seedY, y2 = seedY;
   for (let i = 0; i < signal.length; i++) {
     const y = c.b0 * signal[i] + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
     out[i] = y;
@@ -120,7 +120,10 @@ function applyBiquad(signal: number[], c: BiquadCoeffs): number[] {
 /// Butterworth bandpass as a cascade of a 2nd-order highpass at `low` and a
 /// 2nd-order lowpass at `high`. With `zeroPhase` (default) the cascade is run
 /// forward and backward (filtfilt) so pulse peaks and the AC/DC ratios are not
-/// shifted by filter phase.
+/// shifted by filter phase. The biquad states are seeded with the steady-state
+/// response to the signal's DC level, which eliminates the otherwise massive
+/// edge transient (a zero-state highpass reacts to the DC step with a spike of
+/// nearly the full DC amplitude, inflating every RMS-based AC measurement).
 export function butterworthBandpass(
   signal: number[],
   low: number,
@@ -131,12 +134,17 @@ export function butterworthBandpass(
   if (signal.length < 10 || !(fs > 0) || !(low > 0) || high <= low || high >= fs / 2) {
     return signal.slice();
   }
-  const sections = [highpassBiquad(low, fs), lowpassBiquad(high, fs)];
-  let y = signal.slice();
-  for (const c of sections) y = applyBiquad(y, c);
+  const hp = highpassBiquad(low, fs);
+  const lp = lowpassBiquad(high, fs);
+  const dc = signal.reduce((a, b) => a + b, 0) / signal.length;
+  // Highpass: steady state for a constant input dc is y = 0. Lowpass input
+  // (the highpass output) is zero-mean, so its steady state is x = y = 0.
+  let y = applyBiquad(signal, hp, dc, 0);
+  y = applyBiquad(y, lp, 0, 0);
   if (zeroPhase) {
     y = y.reverse();
-    for (const c of sections) y = applyBiquad(y, c);
+    y = applyBiquad(y, hp, 0, 0);
+    y = applyBiquad(y, lp, 0, 0);
     y = y.reverse();
   }
   return y;
@@ -169,13 +177,111 @@ function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): {
   return { peaks, filtered };
 }
 
+/// Plane-Orthogonal-to-Skin (POS) pulse extraction (Wang, den Brinker, Stuijk,
+/// de Haan, "Algorithmic Principles of Remote PPG", IEEE TBME 64(7), 2017,
+/// Algorithm 1). Temporally mean-normalized RGB is projected onto the two axes
+/// S1 = G - B and S2 = -2R + G + B, both orthogonal to the (1,1,1) skin/specular
+/// direction and both giving in-phase pulse signals, combined as
+/// h = S1 + alpha*S2 with alpha = std(S1)/std(S2). Common-mode illumination and
+/// motion artifacts cancel in both projections while the pulse boosts, which
+/// far outperforms any single raw channel for front-camera facial rPPG.
+/// Windows of ~1 s are Hann-weighted and overlap-added so block edges do not
+/// inject discontinuities into the downstream bandpass.
+export function posPulse(red: number[], green: number[], blue: number[], winLen = 32): number[] {
+  const n = Math.min(red.length, green.length, blue.length);
+  if (n < winLen || winLen < 8) return [];
+  const hop = Math.max(1, Math.floor(winLen / 2));
+  const sqrt6 = Math.sqrt(6);
+  const acc = new Array<number>(n).fill(0);
+  const wsum = new Array<number>(n).fill(0);
+  for (let start = 0; start + winLen <= n; start += hop) {
+    let mr = 0;
+    let mg = 0;
+    let mb = 0;
+    for (let i = 0; i < winLen; i++) {
+      mr += red[start + i];
+      mg += green[start + i];
+      mb += blue[start + i];
+    }
+    mr /= winLen;
+    mg /= winLen;
+    mb /= winLen;
+    if (mr <= 1 || mg <= 1 || mb <= 1) continue;
+    const cnR = new Array<number>(winLen);
+    const cnG = new Array<number>(winLen);
+    const cnB = new Array<number>(winLen);
+    for (let i = 0; i < winLen; i++) {
+      cnR[i] = red[start + i] / mr;
+      cnG[i] = green[start + i] / mg;
+      cnB[i] = blue[start + i] / mb;
+    }
+    const s1 = new Array<number>(winLen);
+    const s2 = new Array<number>(winLen);
+    let m1 = 0;
+    let m2 = 0;
+    for (let i = 0; i < winLen; i++) {
+      s1[i] = (cnG[i] - cnB[i]) / sqrt6;
+      s2[i] = (-2 * cnR[i] + cnG[i] + cnB[i]) / sqrt6;
+      m1 += s1[i];
+      m2 += s2[i];
+    }
+    m1 /= winLen;
+    m2 /= winLen;
+    let v1 = 0;
+    let v2 = 0;
+    for (let i = 0; i < winLen; i++) {
+      v1 += (s1[i] - m1) ** 2;
+      v2 += (s2[i] - m2) ** 2;
+    }
+    const alpha = v2 > 1e-12 ? Math.sqrt(v1 / v2) : 0;
+    for (let i = 0; i < winLen; i++) {
+      const h = s1[i] - m1 + alpha * (s2[i] - m2);
+      const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (winLen - 1)));
+      acc[start + i] += h * w;
+      wsum[start + i] += w;
+    }
+  }
+  const out: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = wsum[i] > 1e-9 ? acc[i] / wsum[i] : 0;
+  }
+  return out;
+}
+
 function computePerfusionIndex(signal: number[]): number {
   if (signal.length < 10) return 0;
-  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+  let m = 0;
+  let absMean = 0;
+  for (const v of signal) {
+    m += v;
+    absMean += Math.abs(v);
+  }
+  m /= signal.length;
+  absMean /= signal.length;
+  // Camera signals are strictly positive, so |mean| is the DC. Zero-mean
+  // derived signals (e.g. the POS pulse) fall back to mean(|x|) so the ratio
+  // stays meaningful instead of collapsing to 0.
+  const denom = Math.abs(m) > 1e-9 ? m : absMean;
+  if (denom <= 1e-9) return 0;
   let ac = 0;
-  for (const v of signal) ac += Math.abs(v - mean);
+  for (const v of signal) ac += Math.abs(v - m);
   ac /= signal.length;
-  return mean > 0 ? (ac / mean) * 100 : 0;
+  return (ac / denom) * 100;
+}
+
+/// Perfusion index computed on the bandpass-filtered (0.5-3.5 Hz) pulse:
+/// AC is the RMS of the filtered signal and DC the mean of the raw signal.
+/// Unlike the raw MAD/mean variant above, baseline wander and respiration do
+/// not inflate AC, which is what the creatinine/SpO2-style ratios need.
+function filteredPerfusionIndex(signal: number[], fs: number): number {
+  if (signal.length < fs * 2) return 0;
+  const filtered = butterworthBandpass(signal, 0.5, 3.5, fs, true);
+  const dc = signal.reduce((a, b) => a + b, 0) / signal.length;
+  if (dc <= 1e-9) return 0;
+  let sq = 0;
+  for (const v of filtered) sq += v * v;
+  const ac = Math.sqrt(sq / filtered.length);
+  return (ac / dc) * 100;
 }
 
 function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], fs: number): number {
@@ -185,14 +291,16 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
   const pi = computePerfusionIndex(raw);
   const piScore = Math.min(1, pi / 1.5); // PI > 1.5% is good for smartphone camera PPG
 
-  // 2. Spectral SNR in cardiac band (0.5-3.5 Hz)
-  const { freqs, psd } = powerSpectrum(filtered, fs);
+  // 2. Spectral SNR, measured on the RAW signal. The previous metric took the
+  // "noise band" (3.5-12 Hz) from the already-bandpassed signal, where the
+  // bandpass had emptied it, so snrScore saturated at 1 even for pure noise.
+  const { freqs, psd } = powerSpectrum(raw, fs);
   let signalPower = 0, noisePower = 0;
   for (let i = 0; i < freqs.length; i++) {
     if (freqs[i] >= 0.5 && freqs[i] <= 3.5) signalPower += psd[i];
     else if (freqs[i] > 3.5 && freqs[i] <= fs * 0.4) noisePower += psd[i];
   }
-  const snr = noisePower > 0 ? signalPower / noisePower : 0;
+  const snr = noisePower > 1e-12 ? signalPower / noisePower : signalPower > 1e-12 ? 8 : 0;
   const snrScore = Math.min(1, snr / 4); // SNR > 4 is good for smartphone PPG
 
   // 3. Pulse regularity (CV of RR intervals)
@@ -203,8 +311,13 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
   const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
   const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30); // regular rhythm scores 1.0; decreases for CV > 10%
 
+  // Pulse-presence gate: however strong the raw variance looks, a spectrum
+  // without a dominant cardiac band is noise (loud broadband noise otherwise
+  // inflates the perfusion term and produced SQI ~80 for garbage input).
+  const peakGate = clamp01((snr - 0.5) / 1.0);
+
   // Combined score (weighted average)
-  return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * 100);
+  return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * peakGate * 100);
 }
 
 function computeHRV(rrMs: number[]): HRVMetrics {
@@ -236,22 +349,34 @@ function classifyRhythm(rrMs: number[]): "regular" | "irregular" | "unknown" {
   return "irregular";
 }
 
-function powerSpectrum(signal: number[], fs: number): { freqs: number[]; psd: number[] } {
+export function powerSpectrum(signal: number[], fs: number): { freqs: number[]; psd: number[] } {
   const n = signal.length;
   const freqs: number[] = [];
   const psd: number[] = [];
   if (n < 8) return { freqs, psd };
   const detrended = detrend(signal);
+  // Hann window: pulse tones rarely sit exactly on a DFT bin, and the unwindowed
+  // DFT smeared their energy across many bins (leakage), corrupting the SNR and
+  // harmonic-ratio scores. Normalized by mean(w^2) so windowed power stays
+  // comparable to the unwindowed scale.
+  const win = new Array<number>(n);
+  let winSqSum = 0;
+  for (let i = 0; i < n; i++) {
+    const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+    win[i] = w;
+    winSqSum += w * w;
+  }
+  const wNorm = winSqSum / n || 1;
   for (let k = 0; k < Math.floor(n / 2); k++) {
     let real = 0;
     let imag = 0;
     for (let i = 0; i < n; i++) {
       const angle = (2 * Math.PI * k * i) / n;
-      real += detrended[i] * Math.cos(angle);
-      imag -= detrended[i] * Math.sin(angle);
+      real += detrended[i] * win[i] * Math.cos(angle);
+      imag -= detrended[i] * win[i] * Math.sin(angle);
     }
     freqs.push((k * fs) / n);
-    psd.push((real * real + imag * imag) / n);
+    psd.push((real * real + imag * imag) / n / wNorm);
   }
   return { freqs, psd };
 }
@@ -486,9 +611,14 @@ function estimateGlucose(
   redSignal: number[],
   greenSignal: number[],
   blueSignal: number[],
-  fs: number
+  fs: number,
+  signalQuality: number
 ): GlucoseMetrics {
-  if (ppg.length < fs * 10 || peakIndices.length < 3) {
+  // Blood glucose is NOT directly measurable from RGB camera PPG (no glucose
+  // absorption band in the visible spectrum); this is a weak research surrogate
+  // at best. Gate it hard on signal quality so weak/noisy signals never
+  // produce a number instead of a misleading artifact.
+  if (ppg.length < fs * 10 || peakIndices.length < 3 || signalQuality < 50) {
     return { glucose: null, confidence: 0 };
   }
 
@@ -713,10 +843,14 @@ export function extractCreatinineFeatures(
   const rrMs = intervals.map((v) => (v / fs) * 1000);
   const rrCv = mean(rrMs) > 0 ? stddev(rrMs) / mean(rrMs) : 0;
 
-  const redPI = computePerfusionIndex(red.length > 0 ? red : ppg);
-  const greenPI = computePerfusionIndex(green.length > 0 ? green : ppg);
-  const bluePI = computePerfusionIndex(blue.length > 0 ? blue : ppg);
-  const perfusionIndex = redPI || greenPI;
+  // Per-channel perfusion from the bandpass-filtered pulse (RMS AC over DC).
+  // The previous raw MAD/mean PI was dominated by baseline wander and used a
+  // nonsensical `redPI || greenPI` fallback for the primary term.
+  const ppgPI = filteredPerfusionIndex(ppg, fs);
+  const redPI = filteredPerfusionIndex(red.length > 0 ? red : ppg, fs);
+  const greenPI = filteredPerfusionIndex(green.length > 0 ? green : ppg, fs);
+  const bluePI = filteredPerfusionIndex(blue.length > 0 ? blue : ppg, fs);
+  const perfusionIndex = ppgPI || redPI || greenPI;
   const redGreenRatio = greenPI > 0 ? redPI / greenPI : 1;
   const redBlueRatio = bluePI > 0 ? redPI / bluePI : 1;
 
@@ -783,8 +917,20 @@ function kdigoStage(egfr: number | null): string | null {
 /// finger rig. That model requires the paper's trained weights and NIR
 /// excitation; this implementation approximates the same feature->creatinine
 /// relationship from RGB smartphone PPG/rPPG and is NOT a clinical assay.
-/// Rear (fingertip PPG) uses the full morphology weighting; front (facial
-/// rPPG) attenuates the morphological terms and widens uncertainty.
+/// Design notes:
+///  - Age is intentionally NOT a predictor term. The papers predict
+///    creatinine from PPG waveform morphology only; vascular stiffness and
+///    augmentation descriptors already carry the age signal, and age re-enters
+///    downstream through CKD-EPI eGFR. An explicit age term double-counted
+///    aging and biased eGFR artificially low for older subjects.
+///  - Front facial rPPG has far weaker pulsatile amplitudes than rear
+///    fingertip PPG, so instead of halving every morphology term (which
+///    collapsed the front-mode estimate onto its demographic base value) the
+///    descriptor normalization bands are mode-specific and the signal terms
+///    keep full weight; the wider front-mode uncertainty is expressed through
+///    the confidence cap.
+///  - The estimate is gated on the composite SQI: below 40 the waveform
+///    morphology is too unreliable to interpret, so no number is produced.
 function estimateCreatinine(
   ppg: number[],
   red: number[],
@@ -809,15 +955,15 @@ function estimateCreatinine(
     confidence: 0,
     method,
   };
-  if (ppg.length < fs * 10 || features.beats < 3 || bpm === null) return invalid;
+  if (ppg.length < fs * 10 || features.beats < 3 || bpm === null || signalQuality < 40) return invalid;
 
-  const age = ageYears && ageYears > 0 ? ageYears : 45;
   const isMale = sex === "male";
   const isFront = cameraMode === "front";
-  const modeScale = isFront ? 0.5 : 1;
 
   const amplitude = normalizeRange(features.peakAmp, 0.05, 0.95);
-  const perfusion = normalizeRange(features.perfusionIndex, 0.1, 4);
+  const perfusion = isFront
+    ? normalizeRange(features.perfusionIndex, 0.02, 0.8)
+    : normalizeRange(features.perfusionIndex, 0.15, 3);
   const redGreen = normalizeRange(features.redGreenRatio, 0.6, 1.8);
   const stiffness = normalizeRange(features.stiffnessRatio, 0.05, 0.9);
   const augmentation = normalizeRange(features.augmentationIndex, 0.1, 1.2);
@@ -833,19 +979,18 @@ function estimateCreatinine(
   // The selected-descriptor terms mirror the F3/F8/F11/F13/F20/F22/F25 feature
   // importances reported for the MIMIC-III XGBoost+Optuna model.
   let creatinine =
-    0.82 +
-    0.75 * ((age - 45) / 45) +
-    (isMale ? 0.2 : 0) -
-    0.55 * modeScale * (perfusion - 0.5) -
-    0.3 * modeScale * (amplitude - 0.5) -
-    0.22 * modeScale * (redGreen - 0.5) +
-    0.28 * modeScale * (stiffness - 0.5) +
-    0.18 * modeScale * (augmentation - 0.5) +
-    0.15 * modeScale * (harmonic - 0.5) +
-    0.12 * modeScale * (notchTime - 0.5) +
-    0.1 * modeScale * (systolicTime - 0.5) -
-    0.14 * modeScale * (ipa - 0.5) +
-    0.08 * modeScale * (derivMin - 0.5) +
+    0.85 +
+    (isMale ? 0.15 : 0) -
+    0.55 * (perfusion - 0.5) -
+    0.3 * (amplitude - 0.5) -
+    0.22 * (redGreen - 0.5) +
+    0.28 * (stiffness - 0.5) +
+    0.18 * (augmentation - 0.5) +
+    0.15 * (harmonic - 0.5) +
+    0.12 * (notchTime - 0.5) +
+    0.1 * (systolicTime - 0.5) -
+    0.14 * (ipa - 0.5) +
+    0.08 * (derivMin - 0.5) +
     0.1 * rrCv;
 
   creatinine = Math.min(12, Math.max(0.4, creatinine));
@@ -860,6 +1005,7 @@ function estimateCreatinine(
   const beatAdequacy = clamp01(features.beats / 15);
   const confidence = Math.min(isFront ? 0.55 : 0.8, 0.12 + 0.55 * sqNorm + 0.15 * beatAdequacy);
 
+  const age = ageYears && ageYears > 0 ? ageYears : 45;
   const egfr = estimateEgfr(creatinine, age, sex);
 
   return {
@@ -905,7 +1051,7 @@ export function analyzeVitals(
   const heart = analyzeHeartRate(ppg, fs);
   const resp = analyzeRespRate(ppg, fs);
   const bp = estimateBloodPressure(ppg, heart.peaks, heart.rrIntervals, heart.hrv, fs);
-  const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs);
+  const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs, heart.signalQuality);
   const creatinine = estimateCreatinine(
     ppg,
     redSignal,
