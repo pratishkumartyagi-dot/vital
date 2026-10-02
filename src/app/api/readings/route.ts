@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
+import { getDb } from "@/db";
 import { vitalReadings, validationMeasurements } from "@/db/schema";
 import { desc, eq, and, gte, lte } from "drizzle-orm";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   try {
+    const db = getDb();
     const { searchParams } = new URL(request.url);
     const limit = parseInt(searchParams.get("limit") || "50");
     const offset = parseInt(searchParams.get("offset") || "0");
@@ -48,6 +51,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const db = getDb();
     const body = await request.json();
     
     const { patient, vitals, cameraMode, demoMode, spo2Offset, videoBlob, videoMimeType } = body;
@@ -97,6 +101,7 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const db = getDb();
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
     
