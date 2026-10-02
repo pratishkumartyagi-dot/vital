@@ -1,6 +1,9 @@
 package com.vitals.app
 
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.PI
 
 class PpgSignalProcessor(
     private val sampleRateHz: Double = 30.0,
@@ -9,15 +12,12 @@ class PpgSignalProcessor(
     private val maxBufferSize = (sampleRateHz * windowSizeSeconds).toInt()
     private val rawSignalBuffer = ArrayList<Double>()
 
-    // 4th-order Butterworth bandpass filter (0.5-3.5 Hz @ 30 Hz)
-    // SOS coefficients from scipy.signal.butter(4, [0.5/15, 3.5/15], btype='band', output='sos')
-    // Section 1: [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916]
-    // Section 2: [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327]
-    private val sos = doubleArrayOf(
-        // Section 1: b0, b1, b2, a1, a2
-        0.00295136, 0.0, -0.00295136, -1.891408, 0.897916,
-        // Section 2: b0, b1, b2, a1, a2
-        1.0, 2.0, 1.0, -1.882394, 0.906327
+    data class BiquadCoeffs(
+        val b0: Double,
+        val b1: Double,
+        val b2: Double,
+        val a1: Double,
+        val a2: Double
     )
 
     fun addSample(value: Double) {
@@ -37,38 +37,82 @@ class PpgSignalProcessor(
         val mean = rawSignalBuffer.average()
         val detrended = rawSignalBuffer.map { it - mean }.toDoubleArray()
 
-        val filtered = applySosFilter(detrended)
+        val filtered = applyBandpassFilter(detrended)
 
         return calculateHeartRate(filtered)
     }
 
-    private fun applySosFilter(input: DoubleArray): DoubleArray {
-        var stage = input.copyOf()
-        
-        // Process two cascaded biquad sections
-        for (sectionIdx in 0..1) {
-            val offset = sectionIdx * 5
-            val b0 = sos[offset]
-            val b1 = sos[offset + 1]
-            val b2 = sos[offset + 2]
-            val a1 = sos[offset + 3]
-            val a2 = sos[offset + 4]
-            
-            val output = DoubleArray(stage.size)
-            var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
-            
-            for (i in stage.indices) {
-                val x0 = stage[i]
-                val y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-                
-                output[i] = y0
-                x2 = x1; x1 = x0
-                y2 = y1; y1 = y0
-            }
-            stage = output
+    private fun applyBandpassFilter(input: DoubleArray): DoubleArray {
+        val fs = sampleRateHz
+        val low = 0.5
+        val high = 3.5
+
+        if (input.size < 10 || fs <= 0 || low <= 0 || high <= low || high >= fs / 2) {
+            return input.copyOf()
         }
-        
-        return stage
+
+        val hp = highpassBiquad(low, fs)
+        val lp = lowpassBiquad(high, fs)
+        val dc = input.average()
+
+        // Forward pass: highpass (seeded with DC steady-state) then lowpass
+        var y = applyBiquad(input, hp, dc, 0.0)
+        y = applyBiquad(y, lp, 0.0, 0.0)
+
+        // Zero-phase (filtfilt): reverse and run forward/backward
+        y = y.reversed().toDoubleArray()
+        y = applyBiquad(y, hp, 0.0, 0.0)
+        y = applyBiquad(y, lp, 0.0, 0.0)
+        y = y.reversed().toDoubleArray()
+
+        return y
+    }
+
+    private fun lowpassBiquad(fc: Double, fs: Double, q: Double = 1.0 / sqrt(2.0)): BiquadCoeffs {
+        val w0 = (2 * PI * fc) / fs
+        val cw = cos(w0)
+        val sw = sin(w0)
+        val alpha = sw / (2 * q)
+        val a0 = 1 + alpha
+        return BiquadCoeffs(
+            b0 = (1 - cw) / 2 / a0,
+            b1 = (1 - cw) / a0,
+            b2 = (1 - cw) / 2 / a0,
+            a1 = (-2 * cw) / a0,
+            a2 = (1 - alpha) / a0
+        )
+    }
+
+    private fun highpassBiquad(fc: Double, fs: Double, q: Double = 1.0 / sqrt(2.0)): BiquadCoeffs {
+        val w0 = (2 * PI * fc) / fs
+        val cw = cos(w0)
+        val sw = sin(w0)
+        val alpha = sw / (2 * q)
+        val a0 = 1 + alpha
+        return BiquadCoeffs(
+            b0 = (1 + cw) / 2 / a0,
+            b1 = -(1 + cw) / a0,
+            b2 = (1 + cw) / 2 / a0,
+            a1 = (-2 * cw) / a0,
+            a2 = (1 - alpha) / a0
+        )
+    }
+
+    private fun applyBiquad(input: DoubleArray, c: BiquadCoeffs, seedX: Double, seedY: Double): DoubleArray {
+        val out = DoubleArray(input.size)
+        var x1 = seedX
+        var x2 = seedX
+        var y1 = seedY
+        var y2 = seedY
+        for (i in input.indices) {
+            val y = c.b0 * input[i] + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2
+            out[i] = y
+            x2 = x1
+            x1 = input[i]
+            y2 = y1
+            y1 = y
+        }
+        return out
     }
 
     private fun calculateHeartRate(signal: DoubleArray): Double? {

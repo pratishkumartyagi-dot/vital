@@ -311,10 +311,18 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
   const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
   const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30); // regular rhythm scores 1.0; decreases for CV > 10%
 
-  // Pulse-presence gate: however strong the raw variance looks, a spectrum
-  // without a dominant cardiac band is noise (loud broadband noise otherwise
-  // inflates the perfusion term and produced SQI ~80 for garbage input).
-  const peakGate = clamp01((snr - 0.5) / 1.0);
+  // 4. Pulse-presence gate: use filtered SNR to detect cardiac-band presence.
+  // Pure noise has low filtered SNR (no cardiac band after bandpass),
+  // while valid signals (even noisy ones) have high filtered SNR.
+  // Threshold: zero below snrF=25, linear ramp to 1 at snrF=30.
+  const { psd: psdFiltered } = powerSpectrum(filtered, fs);
+  let sigF = 0, noiseF = 0;
+  for (let i = 0; i < freqs.length; i++) {
+    if (freqs[i] >= 0.5 && freqs[i] <= 3.5) sigF += psdFiltered[i];
+    else if (freqs[i] > 3.5 && freqs[i] <= fs * 0.4) noiseF += psdFiltered[i];
+  }
+  const snrF = noiseF > 1e-12 ? sigF / noiseF : (sigF > 1e-12 ? 8 : 0);
+  const peakGate = clamp01((snrF - 25) / 5);
 
   // Combined score (weighted average)
   return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * peakGate * 100);

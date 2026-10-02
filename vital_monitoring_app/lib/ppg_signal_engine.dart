@@ -2,40 +2,83 @@ import 'dart:math' as math;
 
 class PPGSignalEngine {
   /// 4th-Order Butterworth Bandpass Filter (0.5Hz - 3.5Hz at Fs=30Hz)
-  /// Implemented as cascaded Second-Order Sections (SOS) for numerical stability
+  /// Implemented as cascaded Second-Order Sections (SOS) using RBJ audio-EQ cookbook
+  /// biquads for numerical stability and correct frequency response.
+  ///
+  /// This replaces the previous hardcoded scipy-derived SOS coefficients which had
+  /// a passband centred near 0.5 Hz and amplified it ~15x, corrupting PI, HR,
+  /// and respiratory rate estimates.
   static List<double> applyBandpassFilter(List<double> input) {
-    final int length = input.length;
-    final List<double> filtered = List<double>.filled(length, 0.0);
-    
-    // SOS coefficients for 4th-order Butterworth bandpass (0.5-3.5 Hz, Fs=30 Hz)
-    // Generated via: scipy.signal.butter(4, [0.5/15, 3.5/15], btype='band', output='sos')
-    // Each section: [b0, b1, b2, a0, a1, a2] with a0=1.0
-    const List<List<double>> sos = [
-      [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916],
-      [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327],
-    ];
+    const double fs = 30.0;
+    const double low = 0.5;
+    const double high = 3.5;
 
-    // Cascade the two biquad sections
-    List<double> stage = List<double>.from(input);
-    for (final section in sos) {
-      final b0 = section[0], b1 = section[1], b2 = section[2];
-      final a0 = section[3], a1 = section[4], a2 = section[5];
-      
-      final List<double> out = List<double>.filled(length, 0.0);
-      double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
-      
-      for (int i = 0; i < length; i++) {
-        final x0 = stage[i];
-        final y0 = (b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
-        
-        out[i] = y0;
-        x2 = x1; x1 = x0;
-        y2 = y1; y1 = y0;
-      }
-      stage = out;
+    if (input.length < 10 || fs <= 0 || low <= 0 || high <= low || high >= fs / 2) {
+      return List<double>.from(input);
     }
-    
-    return stage;
+
+    final hp = _highpassBiquad(low, fs);
+    final lp = _lowpassBiquad(high, fs);
+    final dc = input.reduce((a, b) => a + b) / input.length;
+
+    // Forward pass: highpass (seeded with DC steady-state) then lowpass
+    var y = _applyBiquad(input, hp, dc, 0.0);
+    y = _applyBiquad(y, lp, 0.0, 0.0);
+
+    // Zero-phase (filtfilt): reverse and run forward/backward
+    y = y.reversed.toList();
+    y = _applyBiquad(y, hp, 0.0, 0.0);
+    y = _applyBiquad(y, lp, 0.0, 0.0);
+    y = y.reversed.toList();
+
+    return y;
+  }
+
+  /// Second-order Butterworth lowpass biquad (Q = 1/sqrt(2)) via RBJ cookbook.
+  static _BiquadCoeffs _lowpassBiquad(double fc, double fs, [double q = math.SQRT1_2]) {
+    final w0 = (2 * math.pi * fc) / fs;
+    final cw = math.cos(w0);
+    final sw = math.sin(w0);
+    final alpha = sw / (2 * q);
+    final a0 = 1 + alpha;
+    return _BiquadCoeffs(
+      b0: (1 - cw) / 2 / a0,
+      b1: (1 - cw) / a0,
+      b2: (1 - cw) / 2 / a0,
+      a1: (-2 * cw) / a0,
+      a2: (1 - alpha) / a0,
+    );
+  }
+
+  /// Second-order Butterworth highpass biquad (Q = 1/sqrt(2)) via RBJ cookbook.
+  static _BiquadCoeffs _highpassBiquad(double fc, double fs, [double q = math.SQRT1_2]) {
+    final w0 = (2 * math.pi * fc) / fs;
+    final cw = math.cos(w0);
+    final sw = math.sin(w0);
+    final alpha = sw / (2 * q);
+    final a0 = 1 + alpha;
+    return _BiquadCoeffs(
+      b0: (1 + cw) / 2 / a0,
+      b1: -(1 + cw) / a0,
+      b2: (1 + cw) / 2 / a0,
+      a1: (-2 * cw) / a0,
+      a2: (1 - alpha) / a0,
+    );
+  }
+
+  /// Apply a single biquad section with given initial conditions.
+  static List<double> _applyBiquad(List<double> signal, _BiquadCoeffs c, double seedX, double seedY) {
+    final out = List<double>.filled(signal.length, 0.0);
+    double x1 = seedX, x2 = seedX, y1 = seedY, y2 = seedY;
+    for (int i = 0; i < signal.length; i++) {
+      final y = c.b0 * signal[i] + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+      out[i] = y;
+      x2 = x1;
+      x1 = signal[i];
+      y2 = y1;
+      y1 = y;
+    }
+    return out;
   }
 
   /// Calculates haemoglobin (g/dL) using Red/Green AC/DC ratio
@@ -50,48 +93,40 @@ class PPGSignalEngine {
   }
 
   /// Calculates dynamic perfusion indices across raw signals
-  /// PI = (AC / DC) * 100%, where AC is mean pulse amplitude (peak-to-trough)
-  /// and DC is the mean signal level
+  /// PI = (AC / DC) * 100%, where AC is RMS of bandpass-filtered signal
+  /// and DC is the mean of the raw signal. This uses the same zero-phase
+  /// bandpass as the web implementation to avoid baseline-wander inflation.
   static double computePerfusionIndex(List<double> rawSignal) {
     if (rawSignal.length < 10) return 0.0;
-    
-    // Apply bandpass to isolate pulsatile component
+
+    // Apply zero-phase bandpass to isolate pulsatile component (0.5-3.5 Hz at 30 Hz)
     final filtered = applyBandpassFilter(rawSignal);
     
-    // Find peaks and troughs in filtered signal
-    final List<int> peaks = [];
-    final List<int> troughs = [];
-    
-    for (int i = 1; i < filtered.length - 1; i++) {
-      if (filtered[i] > filtered[i - 1] && filtered[i] > filtered[i + 1]) {
-        peaks.add(i);
-      }
-      if (filtered[i] < filtered[i - 1] && filtered[i] < filtered[i + 1]) {
-        troughs.add(i);
-      }
+    const dc = rawSignal.reduce((a, b) => a + b) / rawSignal.length;
+    if (dc <= 1e-9) return 0.0;
+
+    // AC = RMS of filtered signal
+    double sq = 0.0;
+    for (final v in filtered) {
+      sq += v * v;
     }
+    final ac = math.sqrt(sq / filtered.length);
     
-    if (peaks.isEmpty || troughs.isEmpty) return 0.0;
-    
-    // Match peaks to nearest troughs to calculate pulse amplitudes
-    double totalAc = 0.0;
-    int count = 0;
-    
-    for (final peakIdx in peaks) {
-      // Find closest trough
-      int closestTrough = troughs.reduce((a, b) => 
-        (a - peakIdx).abs() < (b - peakIdx).abs() ? a : b);
-      
-      final double pulseAmp = (filtered[peakIdx] - filtered[closestTrough]).abs();
-      totalAc += pulseAmp;
-      count++;
-    }
-    
-    if (count == 0) return 0.0;
-    
-    final double meanAc = totalAc / count;
-    final double dc = rawSignal.reduce((a, b) => a + b) / rawSignal.length;
-    
-    return dc == 0 ? 0.0 : (meanAc / dc) * 100.0;
+    return (ac / dc) * 100.0;
   }
+}
+
+class _BiquadCoeffs {
+  final double b0;
+  final double b1;
+  final double b2;
+  final double a1;
+  final double a2;
+  const _BiquadCoeffs({
+    required this.b0,
+    required this.b1,
+    required this.b2,
+    required this.a1,
+    required this.a2,
+  });
 }
