@@ -291,9 +291,7 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
   const pi = computePerfusionIndex(raw);
   const piScore = Math.min(1, pi / 1.5); // PI > 1.5% is good for smartphone camera PPG
 
-  // 2. Spectral SNR, measured on the RAW signal. The previous metric took the
-  // "noise band" (3.5-12 Hz) from the already-bandpassed signal, where the
-  // bandpass had emptied it, so snrScore saturated at 1 even for pure noise.
+  // 2. Spectral SNR, measured on the RAW signal.
   const { freqs, psd } = powerSpectrum(raw, fs);
   let signalPower = 0, noisePower = 0;
   for (let i = 0; i < freqs.length; i++) {
@@ -311,10 +309,32 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
   const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
   const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30); // regular rhythm scores 1.0; decreases for CV > 10%
 
-  // 4. Pulse-presence gate: use filtered SNR to detect cardiac-band presence.
-  // Pure noise has low filtered SNR (no cardiac band after bandpass),
-  // while valid signals (even noisy ones) have high filtered SNR.
-  // Threshold: zero below snrF=25, linear ramp to 1 at snrF=30.
+  // 4. Structured SNR-based gating (blueprint for Android cPPG)
+  // SNR > 5.0: Clean / Ideal - keep high SQI
+  // SNR 3.0-5.0: Minor Noise - apply boost (recovery zone)
+  // SNR 1.0-3.0: Highly Unstable - force downgrade (cap below 50)
+  // SNR < 1.0: Pure Artifacts - clamp to 0
+  let snrGate = 1.0;
+  if (snr < 1.0) {
+    // Pure artifacts: clamp to 0, bypass all analysis
+    snrGate = 0;
+  } else if (snr < 2.5) {
+    // SNR 1.0-2.5: Highly unstable - force heavy penalty
+    // Linear ramp from 0 at SNR=1.0 to 0.4 at SNR=2.5 (max SQI ~40)
+    snrGate = clamp01((snr - 1.0) / 1.5) * 0.4;
+  } else if (snr < 3.0) {
+    // SNR 2.5-3.0: Transition zone - moderate penalty
+    // Linear ramp from 0.4 at SNR=2.5 to 0.7 at SNR=3.0 (max SQI ~55-70)
+    snrGate = 0.4 + 0.3 * clamp01((snr - 2.5) / 0.5);
+  } else if (snr < 5.0) {
+    // SNR 3.0-5.0: Minor noise - recovery zone (allow near-full score)
+    // Ramp from 0.7 at SNR=3.0 to 1.0 at SNR=5.0
+    snrGate = 0.7 + 0.3 * clamp01((snr - 3.0) / 2.0);
+  }
+  // SNR >= 5.0: snrGate = 1.0 (no penalty)
+
+  // 5. Pulse-presence gate: filtered SNR to reject pure noise that passes raw SNR
+  // (e.g., structured noise with cardiac-band energy but no real pulse)
   const { psd: psdFiltered } = powerSpectrum(filtered, fs);
   let sigF = 0, noiseF = 0;
   for (let i = 0; i < freqs.length; i++) {
@@ -322,10 +342,13 @@ function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], 
     else if (freqs[i] > 3.5 && freqs[i] <= fs * 0.4) noiseF += psdFiltered[i];
   }
   const snrF = noiseF > 1e-12 ? sigF / noiseF : (sigF > 1e-12 ? 8 : 0);
-  const peakGate = clamp01((snrF - 25) / 5);
+  const pulseGate = clamp01((snrF - 10) / 20); // zero below snrF=10, full above 30
+
+  // Combined gate: both must pass
+  const gate = snrGate * pulseGate;
 
   // Combined score (weighted average)
-  return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * peakGate * 100);
+  return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * gate * 100);
 }
 
 function computeHRV(rrMs: number[]): HRVMetrics {
