@@ -10,6 +10,7 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 
 - [x] **Reverted to stable pre-Sep 25 (2026-09-27)**: Reset branch to `1c5d75d` and force-pushed to fix broken "Launch Vital Scan" caused by post-Sep 25 commits.
 - [x] **Pinned @kilocode/app-builder-db to commit 186d1c1**: Updated `package.json` dependency from `github:Kilo-Org/app-builder-db#main` to `git+https://github.com/Kilo-Org/app-builder-db#186d1c1` for reproducible builds.
+- [x] **Vendored @kilocode/app-builder-db (2026-10-02)**: Replaced git dependency (`git+https://github.com/Kilo-Org/app-builder-db#186d1c1`, ConnectionRefused on tarball download during sandbox setup) with local `file:./vendor/app-builder-db` (dist + package.json only, same 186d1c1 build). `bun install` now succeeds offline; `bun typecheck` passes. Lint has 6 pre-existing errors in `validation/page.tsx` and `vital-monitoring/page.tsx` (set-state-in-effect, refs-during-render) unrelated to this change.
 - [x] Project setup with Next.js 16, React 19, TypeScript, Tailwind CSS 4
 - [x] Web-based vital monitoring page with real-time PPG signal acquisition
 - [x] POS-like bandpass filter and FFT-based heart rate calculation in browser
@@ -118,6 +119,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-09-04 | **Added training_jobs table**: New Drizzle schema table with fields for model config, job status (pending/running/completed/failed/cancelled), progress, epoch tracking, loss/metrics, and error messages. Generated migration `0001_classy_agent_zero.sql`. |
 | 2026-09-27 | **Reverted to stable pre-Sep 25**: "Launch Vital Scan" broken by post-Sep 25 commits (SpO2 disabled, signal-quality thresholds changed in `ppg-analysis.ts`). Reset branch to `1c5d75d` (2026-09-06) and force-pushed. |
 | 2026-09-27 | **Pinned @kilocode/app-builder-db to commit 186d1c1**: Updated `package.json` dependency from `github:Kilo-Org/app-builder-db#main` to `git+https://github.com/Kilo-Org/app-builder-db#186d1c1` for reproducible builds. |
+| 2026-10-02 | **Vendored @kilocode/app-builder-db**: `bun install` failed with `ConnectionRefused downloading tarball @kilocode` on the git dependency. Vendored the identical 186d1c1 build into `vendor/app-builder-db/` (dist + package.json) and switched `package.json` to `file:./vendor/app-builder-db`. Fresh `bun install` (node_modules + lockfile deleted) succeeds; `bun typecheck` passes. |
 
 ## Technical Specifications
 

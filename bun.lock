@@ -5,7 +5,7 @@
     "": {
       "name": "nextjs-template",
       "dependencies": {
-        "@kilocode/app-builder-db": "git+https://github.com/Kilo-Org/app-builder-db#186d1c1",
+        "@kilocode/app-builder-db": "file:./vendor/app-builder-db",
         "drizzle-orm": "^0.45.2",
         "next": "^16.1.3",
         "react": "^19.2.3",
@@ -209,7 +209,7 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@kilocode/app-builder-db": ["@kilocode/app-builder-db@github:Kilo-Org/app-builder-db#186d1c1", { "peerDependencies": { "drizzle-orm": ">=0.30.0" } }, "Kilo-Org-app-builder-db-186d1c1", "sha512-BWHW5rko9U4K0Pu/Xtf1O5zju2alCRtWWcVWVNC8uO37EBVDfQEdjAO/43imkX7mgkFtsaj1zzxNkXz7FhXgDg=="],
+    "@kilocode/app-builder-db": ["@kilocode/app-builder-db@file:vendor/app-builder-db", { "peerDependencies": { "drizzle-orm": ">=0.30.0" } }],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@0.2.12", "", { "dependencies": { "@emnapi/core": "^1.4.3", "@emnapi/runtime": "^1.4.3", "@tybys/wasm-util": "^0.10.0" } }, "sha512-ZVWUcfwY4E/yPitQJl481FjFo3K22D6qF0DuFH6Y/nbnE11GY5uguDxZMGXPQ8WQ0128MXQD7TnfHyK4oWoIJQ=="],
 

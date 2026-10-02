@@ -1,0 +1,27 @@
+{
+  "name": "@kilocode/app-builder-db",
+  "version": "0.0.1",
+  "description": "Database client - SQLite via HTTP API with Drizzle ORM",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "drizzle-orm": ">=0.30.0"
+  }
+}

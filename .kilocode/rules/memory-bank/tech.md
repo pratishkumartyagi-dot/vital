@@ -10,6 +10,7 @@
 | Tailwind CSS | 4.x     | Utility-first CSS               |
 | Bun          | Latest  | Package manager & runtime       |
 | Drizzle ORM  | 0.45.x  | SQLite database ORM             |
+| @kilocode/app-builder-db | 0.0.1 (vendored `vendor/app-builder-db`, 186d1c1 build) | SQLite-via-HTTP Drizzle client |
 | PyTorch      | 2.6.0   | Deep learning framework         |
 | Python       | 3.10+   | Training pipeline               |
 
