@@ -1038,6 +1038,7 @@ export interface AnalyzeOptions {
   cameraMode?: "front" | "rear";
   ageYears?: number | null;
   sex?: "male" | "female" | null;
+  respSource?: number[];
 }
 
 export function analyzeVitals(
@@ -1049,7 +1050,7 @@ export function analyzeVitals(
   options: AnalyzeOptions = {}
 ): VitalAnalysis {
   const heart = analyzeHeartRate(ppg, fs);
-  const resp = analyzeRespRate(ppg, fs);
+  const resp = analyzeRespRate(options.respSource ?? ppg, fs);
   const bp = estimateBloodPressure(ppg, heart.peaks, heart.rrIntervals, heart.hrv, fs);
   const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs, heart.signalQuality);
   const creatinine = estimateCreatinine(

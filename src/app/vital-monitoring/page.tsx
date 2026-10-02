@@ -432,6 +432,10 @@ export default function VitalMonitoringPage() {
           cameraMode,
           ageYears: patient ? parseInt(patient.age, 10) || null : null,
           sex: patient ? (patient.sex as "male" | "female") : null,
+          // Respiratory rate comes from baseline wander (0.1-0.5 Hz), which the
+          // POS cardiac pulse has removed. For front camera mode this is the
+          // raw green skin-ROI trace; for rear/demo it is the same as analysisSource.
+          respSource: cameraMode === "front" ? greenWin : analysisSource,
         }
       );
       const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
