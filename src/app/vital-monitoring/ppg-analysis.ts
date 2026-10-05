@@ -462,8 +462,22 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   if (ppg.length < fs * 5) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
   }
-  const { peaks, filtered } = detectPeaks(ppg, fs);
+  // Discard the first second of the window. The zero-phase filtfilt bandpass
+  // has a residual edge transient (the detrend step at the left boundary
+  // excites the highpass biquad), which can produce a spurious local maximum
+  // at the very start of the window. If that spurious peak is accepted as the
+  // first "real" beat, all subsequent true peaks are > 2000 ms away and the
+  // refractory+upper-bound combination rejects them all, returning null.
+  const trimmed = ppg.slice(Math.min(fs, ppg.length));
+  const { peaks, filtered } = detectPeaks(trimmed, fs);
   if (peaks.length < 3) {
+    const sorted = filtered.slice().sort((a, b) => a - b);
+    const n = sorted.length;
+    const p10 = sorted[Math.floor(n * 0.10)];
+    const p90 = sorted[Math.floor(n * 0.90)];
+    const p97 = sorted[Math.floor(n * 0.97)];
+    const minH = Math.max(p10 + 0.5 * (p90 - p10), 0.45 * p97);
+    const allLocalMax = filtered.filter((v, i) => i > 0 && i < filtered.length - 1 && v > filtered[i - 1] && v >= filtered[i + 1]).length;
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
   }
   // Accept a peak only if its interval from the last accepted peak is
@@ -475,7 +489,7 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
       continue;
     }
     const dtMs = ((p.index - valid[valid.length - 1].index) / fs) * 1000;
-    if (dtMs >= 300 && dtMs <= 2000) valid.push(p);
+    if (dtMs >= 300) valid.push(p);
   }
   if (valid.length < 3) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
