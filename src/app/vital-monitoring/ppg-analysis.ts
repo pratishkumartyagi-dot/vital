@@ -1061,6 +1061,7 @@ export interface VitalAnalysis {
   pnn50: number | null;
   rhythm: "regular" | "irregular" | "unknown";
   bp: BloodPressureMetrics;
+  bpDeep: BloodPressureMetrics | null;
   glucose: GlucoseMetrics;
   creatinine: CreatinineMetrics;
 }
