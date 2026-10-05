@@ -1050,6 +1050,8 @@ function estimateCreatinine(
   };
 }
 
+import { estimateBPDeep, BPResult } from './bpnet-inference';
+
 export interface VitalAnalysis {
   heart: HeartMetrics;
   resp: RespMetrics;
@@ -1061,7 +1063,7 @@ export interface VitalAnalysis {
   pnn50: number | null;
   rhythm: "regular" | "irregular" | "unknown";
   bp: BloodPressureMetrics;
-  bpDeep: BloodPressureMetrics | null;
+  bpDeep: BPResult | null;
   glucose: GlucoseMetrics;
   creatinine: CreatinineMetrics;
 }
@@ -1110,7 +1112,21 @@ export function analyzeVitals(
     pnn50: heart.hrv?.pnn50 ?? null,
     rhythm: heart.rhythm,
     bp,
+    bpDeep: null,
     glucose,
     creatinine,
   };
+}
+
+export async function analyzeVitalsWithDeepBP(
+  ppg: number[],
+  fs = 30,
+  redSignal: number[] = [],
+  greenSignal: number[] = [],
+  blueSignal: number[] = [],
+  options: AnalyzeOptions = {}
+): Promise<VitalAnalysis> {
+  const base = analyzeVitals(ppg, fs, redSignal, greenSignal, blueSignal, options);
+  const bpDeep = await estimateBPDeep(ppg, fs);
+  return { ...base, bpDeep };
 }
