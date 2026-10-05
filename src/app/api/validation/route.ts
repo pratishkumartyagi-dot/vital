@@ -139,9 +139,9 @@ export async function POST(request: Request) {
         const sessions = await db.select({ id: validationSessions.id })
           .from(validationSessions)
           .where(eq(validationSessions.cameraMode, cameraMode as "front" | "rear"));
-        const sessionIds = sessions.map(s => s.id);
+        const sessionIds = sessions.map((s) => s.id);
         if (sessionIds.length > 0) {
-          whereClause = sql`${validationMeasurements.sessionId} IN (${sql.join(sessionIds.map(id => sql`${id}`), sql`, `)})`;
+          whereClause = sql`${validationMeasurements.sessionId} IN (${sql.join(sessionIds.map((id) => sql`${id}`), sql`, `)})`;
         }
       }
       
@@ -149,7 +149,7 @@ export async function POST(request: Request) {
         .from(validationMeasurements)
         .where(whereClause || sql`1=1`);
       
-      const valid = measurements.filter(m => m.isValid);
+      const valid = measurements.filter((m) => m.isValid);
       
       const stats = {
         count: valid.length,

@@ -1,7 +1,7 @@
 // Compare OLD Dart Direct-Form-II bandpass (pre-52d963c) vs current Dart SOS bandpass.
 // A correct 0.5-3.5 Hz cardiac bandpass must PASS 1.2 Hz (cardiac) and REJECT 0.25 Hz (respiration).
 
-const fs = 30;
+const sampleRate = 30;
 
 // OLD Dart filter (pre-52d963c): Direct Form II Transposed, 4th-order
 const bOld = [0.0039, 0.0, -0.0078, 0.0, 0.0039];
@@ -45,7 +45,7 @@ function applyBandpassSOS(input: number[]): number[] {
 }
 
 function tone(f: number, seconds: number, amp = 15): number[] {
-  const n = Math.floor(seconds * fs);
+  const n = Math.floor(seconds * sampleRate);
   const out: number[] = [];
   for (let i = 0; i < n; i++) out.push(110 + amp * Math.sin(2 * Math.PI * f * (i / fs)));
   return out;

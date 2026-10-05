@@ -34,7 +34,7 @@ export async function GET(request: Request) {
 
     // Optionally include validation measurements
     if (includeValidation) {
-      const readingIds = readings.map(r => r.id);
+      const readingIds = readings.map((r) => r.id);
       const validation = await db.select()
         .from(validationMeasurements)
         .where(eq(validationMeasurements.sessionId, readingIds[0] || ""));

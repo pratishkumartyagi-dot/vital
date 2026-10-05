@@ -1,6 +1,17 @@
-import { createDatabase } from "@kilocode/app-builder-db";
+import { drizzle, LibSQLDatabase } from "drizzle-orm/libsql";
+import { createClient } from "@libsql/client";
 import * as schema from "./schema";
 
-export function getDb() {
-  return createDatabase(schema);
+let dbInstance: LibSQLDatabase<typeof schema> | null = null;
+
+export function getDb(): LibSQLDatabase<typeof schema> {
+  if (dbInstance) {
+    return dbInstance;
+  }
+
+  const client = createClient({
+    url: "file:local.db",
+  });
+  dbInstance = drizzle(client, { schema });
+  return dbInstance;
 }
