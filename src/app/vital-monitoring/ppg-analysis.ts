@@ -24,7 +24,11 @@ export interface RespMetrics {
   respRate: number | null;
   method: string;
   confidence: number;
+  waveform?: number[];
 }
+
+import { estimateRespRateCorrencoder } from './correncoder-resp';
+import { estimateRespRateRPPG, extractRPPGRespiration } from './rppg-resp';
 
 function mean(arr: number[]): number {
   if (arr.length === 0) return 0;
@@ -488,48 +492,97 @@ function findDominantFreqInBand(signal: number[], fs: number, fLow: number, fHig
   return { freq: freqs[bestIdx], power: bestPower };
 }
 
-export function analyzeRespRate(ppg: number[], fs = 30): RespMetrics {
+export async function analyzeRespRate(
+  ppg: number[],
+  fs = 30,
+  cameraMode: "front" | "rear" = "rear",
+  redSignal: number[] = [],
+  greenSignal: number[] = [],
+  blueSignal: number[] = []
+): Promise<RespMetrics> {
   if (ppg.length < fs * 10) {
-    return { respRate: null, method: "insufficient-data", confidence: 0 };
+    return { respRate: null, method: "insufficient-data", confidence: 0, waveform: [] };
   }
-  const detrended = detrend(ppg);
-  const lowpass = butterworthBandpass(detrended, 0.1, 0.5, fs);
-  const ac = autocorrelate(lowpass);
-  const minLag = Math.floor(fs / 0.5);
-  const maxLag = Math.floor(fs / 0.1);
-  let bestLag = -1;
-  let bestVal = -Infinity;
-  for (let lag = minLag; lag <= Math.min(maxLag, ac.length - 1); lag++) {
-    if (ac[lag] > bestVal) {
-      bestVal = ac[lag];
-      bestLag = lag;
+
+  if (cameraMode === "front") {
+    const result = extractRPPGRespiration(redSignal, greenSignal, blueSignal, fs);
+    return {
+      respRate: result.respRate,
+      method: result.method,
+      confidence: result.confidence,
+      waveform: result.waveform
+    };
+  } else {
+    const result = await estimateRespRateCorrencoder(ppg, fs);
+    return {
+      respRate: result.respRate,
+      method: result.method,
+      confidence: result.confidence,
+      waveform: result.waveform
+    };
+  }
+}
+
+export function analyzeRespRateSync(
+  ppg: number[],
+  fs = 30,
+  cameraMode: "front" | "rear" = "rear",
+  redSignal: number[] = [],
+  greenSignal: number[] = [],
+  blueSignal: number[] = []
+): RespMetrics {
+  if (ppg.length < fs * 10) {
+    return { respRate: null, method: "insufficient-data", confidence: 0, waveform: [] };
+  }
+
+  if (cameraMode === "front") {
+    const result = extractRPPGRespiration(redSignal, greenSignal, blueSignal, fs);
+    return {
+      respRate: result.respRate,
+      method: result.method,
+      confidence: result.confidence,
+      waveform: result.waveform
+    };
+  } else {
+    const detrended = detrend(ppg);
+    const lowpass = butterworthBandpass(detrended, 0.1, 0.5, fs);
+    const ac = autocorrelate(lowpass);
+    const minLag = Math.floor(fs / 0.5);
+    const maxLag = Math.floor(fs / 0.1);
+    let bestLag = -1;
+    let bestVal = -Infinity;
+    for (let lag = minLag; lag <= Math.min(maxLag, ac.length - 1); lag++) {
+      if (ac[lag] > bestVal) {
+        bestVal = ac[lag];
+        bestLag = lag;
+      }
     }
-  }
-  let respBpm = 0;
-  let method = "autocorr";
-  let confidence = Math.max(0, Math.min(1, bestVal));
-  if (bestLag > 0) {
-    respBpm = (60 * fs) / bestLag;
-  }
-  const { freq: fftFreq, power: fftPower } = findDominantFreqInBand(lowpass, fs, 0.1, 0.5);
-  if (fftFreq > 0) {
-    const fftBpm = fftFreq * 60;
-    if (respBpm === 0 || Math.abs(fftBpm - respBpm) < 8) {
-      const combined = respBpm === 0 ? fftBpm : 0.5 * (respBpm + fftBpm);
-      respBpm = combined;
-      method = "autocorr+FFT";
-    } else {
-      const combined = 0.5 * (respBpm + fftBpm);
-      respBpm = combined;
-      method = "autocorr+FFT(fused)";
+    let respBpm = 0;
+    let method = "autocorr";
+    let confidence = Math.max(0, Math.min(1, bestVal));
+    if (bestLag > 0) {
+      respBpm = (60 * fs) / bestLag;
     }
-    const totalPower = lowpass.reduce((a, b) => a + b * b, 0) / lowpass.length || 1;
-    confidence = Math.max(confidence, Math.min(1, fftPower / totalPower));
+    const { freq: fftFreq, power: fftPower } = findDominantFreqInBand(lowpass, fs, 0.1, 0.5);
+    if (fftFreq > 0) {
+      const fftBpm = fftFreq * 60;
+      if (respBpm === 0 || Math.abs(fftBpm - respBpm) < 8) {
+        const combined = respBpm === 0 ? fftBpm : 0.5 * (respBpm + fftBpm);
+        respBpm = combined;
+        method = "autocorr+FFT";
+      } else {
+        const combined = 0.5 * (respBpm + fftBpm);
+        respBpm = combined;
+        method = "autocorr+FFT(fused)";
+      }
+      const totalPower = lowpass.reduce((a, b) => a + b * b, 0) / lowpass.length || 1;
+      confidence = Math.max(confidence, Math.min(1, fftPower / totalPower));
+    }
+    if (respBpm < 5 || respBpm > 50) {
+      return { respRate: null, method, confidence: 0, waveform: [] };
+    }
+    return { respRate: respBpm, method, confidence, waveform: lowpass };
   }
-  if (respBpm < 5 || respBpm > 50) {
-    return { respRate: null, method, confidence: 0 };
-  }
-  return { respRate: respBpm, method, confidence };
 }
 
 export interface PPGFeatures {
@@ -1084,7 +1137,14 @@ export function analyzeVitals(
   options: AnalyzeOptions = {}
 ): VitalAnalysis {
   const heart = analyzeHeartRate(ppg, fs);
-  const resp = analyzeRespRate(options.respSource ?? ppg, fs);
+  const resp = analyzeRespRateSync(
+    options.respSource ?? ppg,
+    fs,
+    options.cameraMode ?? "rear",
+    redSignal,
+    greenSignal,
+    blueSignal
+  );
   const bp = estimateBloodPressure(ppg, heart.peaks, heart.rrIntervals, heart.hrv, fs);
   const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs, heart.signalQuality);
   const creatinine = estimateCreatinine(
