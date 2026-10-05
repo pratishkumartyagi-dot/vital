@@ -6,5 +6,6 @@ from .PhysFormer import PhysFormer
 from .RhythmFormer import RhythmFormer
 from .TSCAN import TSCAN
 from .iBVPNet import iBVPNet
+from .BPNet import BPNet, BPNetTrainer, create_bpnet
 
-__all__ = ['SCNN_8rois', 'OMIT', 'PBV', 'POS', 'PhysFormer', 'RhythmFormer', 'TSCAN', 'iBVPNet']
+__all__ = ['SCNN_8rois', 'OMIT', 'PBV', 'POS', 'PhysFormer', 'RhythmFormer', 'TSCAN', 'iBVPNet', 'BPNet', 'BPNetTrainer', 'create_bpnet']
