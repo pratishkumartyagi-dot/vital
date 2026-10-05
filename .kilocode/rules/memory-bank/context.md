@@ -11,17 +11,54 @@ The project is a research-grade PPG Vital Signs application built with Next.js 1
 - ✅ `bun lint` — passes (no ESLint errors)
 - ✅ `bun run build` — compiles successfully (9 routes generated: 5 static, 4 dynamic)
 - ✅ Database migrations applied — 5 tables created (`vital_readings`, `validation_sessions`, `validation_measurements`, `training_jobs`, `__drizzle_migrations`)
-- ✅ `bun run test:ppg` — self-check passes (33/33 checks)
+- ✅ `bun run test:ppg` — self-check passes (**45/45** checks; was 33/33, extended by the rPPG signal-quality audit)
 - ✅ Local SQLite database (`file:local.db`) configured and working for development
 - ✅ All API routes functional: `/api/readings` (CRUD), `/api/readings/export` (CSV/Excel), `/api/training`, `/api/validation` (Bland-Altman statistics)
 - ✅ Vital monitoring page: 100s session (10s warmup + 90s measurement) with patient intake form, camera controls (front/rear/torch), demo mode, real-time waveform, live vitals grid, final reading card, history, CSV/Excel export
 - ✅ Validation dashboard: Session management, Bland-Altman plots, measurement entry, CSV import, clinical thresholds
 - ✅ Training dashboard: Model configuration display, pipeline documentation
-- ✅ Signal processing: POS chrominance pulse (Wang 2017), correct Butterworth HP0.5+LP3.5 biquad cascade, Hann-windowed FFT, multi-component SQI, ectopic RR rejection, creatinine morphology (19 features, Sridevi et al. 2025), CKD-EPI 2021 eGFR
+- ✅ Signal processing: POS chrominance pulse (Wang 2017, in camera-count units), correct Butterworth HP0.5+LP3.5 biquad cascade, Hann-windowed FFT, corrected multi-component SQI (bandwidth-matched SNR + real AC/DC perfusion + RR regularity + cardiac spectral-prominence gate), ectopic RR rejection, creatinine morphology (19 features, Sridevi et al. 2025), CKD-EPI 2021 eGFR
 
 ## Currently in Progress
 
-- **Three-bug fix (2026-10-02)**: Fixing signal quality percent (SQI regression from commit `0b83272`), broken finger detection, and broken respiratory rate across both the Next.js web app and Flutter app.
+- **rPPG signal-quality audit (2026-10-05)**: COMPLETE — see "rPPG signal quality: root cause + correction" below.
+
+### rPPG signal quality: root cause + correction (2026-10-05)
+
+**Symptom**: the front-camera rPPG "Signal: X%" readout reported 0-11% for signals whose heart rate was recovered essentially perfectly (e.g. POS pulse at 71.3 bpm against a true 72).
+
+**Three independent defects in `computeSignalQuality` (`src/app/vital-monitoring/ppg-analysis.ts`)**, all now fixed:
+
+1. **Bandwidth-biased "SNR"** (the dominant cause). It summed the 0.5-3.5 Hz cardiac band against the whole 3.5 Hz..`fs*0.4` range (~8.5 Hz wide at 30 fps, ~20 Hz at 60 fps) and then hard-clamped to 0 below SNR 1. The noise side is ~3x wider than the signal side, so ordinary sensor/codec noise drove the ratio under 1 and the clamp zeroed the whole score. Replaced by the exported `spectralSnr()`, which converts the reference band to its *equivalent in-band power* (mean bin density x cardiac-bin count), making the ratio a true matched-bandwidth SNR that is invariant to the reference-band width and frame rate. Scored on a log scale: SNR 0.5 -> 0, 2 -> 0.5, >=10 -> 1.
+2. **Degenerate perfusion term.** `computePerfusionIndex(raw)` returns `AC/mean*100`, but the rPPG path analyses the POS pulse, which is per-window mean-normalized and therefore essentially zero-mean: the ratio was numerically unstable (measured anywhere from 0 to 15 000%) and, against a fixed threshold, pinned `piScore` at 1.0 for good signals *and* for pure noise — zero discriminative power. Two fixes: (a) AC is now the RMS of the already-bandpassed pulse and the DC comes from a new `dcRef` (the green skin-ROI mean) threaded through `analyzeHeartRate(ppg, fs, dcRef)` / `AnalyzeOptions.dcRef`, auto-derived from `greenSignal` in `analyzeVitals`; (b) `posPulse` now rescales its output by `sqrt(3) * mean(green)` so the pulse is in **camera-count units** instead of per-unit relative amplitude (two unit mismatches were at play: the projection's 1/sqrt(6) factor, and dividing a dimensionless signal by an absolute count level). POS AC/DC now reads 3.21% vs 4.89% for the same signal's raw green channel, instead of 0.03%.
+3. **Inverted pulse gate.** The "filtered SNR" gate compared the cardiac band of an *already-bandpassed* signal against its own numerically empty 3.5-12 Hz tail, and its zero-floor fallback of `8` sat **below** the gate's own zero crossing of `10` — so a perfectly clean pulse scored `pulseGate = 0` and SQI 0. Replaced by `cardiacSpectralProminence()` (cardiac-band peak/median, which has no degenerate branch and cleanly separates real pulses from a Gaussian floor).
+4. Minor: a single RR interval substituted `cv = 100`, scoring a two-peak signal as fully irregular; it now uses 0.
+
+Also fixed: `extractCreatinineFeatures` fell back to `redPI` when `ppgPI` was 0 (always, for the zero-mean POS pulse), reading the front-mode perfusion descriptor off the *weakest* channel — order is now `ppgPI || greenPI || redPI`.
+
+**Result** (synthetic facial rPPG, 2/6/3% pulsatility, 0.4 Hz common-mode illumination swing, per-channel independent sensor noise):
+
+| independent noise | before | after | true HR error |
+|---|---|---|---|
+| 0.002 (clean) | 7 | **100** | 0.0 |
+| 0.04 | 0 | **100** | 0.4 |
+| 0.12 | 0 | **83** | 2.7 |
+| 0.25 | 0 | **56** | 2.7 |
+| 0.5 | 0 | **49** | 6.8 |
+| 2.0 | 0 | **33** | 9.4 |
+| 8-bit quantised (real smartphone) | 11 | **99** | 2.6 |
+
+Rear/contact path is unchanged-to-better: `[100, 84, 65, 45, 7, 4]` for noise `[0, 0.5, 1, 2, 4, 8]`. Pure broadband noise still scores 7.
+
+**Known residual limitation**: a single narrowband tone in the cardiac band (the classic rPPG motion-harmonic confound) is spectrally indistinguishable from a pulse by 2nd-order statistics and scores 64-89. No SQI built on magnitude statistics can separate it; only a pulse-shape/plausibility model can.
+
+**Test-suite repairs in the same pass**: `ppg-selfcheck.ts` never awaited the async `analyzeRespRate`, so that check had been silently failing with `err=NaN` (it now uses `analyzeRespRateSync`); and the "low-SQI gates creatinine/glucose" case used `noise=45`, which is *not* noise-dominated (it still recovers 73.6 bpm vs a true 75) and only scored 0 because of the bandwidth bug — it now uses `noise=120` (HR off by >10 bpm, SQI 29) plus a new inverse check that a recoverable-but-noisy pulse (SQI 62) must **not** be gated. `scripts/ppg-selfcheck.ts` extended from 33 to **45 checks** (45/45 pass). The broken, unreferenced scratch scripts `test-rppg.ts` / `test-rppg2.ts` (added at HEAD, red on `bun typecheck`) were removed and their surviving scenarios folded into the self-check (skin-ROI background dilution). `training/ppg_analysis.py` re-synced (`spectral_snr`, `cardiac_spectral_prominence`, `perfusion_index_acdc`, rewritten `compute_sqi`). The Flutter `signalQuality` getter's linear `pi/1.5` mapping (which scored a healthy ~0.5% fingertip PI at 33%) was aligned to the same sqrt law — **not runtime-verified, no Dart toolchain in the sandbox**.
+
+**Verification**: `bun typecheck` clean, `bun lint` clean, `bun run build` OK (9 routes), `bun run test:ppg` 45/45. Python `py_compile` OK (numpy unavailable in the sandbox, so no runtime smoke test).
+
+## Superseded: earlier three-bug fix (2026-10-02)
+
+> Kept for history. Item 2 below was itself **superseded and corrected** by the 2026-10-05 audit above: the "filtered SNR" peakGate fix calibrated `computeSignalQuality` against the same bandwidth-biased SNR metric, so it did not address the root cause. Do not use the SQI numbers quoted there.
 
 ### Web App (Next.js)
 1. **Respiratory rate (front camera)** — `page.tsx` was passing the POS cardiac pulse to `analyzeRespRate` instead of raw green baseline wander. Fixed by adding `respSource` option to `analyzeVitals()`; `page.tsx` now passes `greenWin` (raw green skin-ROI trace) for front camera, `analysisSource` otherwise. Self-check still passes (33/33).
@@ -160,6 +197,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-10-05 | **PPG-optimized camera settings (front & rear)**: Updated Android `MainActivity.kt` `configureSafePPG` to query camera capabilities for both front (rPPG) and rear (PPG) cameras and return optimal settings: locks AE/AWB/AF, disables flash, sets camera-specific exposure/ISO (front: lower ISO ~12% range, longer exposure ~33% for skin-tone stability; rear: higher ISO ~25%, shorter exposure ~50% for fingertip), enables face detection for front camera. Flutter `main.dart` `_applyAdaptivePpgSettings` now passes camera facing mode and applies native-recommended exposure compensation. rPPG-Toolbox is a signal-processing library — actual camera parameter improvement requires native Camera2 API control as implemented. |
 | 2026-10-05 | **CNN-BiLSTM-Attention BPNet for cuff-less BP estimation**: Added deep learning BP estimation based on Mohammadi et al. (Sci Rep 2025). Architecture: 3 CNN layers (32/64/128 filters) → 2 BiLSTM (128 hidden) → Attention → dual regression heads (SBP/DBP). Files added: `training/rppglib/models/BPNet.py` (PyTorch), `src/app/vital-monitoring/bpnet-inference.ts` (TF.js browser inference), `training/train_bpnet.py` (training pipeline with MIMIC-II support), `training/convert_to_tfjs.py` (PyTorch→TF.js conversion). `analyzeVitals` returns fast morphology-based BP; `analyzeVitalsWithDeepBP` runs async TF.js inference for `bpDeep` field. Model loads from IndexedDB or URL; falls back to morphology estimate if unavailable. Training: 5-fold CV on 2064 MIMIC-II patients, target MAE ~1.9/1.3 mmHg (SBP/DBP). |
 | 2026-10-05 | **Replaced Correncoder with RRest for rear PPG respiration**: Removed the Correncoder-based rear PPG respiratory rate estimation and replaced it with the RRest algorithm (peterhcharlton/RRest) for rear contact PPG respiration extraction. RRest implements multiple signal extraction methods (BFi bandpass filtering) followed by multiple RR estimation methods (ACF autocorrelation, PKS peak detection, ARP autoregressive/Burg method) with weighted fusion. Implemented in TypeScript as browser-native code (no ML model required) in `src/app/vital-monitoring/rrest-resp.ts` with `estimateRespRatePPG()` (async) and `estimateRespRateRearPPG()` (sync). Updated `ppg-analysis.ts` to dispatch rear camera calls to RRest instead of Correncoder. Removed `correncoder-resp.ts`, `training/train_correncoder.py`, and `training/convert_correncoder_to_tfjs.py`. |
+| 2026-10-05 | **rPPG signal-quality root-cause audit + correction**: Diagnosed why front-camera rPPG reported 0-11% signal strength while recovering heart rate to within 1 bpm. Three defects in `computeSignalQuality` (`ppg-analysis.ts`): (1) the "SNR" compared the 0.5-3.5 Hz cardiac band against the much wider 3.5 Hz..`fs*0.4` band and hard-clamped to 0 below SNR 1, so the ~3x bandwidth ratio buried real pulses — replaced with the exported bandwidth-matched `spectralSnr()` (reference band converted to equivalent in-band power), log-scaled; (2) the perfusion term used `AC/mean` on the zero-mean POS pulse, which is numerically unstable (0 to 15 000%) and pinned at 1.0 for both good signals and pure noise — AC is now the bandpassed RMS over a real `dcRef` (green skin-ROI mean threaded through `analyzeHeartRate`/`AnalyzeOptions.dcRef`), and `posPulse` now rescales by `sqrt(3)*mean(green)` so the POS pulse is in camera-count units (AC/DC 0.03% -> 3.21%, vs 4.89% for the same signal's raw green); (3) the pulse gate compared an already-bandpassed signal against its own empty tail and its zero-floor fallback of 8 sat below its zero crossing of 10, so clean pulses scored 0 — replaced with `cardiacSpectralProminence()`. Clean facial rPPG went 7 -> 100, realistic 8-bit-quantised camera 11 -> 99, with SQI now tracking HR recoverability (100/83/56/49/33 as HR error grows 0.0->9.4 bpm). Also: creatinine front-mode perfusion no longer falls back to the weakest channel (`redPI`) — now `ppgPI||greenPI||redPI`; a single RR interval no longer scores as fully irregular; `ppg-selfcheck.ts` never awaited async `analyzeRespRate` (silent `err=NaN` failure) and its "low-SQI gates" case used a signal that was never actually noise-dominated (SQI 0 came from the bandwidth bug, not from the pulse being buried) — both repaired, self-check extended 33 -> 45 checks; broken scratch scripts `test-rppg.ts`/`test-rppg2.ts` (red on typecheck at HEAD) removed with their scenarios folded into the self-check; `training/ppg_analysis.py` re-synced; Flutter `signalQuality` getter's linear `pi/1.5` law aligned to the same sqrt law (unverified, no Dart toolchain). `bun typecheck`/`bun lint` clean, `bun run build` OK, `bun run test:ppg` 45/45. |
 
 ## Technical Specifications
 

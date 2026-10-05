@@ -249,6 +249,23 @@ export function posPulse(red: number[], green: number[], blue: number[], winLen 
   for (let i = 0; i < n; i++) {
     out[i] = wsum[i] > 1e-9 ? acc[i] / wsum[i] : 0;
   }
+  // Restore a physical amplitude scale. h is assembled from the *mean-normalized*
+  // channels, so it is a dimensionless relative-chrominance signal; feeding it
+  // straight into the rest of the pipeline left two unit mismatches:
+  //  - the 1/sqrt(6) projection scaling made it sqrt(6)/2 = 1.22x too small
+  //    relative to a raw channel (rms(h) = sqrt(2)*sigma(s1) and
+  //    rms((cnG-cnB)/sqrt(6)) = rms(cnG-cnB)/sqrt(6));
+  //  - it stayed in "per-unit" amplitude while every AC/DC denominator is an
+  //    absolute camera count level, so the perfusion index read ~0.015-0.03%
+  //    instead of the ~3% the same signal shows in the raw green channel.
+  // Multiplying by sqrt(3) * mean(green) puts the pulse back into camera-count
+  // units, so AC/DC against the green DC level is a directly comparable
+  // perfusion percentage. Every consumer (respiration extraction, BPNet, the
+  // creatinine AC/DC ratios) is scale-invariant, so this is a pure unit fix.
+  let gSum = 0;
+  for (let i = 0; i < n; i++) gSum += green[i];
+  const unitScale = Math.sqrt(3) * (gSum / n);
+  for (let i = 0; i < n; i++) out[i] *= unitScale;
   return out;
 }
 
@@ -288,71 +305,96 @@ function filteredPerfusionIndex(signal: number[], fs: number): number {
   return (ac / dc) * 100;
 }
 
-function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], fs: number): number {
+function rms(signal: number[]): number {
+  if (signal.length === 0) return 0;
+  let sq = 0;
+  for (const v of signal) sq += v * v;
+  return Math.sqrt(sq / signal.length);
+}
+
+/// Mean absolute level of a signal, used as the DC (illumination) reference.
+/// Camera signals are strictly positive, so this is the DC level of the
+/// underlying skin trace.
+function dcLevel(signal: number[]): number {
+  if (signal.length === 0) return 0;
+  let sum = 0;
+  for (const v of signal) sum += Math.abs(v);
+  return sum / signal.length;
+}
+
+/// Perfusion index (AC/DC) in percent of a single pulse channel.
+///
+/// AC is the RMS of the cardiac-band (0.5-3.5 Hz) component, so baseline wander
+/// and respiration cannot inflate it. `dcRef` is the DC/illumination level of
+/// the *source* trace and is mandatory for zero-mean derived pulses such as the
+/// POS chrominance pulse, where mean(pulse) ~ 0 and AC/mean is meaningless.
+export function perfusionIndexACDC(signal: number[], fs: number, dcRef?: number): number {
+  if (signal.length < Math.max(10, fs * 2)) return 0;
+  const dc = dcRef !== undefined && dcRef > 1e-9 ? dcRef : dcLevel(signal);
+  if (dc <= 1e-9) return 0;
+  const ac = rms(butterworthBandpass(signal, CARDIAC_LO, CARDIAC_HI, fs, true));
+  return (ac / dc) * 100;
+}
+
+/// Composite signal quality index (0-100) for a single PPG channel.
+///
+/// `dcRef` is the DC (illumination) level of the *source* trace the pulse was
+/// extracted from — the green skin-ROI mean. It is required because the rPPG
+/// path analyses the POS chrominance pulse, which is per-window mean-normalized
+/// and therefore essentially zero-mean: computing AC/mean on it is numerically
+/// unstable (it was observed ranging from 0 to 15 000 %) and, against a fixed
+/// threshold, pinned the perfusion term at 1.0 for good signals *and* for pure
+/// noise, so the term had no discriminative power whatsoever.
+function computeSignalQuality(
+  filtered: number[],
+  raw: number[],
+  peaks: Peak[],
+  fs: number,
+  dcRef: number
+): number {
   if (peaks.length < 2) return 0;
 
-  // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
-  const pi = computePerfusionIndex(raw);
-  const piScore = Math.min(1, pi / 1.5); // PI > 1.5% is good for smartphone camera PPG
+  // 1. Perfusion index: RMS of the cardiac-band AC over the DC level of the
+  //    illuminated skin. `filtered` is already band-limited to 0.5-3.5 Hz, so
+  //    baseline wander and respiration do not inflate the AC term.
+  const dc = dcRef > 1e-9 ? dcRef : dcLevel(raw);
+  const ac = rms(filtered);
+  const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
+  // Facial rPPG runs at 0.05-0.5% AC/DC and contact fingertip PPG at 0.5-5%, so
+  // full credit at 0.5% with a square-root law keeps the entire remote-PPG range
+  // usable instead of collapsing it to zero, while still discriminating a
+  // strong pulse from a weak one.
+  const piScore = clamp01(Math.sqrt(pi / 0.5));
 
-  // 2. Spectral SNR, measured on the RAW signal.
-  const { freqs, psd } = powerSpectrum(raw, fs);
-  let signalPower = 0, noisePower = 0;
-  for (let i = 0; i < freqs.length; i++) {
-    if (freqs[i] >= 0.5 && freqs[i] <= 3.5) signalPower += psd[i];
-    else if (freqs[i] > 3.5 && freqs[i] <= fs * 0.4) noisePower += psd[i];
-  }
-  const snr = noisePower > 1e-12 ? signalPower / noisePower : signalPower > 1e-12 ? 8 : 0;
-  const snrScore = Math.min(1, snr / 4); // SNR > 4 is good for smartphone PPG
+  // 2. Bandwidth-matched spectral SNR on the RAW signal (see spectralSnr).
+  //    Log-scaled because the usable range spans orders of magnitude:
+  //    snr 0.5 (-3 dB) -> 0, snr 2 (+3 dB) -> 0.5, snr >= 10 (+10 dB) -> 1.
+  const { snr } = spectralSnr(raw, fs);
+  const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
 
-  // 3. Pulse regularity (CV of RR intervals)
+  // 3. Pulse regularity (CV of RR intervals).
   const rrMs: number[] = [];
   for (let i = 1; i < peaks.length; i++) {
     rrMs.push(((peaks[i].index - peaks[i - 1].index) / fs) * 1000);
   }
-  const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 100;
-  const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30); // regular rhythm scores 1.0; decreases for CV > 10%
+  // A single interval is no evidence of irregularity; the old code substituted
+  // cv = 100 there and scored it 0.
+  const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 0;
+  const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30);
 
-  // 4. Structured SNR-based gating (blueprint for Android cPPG)
-  // SNR > 5.0: Clean / Ideal - keep high SQI
-  // SNR 3.0-5.0: Minor Noise - apply boost (recovery zone)
-  // SNR 1.0-3.0: Highly Unstable - force downgrade (cap below 50)
-  // SNR < 1.0: Pure Artifacts - clamp to 0
-  let snrGate = 1.0;
-  if (snr < 1.0) {
-    // Pure artifacts: clamp to 0, bypass all analysis
-    snrGate = 0;
-  } else if (snr < 2.5) {
-    // SNR 1.0-2.5: Highly unstable - force heavy penalty
-    // Linear ramp from 0 at SNR=1.0 to 0.4 at SNR=2.5 (max SQI ~40)
-    snrGate = clamp01((snr - 1.0) / 1.5) * 0.4;
-  } else if (snr < 3.0) {
-    // SNR 2.5-3.0: Transition zone - moderate penalty
-    // Linear ramp from 0.4 at SNR=2.5 to 0.7 at SNR=3.0 (max SQI ~55-70)
-    snrGate = 0.4 + 0.3 * clamp01((snr - 2.5) / 0.5);
-  } else if (snr < 5.0) {
-    // SNR 3.0-5.0: Minor noise - recovery zone (allow near-full score)
-    // Ramp from 0.7 at SNR=3.0 to 1.0 at SNR=5.0
-    snrGate = 0.7 + 0.3 * clamp01((snr - 3.0) / 2.0);
-  }
-  // SNR >= 5.0: snrGate = 1.0 (no penalty)
+  // 4. Pulse-presence gate. The previous band-power version compared the
+  //    cardiac band of an already-bandpassed signal against its own (numerically
+  //    empty) 3.5-12 Hz tail, and its zero-floor fallback of 8 sat *below* the
+  //    gate's own zero crossing of 10, so a perfectly clean pulse scored
+  //    pulseGate 0 and SQI 0. Narrowband prominence is the physically
+  //    meaningful test and has no such degenerate branch.
+  const prominence = cardiacSpectralProminence(raw, fs);
+  const pulseGate = clamp01((prominence - 4) / 12);
 
-  // 5. Pulse-presence gate: filtered SNR to reject pure noise that passes raw SNR
-  // (e.g., structured noise with cardiac-band energy but no real pulse)
-  const { psd: psdFiltered } = powerSpectrum(filtered, fs);
-  let sigF = 0, noiseF = 0;
-  for (let i = 0; i < freqs.length; i++) {
-    if (freqs[i] >= 0.5 && freqs[i] <= 3.5) sigF += psdFiltered[i];
-    else if (freqs[i] > 3.5 && freqs[i] <= fs * 0.4) noiseF += psdFiltered[i];
-  }
-  const snrF = noiseF > 1e-12 ? sigF / noiseF : (sigF > 1e-12 ? 8 : 0);
-  const pulseGate = clamp01((snrF - 10) / 20); // zero below snrF=10, full above 30
-
-  // Combined gate: both must pass
-  const gate = snrGate * pulseGate;
-
-  // Combined score (weighted average)
-  return Math.round((0.45 * piScore + 0.35 * snrScore + 0.2 * regScore) * gate * 100);
+  // Weighted average, still scaled down multiplicatively when no credible pulse
+  // is present so that structured artifacts cannot report a healthy score.
+  const base = 0.4 * snrScore + 0.35 * piScore + 0.25 * regScore;
+  return Math.round(clamp01(base * pulseGate) * 100);
 }
 
 function computeHRV(rrMs: number[]): HRVMetrics {
@@ -416,7 +458,7 @@ export function powerSpectrum(signal: number[], fs: number): { freqs: number[]; 
   return { freqs, psd };
 }
 
-export function analyzeHeartRate(ppg: number[], fs = 30): HeartMetrics {
+export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartMetrics {
   if (ppg.length < fs * 5) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
   }
@@ -451,7 +493,7 @@ export function analyzeHeartRate(ppg: number[], fs = 30): HeartMetrics {
   const bpm = meanRR > 0 ? 60000 / meanRR : 0;
   const hrv = computeHRV(rrMs);
   const rhythm = classifyRhythm(rrMs);
-  const quality = computeSignalQuality(filtered, ppg, valid, fs);
+  const quality = computeSignalQuality(filtered, ppg, valid, fs, dcRef ?? dcLevel(ppg));
   return {
     bpm: bpm > 30 && bpm < 220 ? bpm : null,
     peaks: valid.map((p) => p.index),
@@ -765,6 +807,95 @@ function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
+/// Cardiac band used everywhere (peak detection, POS analysis, SQI).
+const CARDIAC_LO = 0.5;
+const CARDIAC_HI = 3.5;
+
+/// Width of the out-of-band reference band above the cardiac band, in Hz. Kept
+/// bounded (rather than running all the way to fs*0.4) so the density estimate
+/// stays inside the flat part of the sensor/codec noise floor instead of
+/// climbing into the steep low-frequency roll-off of the 1/f corner.
+const NOISE_BAND_WIDTH = 6;
+
+export interface SpectralSnr {
+  /// Bandwidth-matched in-band / out-of-band power ratio. Independent of the
+  /// reference band width and of the sampling rate.
+  snr: number;
+  signalPower: number;
+  /// Mean per-bin power density of the reference band.
+  noiseDensity: number;
+  sigBins: number;
+  noiseBins: number;
+  /// False when the signal is band-limited by construction and therefore has
+  /// no measurable out-of-band floor (e.g. an already-bandpassed pulse). The
+  /// `snr` field is then Infinity and must not be used to penalise the signal.
+  hasReference: boolean;
+}
+
+/// Bandwidth-matched cardiac-band SNR.
+///
+/// The previous SQI compared the summed power of the 0.5-3.5 Hz cardiac band
+/// against the summed power of the whole 3.5 Hz .. fs*0.4 range (~8.5 Hz wide at
+/// 30 fps, ~20 Hz wide at 60 fps). That is not an SNR: the noise side is ~3x
+/// wider than the signal side, so broadband sensor/codec noise is amplified by
+/// that ratio, and the result also drifts with the frame rate. On synthetic
+/// facial rPPG the POS pulse recovered 72.0 bpm against a true 72 bpm while this
+/// metric read 1.36, which the hard `snr < 1 -> clamp to 0` branch then turned
+/// into SQI 7% — a fully usable signal reported as unusable.
+///
+/// Here the reference band is converted to its *equivalent in-band power*
+/// (mean bin density x number of cardiac bins), so the ratio is a true SNR with
+/// matched bandwidths and is therefore stable across frame rates and noise
+/// colours.
+export function spectralSnr(signal: number[], fs: number): SpectralSnr {
+  const none: SpectralSnr = { snr: 0, signalPower: 0, noiseDensity: 0, sigBins: 0, noiseBins: 0, hasReference: false };
+  const { freqs, psd } = powerSpectrum(signal, fs);
+  if (freqs.length === 0) return none;
+
+  const noiseHi = Math.min((fs / 2) * 0.9, CARDIAC_HI + NOISE_BAND_WIDTH);
+  let signalPower = 0;
+  let sigBins = 0;
+  let noisePower = 0;
+  let noiseBins = 0;
+  for (let i = 0; i < freqs.length; i++) {
+    const f = freqs[i];
+    if (f >= CARDIAC_LO && f <= CARDIAC_HI) {
+      signalPower += psd[i];
+      sigBins++;
+    } else if (f > CARDIAC_HI && f <= noiseHi) {
+      noisePower += psd[i];
+      noiseBins++;
+    }
+  }
+  if (sigBins === 0) return none;
+
+  const noiseDensity = noiseBins > 0 ? noisePower / noiseBins : 0;
+  const inBandNoise = noiseDensity * sigBins;
+  if (inBandNoise <= 0) {
+    // Band-limited signal: nothing to compare against, so do not penalise it.
+    return { snr: Infinity, signalPower, noiseDensity, sigBins, noiseBins, hasReference: false };
+  }
+  return { snr: signalPower / inBandNoise, signalPower, noiseDensity, sigBins, noiseBins, hasReference: true };
+}
+
+/// Peak-to-median power ratio inside the cardiac band: how strongly the pulse
+/// concentrates its energy into a narrow fundamental (plus dicrotic harmonic)
+/// instead of spreading it over a flat floor. For a Gaussian noise field the
+/// expected maximum/median of ~90 bins is only ~2.5-3.5, so this separates real
+/// pulses from structured artifacts far more reliably than a band-power ratio.
+export function cardiacSpectralProminence(signal: number[], fs: number): number {
+  const { freqs, psd } = powerSpectrum(signal, fs);
+  const band: number[] = [];
+  for (let i = 0; i < freqs.length; i++) {
+    if (freqs[i] >= CARDIAC_LO && freqs[i] <= CARDIAC_HI) band.push(psd[i]);
+  }
+  if (band.length < 8) return 0;
+  const sorted = band.slice().sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const peak = sorted[sorted.length - 1];
+  return median > 0 ? peak / median : 0;
+}
+
 function normalizeRange(v: number, lo: number, hi: number): number {
   if (hi === lo) return 0;
   return clamp01((v - lo) / (hi - lo));
@@ -900,10 +1031,15 @@ export function extractCreatinineFeatures(
   // The previous raw MAD/mean PI was dominated by baseline wander and used a
   // nonsensical `redPI || greenPI` fallback for the primary term.
   const ppgPI = filteredPerfusionIndex(ppg, fs);
-  const redPI = filteredPerfusionIndex(red.length > 0 ? red : ppg, fs);
   const greenPI = filteredPerfusionIndex(green.length > 0 ? green : ppg, fs);
+  const redPI = filteredPerfusionIndex(red.length > 0 ? red : ppg, fs);
   const bluePI = filteredPerfusionIndex(blue.length > 0 ? blue : ppg, fs);
-  const perfusionIndex = ppgPI || redPI || greenPI;
+  // `ppgPI` is 0 whenever the analysed pulse is zero-mean (the POS chrominance
+  // rPPG pulse), and red is the *weakest* pulsatile channel on a face
+  // (u_pbv ~ [0.33, 0.53, 0.77] for R/B/G), so the fallback order must prefer
+  // green — otherwise the front-mode perfusion descriptor is read off the
+  // least informative channel.
+  const perfusionIndex = ppgPI || greenPI || redPI;
   const redGreenRatio = greenPI > 0 ? redPI / greenPI : 1;
   const redBlueRatio = bluePI > 0 ? redPI / bluePI : 1;
 
@@ -1095,6 +1231,11 @@ export interface AnalyzeOptions {
   ageYears?: number | null;
   sex?: "male" | "female" | null;
   respSource?: number[];
+  /// DC (illumination) level of the source trace `ppg` was extracted from,
+  /// used as the AC/DC denominator of the perfusion term in the SQI. Callers
+  /// analysing a zero-mean derived pulse (POS chrominance rPPG) must pass the
+  /// skin-ROI mean here, otherwise the perfusion term is meaningless.
+  dcRef?: number;
 }
 
 export function analyzeVitals(
@@ -1105,7 +1246,10 @@ export function analyzeVitals(
   blueSignal: number[] = [],
   options: AnalyzeOptions = {}
 ): VitalAnalysis {
-  const heart = analyzeHeartRate(ppg, fs);
+  // Green is the highest-SNR camera channel, so it is the reference for the DC
+  // level that the pulse's AC amplitude is expressed against.
+  const dcRef = options.dcRef ?? dcLevel(greenSignal.length > 0 ? greenSignal : ppg);
+  const heart = analyzeHeartRate(ppg, fs, dcRef);
   const resp = analyzeRespRateSync(
     options.respSource ?? ppg,
     fs,

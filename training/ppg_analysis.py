@@ -226,49 +226,117 @@ def _analyze_resp_fallback(ppg: np.ndarray, fs: float) -> dict:
     return {"resp_rate_bpm": float(fused), "method": method, "confidence": confidence}
 
 
-def perfusion_index_filtered(sig: np.ndarray, fs: float) -> float:
-    """RMS of the bandpass-filtered pulse over the raw DC, in percent.
+CARDIAC_LO = 0.5
+CARDIAC_HI = 3.5
+NOISE_BAND_WIDTH = 6.0
 
-    Mirrors ``filteredPerfusionIndex`` in the browser module: unlike a raw
-    MAD/mean ratio, baseline wander and respiration do not inflate AC.
-    """
-    if sig.size < fs * 2:
+
+def dc_level(sig: np.ndarray) -> float:
+    """Mean absolute level of a signal, i.e. the DC/illumination reference."""
+    if sig.size == 0:
         return 0.0
-    x = butter_bandpass(sig.astype(float), 0.5, 3.5, fs)
-    dc = float(np.mean(sig))
+    return float(np.mean(np.abs(sig.astype(float))))
+
+
+def perfusion_index_acdc(sig: np.ndarray, fs: float, dc_ref: Optional[float] = None) -> float:
+    """Perfusion index (AC/DC) in percent of a single pulse channel.
+
+    Mirrors ``perfusionIndexACDC`` in the browser module. AC is the RMS of the
+    cardiac-band component so baseline wander cannot inflate it. ``dc_ref`` is
+    the DC level of the *source* trace and is required for zero-mean derived
+    pulses such as the POS chrominance pulse, where mean(pulse) ~ 0 and AC/mean
+    is meaningless.
+    """
+    sig = sig.astype(float)
+    if sig.size < max(10, fs * 2):
+        return 0.0
+    dc = dc_ref if (dc_ref is not None and dc_ref > 1e-9) else dc_level(sig)
     if dc <= 1e-9:
         return 0.0
-    ac = float(np.sqrt(np.mean(x ** 2)))
+    ac = float(np.sqrt(np.mean(butter_bandpass(sig, CARDIAC_LO, CARDIAC_HI, fs) ** 2)))
     return (ac / dc) * 100.0
 
 
-def compute_sqi(ppg: np.ndarray, fs: float) -> float:
+def perfusion_index_filtered(sig: np.ndarray, fs: float) -> float:
+    """Backwards-compatible alias for ``perfusion_index_acdc``."""
+    return perfusion_index_acdc(sig, fs)
+
+
+def spectral_snr(sig: np.ndarray, fs: float) -> Tuple[float, bool]:
+    """Bandwidth-matched cardiac-band SNR.
+
+    Mirrors ``spectralSnr``. The reference band above the cardiac band is
+    converted to its *equivalent in-band power* (mean bin density x number of
+    cardiac bins) before the ratio is taken. Comparing the raw summed powers
+    instead - which is what this function used to do, against a 3.5 Hz..fs*0.4
+    band roughly three times wider than the signal band - is not an SNR: it
+    inflates the noise term by that bandwidth ratio and drifts with the frame
+    rate, driving the score to zero for signals whose heart rate was recovered
+    to within 1 bpm.
+
+    Returns ``(snr, has_reference)``; ``has_reference`` is False for a
+    band-limited signal with no measurable out-of-band floor.
+    """
+    freqs, psd = sps.periodogram(sig.astype(float) - float(np.mean(sig)), fs=fs)
+    noise_hi = min((fs / 2.0) * 0.9, CARDIAC_HI + NOISE_BAND_WIDTH)
+    sig_mask = (freqs >= CARDIAC_LO) & (freqs <= CARDIAC_HI)
+    noise_mask = (freqs > CARDIAC_HI) & (freqs <= noise_hi)
+    sig_bins = int(np.count_nonzero(sig_mask))
+    if sig_bins == 0:
+        return 0.0, False
+    signal_power = float(np.sum(psd[sig_mask]))
+    noise_bins = int(np.count_nonzero(noise_mask))
+    noise_density = float(np.sum(psd[noise_mask])) / noise_bins if noise_bins > 0 else 0.0
+    in_band_noise = noise_density * sig_bins
+    if in_band_noise <= 0:
+        return float("inf"), False
+    return signal_power / in_band_noise, True
+
+
+def cardiac_spectral_prominence(sig: np.ndarray, fs: float) -> float:
+    """Peak-to-median power ratio inside the cardiac band.
+
+    Mirrors ``cardiacSpectralProminence``. A real PPG spectrum concentrates its
+    energy into a narrow fundamental plus dicrotic harmonic; for a Gaussian
+    noise field the expected maximum/median over ~90 bins is only ~2.5-3.5.
+    """
+    freqs, psd = sps.periodogram(sig.astype(float) - float(np.mean(sig)), fs=fs)
+    band = psd[(freqs >= CARDIAC_LO) & (freqs <= CARDIAC_HI)]
+    if band.size < 8:
+        return 0.0
+    median = float(np.median(band))
+    peak = float(np.max(band))
+    return peak / median if median > 0 else 0.0
+
+
+def compute_sqi(ppg: np.ndarray, fs: float, dc_ref: Optional[float] = None) -> float:
     """Composite signal-quality index (0-100) mirroring the browser module.
 
-    45% perfusion + 35% raw-signal spectral SNR + 20% pulse regularity, gated
-    by a pulse-presence factor so broadband noise cannot score highly.
+    40% bandwidth-matched spectral SNR + 35% perfusion (AC/DC) + 25% pulse
+    regularity, scaled down by a cardiac spectral-prominence gate so broadband
+    noise or structured artifacts cannot score highly. Pass ``dc_ref`` (the
+    skin-ROI DC level) when ``ppg`` is a zero-mean derived pulse such as POS.
     """
     if ppg.size < fs * 5:
         return 0.0
-    pi = perfusion_index_filtered(ppg, fs)
-    pi_score = min(1.0, pi / 1.5)
 
-    freqs, psd = sps.periodogram(ppg.astype(float) - float(np.mean(ppg)), fs=fs)
-    in_band = float(np.sum(psd[(freqs >= 0.5) & (freqs <= 3.5)]))
-    out_band = float(np.sum(psd[(freqs > 3.5) & (freqs <= fs * 0.4)]))
-    snr = in_band / out_band if out_band > 1e-12 else (8.0 if in_band > 1e-12 else 0.0)
-    snr_score = min(1.0, snr / 4.0)
+    pi = perfusion_index_acdc(ppg, fs, dc_ref)
+    pi_score = min(1.0, np.sqrt(max(0.0, pi / 0.5)))
 
-    x = butter_bandpass(detrend(ppg.astype(float)), 0.5, 3.5, fs)
+    snr, _has_reference = spectral_snr(ppg, fs)
+    snr_score = min(1.0, max(0.0, (np.log10(snr) + 0.3) / 1.2)) if snr > 0 else 0.0
+
+    x = butter_bandpass(detrend(ppg.astype(float)), CARDIAC_LO, CARDIAC_HI, fs)
     peaks, _ = sps.find_peaks(x, distance=max(1, int(fs * 0.3)))
     if peaks.size < 2:
         return 0.0
     rr = np.diff(peaks) / fs * 1000.0
-    cv = (float(np.std(rr, ddof=1)) / float(np.mean(rr))) * 100.0 if rr.size > 1 and np.mean(rr) > 0 else 100.0
+    cv = (float(np.std(rr, ddof=1)) / float(np.mean(rr))) * 100.0 if rr.size > 1 and np.mean(rr) > 0 else 0.0
     reg_score = 1.0 if cv < 10 else max(0.0, 1.0 - (cv - 10.0) / 30.0)
 
-    peak_gate = float(min(1.0, max(0.0, (snr - 0.5) / 1.0)))
-    return round((0.45 * pi_score + 0.35 * snr_score + 0.2 * reg_score) * peak_gate * 100.0)
+    pulse_gate = min(1.0, max(0.0, (cardiac_spectral_prominence(ppg, fs) - 4.0) / 12.0))
+    base = 0.4 * snr_score + 0.35 * pi_score + 0.25 * reg_score
+    return round(min(1.0, base * pulse_gate) * 100.0)
 
 
 def extract_creatinine_features(ppg: np.ndarray, fs: float) -> Optional[dict]:

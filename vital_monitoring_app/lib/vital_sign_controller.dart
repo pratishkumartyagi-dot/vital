@@ -34,11 +34,18 @@ class VitalSignController extends ChangeNotifier {
 
   /// Signal quality (0-100%) computed from perfusion index of the live
   /// green buffer using the corrected zero-phase bandpass filter.
+  ///
+  /// Uses the same square-root perfusion law as `computeSignalQuality` in
+  /// `src/app/vital-monitoring/ppg-analysis.ts` (full credit at 0.5% AC/DC).
+  /// The previous linear `pi / 1.5` mapping badly under-reported usable
+  /// signals: a healthy fingertip PPG at ~0.5% AC/DC scored 33% and a facial
+  /// rPPG trace below 1% scored proportionally worse, which read as "very low
+  /// signal strength" even while the heart rate was being read correctly.
   double get signalQuality {
     if (_liveGreenBuffer.length < _minSamplesForHR) return 0.0;
     final pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-    // SQI saturates at PI ~ 1.5% (consistent with the web implementation)
-    return (pi / 1.5).clamp(0.0, 1.0) * 100.0;
+    // sqrt law: 0.05% -> 32%, 0.2% -> 63%, 0.5% and above -> 100%.
+    return (math.sqrt((pi / 0.5).clamp(0.0, 1.0))) * 100.0;
   }
 
   // Separate buffers for multi-wavelength analysis

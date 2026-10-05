@@ -13,13 +13,16 @@
  */
 import {
   analyzeHeartRate,
-  analyzeRespRate,
+  analyzeRespRateSync,
   analyzeVitals,
   butterworthBandpass,
+  cardiacSpectralProminence,
   estimateEgfr,
   extractCreatinineFeatures,
+  perfusionIndexACDC,
   posPulse,
   powerSpectrum,
+  spectralSnr,
 } from "../src/app/vital-monitoring/ppg-analysis";
 
 function synth(fs: number, seconds: number, hrBpm: number, respHz = 0.25, noise = 4, seed = 13): number[] {
@@ -72,7 +75,7 @@ for (const hr of [50, 60, 72, 90, 110, 130, 150]) {
 
 {
   const ppg = synth(fs, 30, 75, 0.25);
-  const r = analyzeRespRate(ppg, fs);
+  const r = analyzeRespRateSync(ppg, fs);
   const err = r.respRate === null ? Infinity : Math.abs(r.respRate - 15);
   check("Resp rate", err <= 2, `measured=${r.respRate?.toFixed(1)} err=${err.toFixed(2)}`);
 }
@@ -123,6 +126,193 @@ for (const hr of [50, 60, 72, 90, 110, 130, 150]) {
   const greenErr = hGreen.bpm === null ? Infinity : Math.abs(hGreen.bpm - hrTrue);
   check("POS recovers HR from artifact-corrupted RGB", posErr <= 5, `pos=${hPos.bpm?.toFixed(1)} err=${posErr.toFixed(2)}`);
   check("POS beats raw channel under common artifact", posErr < greenErr && greenErr > 5, `green=${hGreen.bpm?.toFixed(1)} err=${greenErr === Infinity ? "inf" : greenErr.toFixed(2)}`);
+}
+
+// --- Signal quality index (SQI) for front-camera rPPG -----------------------
+// Regression guard for the "rPPG signal quality strength is very low" defect.
+// The old score compared summed power of the 0.5-3.5 Hz cardiac band against
+// summed power of the whole 3.5 Hz..fs*0.4 range and then hard-clamped to 0
+// below SNR 1. The noise side is ~3x wider than the signal side, so ordinary
+// sensor/codec noise drove SNR under 1 even while the POS pulse recovered the
+// heart rate to within 1 bpm, and the app reported SQI 0-11% for a perfectly
+// usable measurement.
+function facialRgb(
+  sampleFs: number,
+  seconds: number,
+  hrBpm: number,
+  pulsatility: { r: number; g: number; b: number },
+  noiseAmp: number,
+  quantiseStep = 0
+): { r: number[]; g: number[]; b: number[] } {
+  const n = Math.floor(seconds * sampleFs);
+  const r: number[] = [];
+  const g: number[] = [];
+  const b: number[] = [];
+  // Two independent noise sources, as on a real sensor: a common-mode
+  // illumination swing (which POS cancels exactly, by construction) plus
+  // per-channel independent noise (shot/read noise after ROI averaging, which
+  // POS cannot cancel). Only the second one degrades POS.
+  let sCommon = 4242;
+  const sChan = [1337, 9001, 555];
+  const common = () => {
+    sCommon = (sCommon * 1103515245 + 12345) & 0x7fffffff;
+    return sCommon / 0x7fffffff - 0.5;
+  };
+  const chanNoise = (idx: number) => {
+    sChan[idx] = (sChan[idx] * 1103515245 + 12345) & 0x7fffffff;
+    return sChan[idx] / 0x7fffffff - 0.5;
+  };
+  const q = (v: number) => (quantiseStep > 0 ? Math.round(v / quantiseStep) * quantiseStep : v);
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleFs;
+    const ph = (2 * Math.PI * hrBpm * t) / 60;
+    const pulse = Math.sin(ph) + 0.35 * Math.sin(2 * ph + 0.6) + 0.15 * Math.sin(3 * ph);
+    const illum = 1 + 0.12 * Math.sin(2 * Math.PI * 0.4 * t) + 0.25 * noiseAmp * common();
+    r.push(q(135 * (1 + pulsatility.r * pulse) * (illum + noiseAmp * chanNoise(0))));
+    g.push(q(120 * (1 + pulsatility.g * pulse) * (illum + noiseAmp * chanNoise(1))));
+    b.push(q(110 * (1 + pulsatility.b * pulse) * (illum + noiseAmp * chanNoise(2))));
+  }
+  return { r, g, b };
+}
+
+function dcOf(sig: number[]): number {
+  return sig.length === 0 ? 0 : sig.reduce((s, v) => s + Math.abs(v), 0) / sig.length;
+}
+
+{
+  // Typical facial rPPG: 2/6/3% pulsatility (u_pbv ordering G > B > R), a
+  // common-mode 0.4 Hz illumination swing and light sensor noise.
+  const hrTrue = 72;
+  const win = Math.max(16, Math.round(fs));
+  const { r, g, b } = facialRgb(fs, 30, hrTrue, { r: 0.02, g: 0.06, b: 0.03 }, 0.01);
+  const pos = posPulse(r, g, b, win);
+  const v = analyzeVitals(pos, fs, r, g, b, { cameraMode: "front", ageYears: 40, sex: "male" });
+  const bpmErr = v.bpm === null ? Infinity : Math.abs(v.bpm - hrTrue);
+  check(
+    "Front rPPG POS pulse: SQI not collapsed while HR is recovered",
+    bpmErr <= 5 && v.heart.signalQuality >= 85,
+    `bpm=${v.bpm?.toFixed(1)} err=${bpmErr.toFixed(2)} sqi=${v.heart.signalQuality}`
+  );
+
+  // The perfusion term must be a real AC/DC percentage for the zero-mean POS
+  // pulse, expressed against the skin-ROI DC level, and comparable with what
+  // the raw green channel reports for the same signal. It previously came out
+  // at 0.015-0.03% (or as high as 15 000%, depending on the residual mean)
+  // because the POS pulse was left in per-unit amplitude while the denominator
+  // was an absolute camera count level.
+  const piPos = perfusionIndexACDC(pos, fs, dcOf(g));
+  const piGreen = perfusionIndexACDC(g, fs, dcOf(g));
+  check(
+    "Front rPPG perfusion index is a plausible percentage",
+    piPos > 0.2 && piPos < 5,
+    `pos=${piPos.toFixed(2)}% rawGreen=${piGreen.toFixed(2)}%`
+  );
+  check(
+    "Front rPPG perfusion index agrees with the raw channel",
+    piPos > 0.3 * piGreen && piPos < 3 * piGreen,
+    `pos=${piPos.toFixed(2)}% rawGreen=${piGreen.toFixed(2)}% ratio=${(piPos / piGreen).toFixed(2)}`
+  );
+
+  // 8-bit video is what a browser camera actually delivers.
+  const q = facialRgb(fs, 30, hrTrue, { r: 0.02, g: 0.06, b: 0.03 }, 0.002, 8);
+  const posQ = posPulse(q.r, q.g, q.b, win);
+  const sqiQ = analyzeVitals(posQ, fs, q.r, q.g, q.b, { cameraMode: "front" }).heart.signalQuality;
+  check("Front rPPG SQI survives 8-bit quantisation", sqiQ >= 60, `sqi=${sqiQ}`);
+
+  // The SQI must track how recoverable the pulse actually is: high while the
+  // heart rate is accurate, low once it is not. It saturates at 100 on a clean
+  // signal, so the sweep asserts non-increasing plus a large total drop.
+  const noiseLevels = [0.002, 0.12, 0.5, 2.0];
+  const sweep = noiseLevels.map((noiseAmp) => {
+    const c = facialRgb(fs, 30, hrTrue, { r: 0.02, g: 0.06, b: 0.03 }, noiseAmp);
+    const av = analyzeVitals(posPulse(c.r, c.g, c.b, win), fs, c.r, c.g, c.b, { cameraMode: "front" });
+    return {
+      noiseAmp,
+      sqi: av.heart.signalQuality,
+      bpmErr: av.bpm === null ? Infinity : Math.abs(av.bpm - hrTrue),
+    };
+  });
+  const scores = sweep.map((s) => s.sqi);
+  const nonIncreasing = scores.every((v, i) => i === 0 || v <= scores[i - 1]);
+  check(
+    "Front rPPG SQI falls as sensor noise grows",
+    nonIncreasing && scores[0] - scores[scores.length - 1] >= 60,
+    `sqi=[${scores.join(", ")}] bpmErr=[${sweep.map((s) => s.bpmErr.toFixed(1)).join(", ")}]`
+  );
+  // Low SQI must mean the pulse is genuinely unusable, not merely imperfect.
+  const worst = sweep[sweep.length - 1];
+  check(
+    "Front rPPG low SQI implies an unreliable pulse",
+    worst.sqi < 40 && worst.bpmErr > 5,
+    `sqi=${worst.sqi} bpmErr=${worst.bpmErr.toFixed(1)}`
+  );
+}
+
+{
+  // Pure broadband noise with no pulse at all must not report usable quality.
+  const n = fs * 30;
+  const noiseOnly: number[] = [];
+  let s = 777;
+  for (let i = 0; i < n; i++) {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    noiseOnly.push(120 + 40 * (s / 0x7fffffff - 0.5));
+  }
+  const h = analyzeHeartRate(noiseOnly, fs);
+  check("Pure noise rejected by SQI", h.signalQuality < 20, `sqi=${h.signalQuality}`);
+  const prom = cardiacSpectralProminence(noiseOnly, fs);
+  check("Pure noise has no cardiac spectral prominence", prom < 8, `prominence=${prom.toFixed(1)}`);
+}
+
+{
+  // The matched-bandwidth SNR must not depend on the frame rate. For a flat
+  // spectrum the answer is exactly sigBins/noiseBins, which doubles with fs.
+  const snrs = [24, 30, 60].map((f) => {
+    const n = f * 30;
+    const sig: number[] = [];
+    let s = 31337;
+    for (let i = 0; i < n; i++) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      sig.push(120 + 40 * (s / 0x7fffffff - 0.5));
+    }
+    return spectralSnr(sig, f).snr;
+  });
+  const spread = Math.max(...snrs) / Math.max(1e-9, Math.min(...snrs));
+  check("Matched-bandwidth SNR is frame-rate invariant", spread < 1.5, `snr@24/30/60=[${snrs.map((v) => v.toFixed(3)).join(", ")}] spread=${spread.toFixed(2)}x`);
+}
+
+// --- Skin-ROI dilution -------------------------------------------------------
+// A real front-camera ROI is never the face alone: it includes some background
+// and hair. Static background only dilutes the pulse amplitude (it adds no
+// noise), so the heart rate must stay recoverable and the perfusion index must
+// fall roughly in proportion to the face fraction.
+{
+  const hrTrue = 72;
+  const win = Math.max(16, Math.round(fs));
+  const faceRatio = 0.3;
+  const bg = { r: 100, g: 80, b: 60 };
+  const n = fs * 30;
+  const r: number[] = [];
+  const g: number[] = [];
+  const b: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / fs;
+    const ph = (2 * Math.PI * hrTrue * t) / 60;
+    const pulse = Math.sin(ph) + 0.35 * Math.sin(2 * ph + 0.6);
+    const motion = 1 + 0.1 * Math.sin(2 * Math.PI * 0.5 * t);
+    r.push((faceRatio * 135 * (1 + 0.02 * pulse) + (1 - faceRatio) * bg.r) * motion);
+    g.push((faceRatio * 120 * (1 + 0.06 * pulse) + (1 - faceRatio) * bg.g) * motion);
+    b.push((faceRatio * 110 * (1 + 0.03 * pulse) + (1 - faceRatio) * bg.b) * motion);
+  }
+  const v = analyzeVitals(posPulse(r, g, b, win), fs, r, g, b, { cameraMode: "front" });
+  const err = v.bpm === null ? Infinity : Math.abs(v.bpm - hrTrue);
+  const piDiluted = perfusionIndexACDC(posPulse(r, g, b, win), fs, dcOf(g));
+  const clean = facialRgb(fs, 30, hrTrue, { r: 0.02, g: 0.06, b: 0.03 }, 0.002);
+  const piClean = perfusionIndexACDC(posPulse(clean.r, clean.g, clean.b, win), fs, dcOf(clean.g));
+  check(
+    "Diluted skin ROI: HR recovered, perfusion falls with face fraction",
+    err <= 5 && piDiluted < piClean * 0.7,
+    `bpm=${v.bpm?.toFixed(1)} err=${err.toFixed(2)} sqi=${v.heart.signalQuality} pi=${piDiluted.toFixed(2)}% vs clean ${piClean.toFixed(2)}%`
+  );
 }
 
 // --- Hann-windowed power spectrum ---
@@ -180,11 +370,25 @@ for (const hr of [50, 60, 72, 90, 110, 130, 150]) {
   const crFrontWeak = vFrontWeak.creatinine.creatinine;
   check("Front mode not collapsed to constant", crFrontStrong !== null && crFrontWeak !== null && Math.abs(crFrontStrong - crFrontWeak) > 0.05, `strong=${crFrontStrong} weak=${crFrontWeak}`);
 
-  // SQI gate: noise-dominated signal must produce no creatinine and no glucose.
-  const noisy = synth(fs, 30, 75, 0.25, 45, 5);
+  // SQI gate: a signal whose pulse is genuinely buried must produce no
+  // creatinine and no glucose. The previous version of this check used
+  // noise=45, which still recovers 73.6 bpm against a true 75 - i.e. it is not
+  // noise-dominated at all, and the old (bandwidth-biased) SNR was what forced
+  // it to 0. noise=120 buries the pulse (HR off by >10 bpm) and scores 29.
+  const noisy = synth(fs, 30, 75, 0.25, 120, 5);
   const vNoisy = analyzeVitals(noisy, fs, scaleSignal(noisy, 0.7), scaleSignal(noisy, 1), scaleSignal(noisy, 0.4), { cameraMode: "rear", ageYears: age, sex: "male" });
   check("Low-SQI gates creatinine", vNoisy.creatinine.creatinine === null, `sqi=${vNoisy.heart.signalQuality} cr=${vNoisy.creatinine.creatinine}`);
   check("Low-SQI gates glucose", vNoisy.glucose.glucose === null, `sqi=${vNoisy.heart.signalQuality} glucose=${vNoisy.glucose.glucose}`);
+
+  // ...but a noisy yet still-recoverable pulse must NOT be gated: the old
+  // metric scored it 0 and therefore refused to report anything.
+  const marginal = synth(fs, 30, 75, 0.25, 45, 5);
+  const vMarginal = analyzeVitals(marginal, fs, scaleSignal(marginal, 0.7), scaleSignal(marginal, 1), scaleSignal(marginal, 0.4), { cameraMode: "rear", ageYears: age, sex: "male" });
+  check(
+    "Recoverable-but-noisy pulse is not gated",
+    vMarginal.bpm !== null && Math.abs(vMarginal.bpm - 75) <= 5 && vMarginal.heart.signalQuality >= 40 && vMarginal.creatinine.creatinine !== null,
+    `sqi=${vMarginal.heart.signalQuality} bpm=${vMarginal.bpm?.toFixed(1)} cr=${vMarginal.creatinine.creatinine}`
+  );
   check("Clean signal yields glucose", vRear.glucose.glucose !== null && vRear.glucose.glucose >= 70 && vRear.glucose.glucose <= 200, `sqi=${vRear.heart.signalQuality} glucose=${vRear.glucose.glucose}`);
 }
 
