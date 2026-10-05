@@ -27,8 +27,8 @@ export interface RespMetrics {
   waveform?: number[];
 }
 
-import { estimateRespRateCorrencoder } from './correncoder-resp';
 import { estimateRespRateRPPG, extractRPPGRespiration } from './rppg-resp';
+import { estimateRespRateRearPPG } from './rrest-resp';
 
 function mean(arr: number[]): number {
   if (arr.length === 0) return 0;
@@ -513,7 +513,7 @@ export async function analyzeRespRate(
       waveform: result.waveform
     };
   } else {
-    const result = await estimateRespRateCorrencoder(ppg, fs);
+    const result = estimateRespRateRearPPG(ppg, fs);
     return {
       respRate: result.respRate,
       method: result.method,
@@ -544,44 +544,13 @@ export function analyzeRespRateSync(
       waveform: result.waveform
     };
   } else {
-    const detrended = detrend(ppg);
-    const lowpass = butterworthBandpass(detrended, 0.1, 0.5, fs);
-    const ac = autocorrelate(lowpass);
-    const minLag = Math.floor(fs / 0.5);
-    const maxLag = Math.floor(fs / 0.1);
-    let bestLag = -1;
-    let bestVal = -Infinity;
-    for (let lag = minLag; lag <= Math.min(maxLag, ac.length - 1); lag++) {
-      if (ac[lag] > bestVal) {
-        bestVal = ac[lag];
-        bestLag = lag;
-      }
-    }
-    let respBpm = 0;
-    let method = "autocorr";
-    let confidence = Math.max(0, Math.min(1, bestVal));
-    if (bestLag > 0) {
-      respBpm = (60 * fs) / bestLag;
-    }
-    const { freq: fftFreq, power: fftPower } = findDominantFreqInBand(lowpass, fs, 0.1, 0.5);
-    if (fftFreq > 0) {
-      const fftBpm = fftFreq * 60;
-      if (respBpm === 0 || Math.abs(fftBpm - respBpm) < 8) {
-        const combined = respBpm === 0 ? fftBpm : 0.5 * (respBpm + fftBpm);
-        respBpm = combined;
-        method = "autocorr+FFT";
-      } else {
-        const combined = 0.5 * (respBpm + fftBpm);
-        respBpm = combined;
-        method = "autocorr+FFT(fused)";
-      }
-      const totalPower = lowpass.reduce((a, b) => a + b * b, 0) / lowpass.length || 1;
-      confidence = Math.max(confidence, Math.min(1, fftPower / totalPower));
-    }
-    if (respBpm < 5 || respBpm > 50) {
-      return { respRate: null, method, confidence: 0, waveform: [] };
-    }
-    return { respRate: respBpm, method, confidence, waveform: lowpass };
+    const result = estimateRespRateRearPPG(ppg, fs);
+    return {
+      respRate: result.respRate,
+      method: result.method,
+      confidence: result.confidence,
+      waveform: result.waveform
+    };
   }
 }
 
