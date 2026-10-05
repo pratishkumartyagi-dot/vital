@@ -16,6 +16,7 @@ import rppglib.processing
 import rppglib.models
 import rppglib.ppg2hr
 
+
 class rPPG_Dataset(torch.utils.data.Dataset):
     def __init__(self, preprocessed_files, video_processing, config):
         self.config = config
@@ -53,6 +54,193 @@ class rPPG_Dataset(torch.utils.data.Dataset):
         ppg /= ppg.std() + 1e-9    
         return ppg
 
+
+class MIMICDataset(torch.utils.data.Dataset):
+    """Dataset for MIMIC-III-Ext-PPG contact PPG signals.
+    
+    Loads raw PPG/ECG/ABP/RESP waveforms from WFDB format and returns
+    preprocessed signal windows with regression targets (HR, RR, SBP, DBP).
+    """
+    
+    def __init__(self, metadata_df, config, signal_types=None, target_types=None, window_seconds=30):
+        self.config = config
+        self.metadata = metadata_df.reset_index(drop=True)
+        self.signal_types = signal_types or ['pleth', 'ecg', 'abp', 'resp']
+        self.target_types = target_types or ['hr', 'rr', 'sbp', 'dbp']
+        self.window_seconds = window_seconds
+        self.fs = config.get('mimic_fs', 125)
+        self.window_samples = int(window_seconds * self.fs)
+        
+        # Preprocessing parameters
+        self.ppg_low_freq = config.get('ppg_low_freq', 0.5)
+        self.ppg_high_freq = config.get('ppg_high_freq', 8.0)
+        self.ecg_low_freq = config.get('ecg_low_freq', 0.5)
+        self.ecg_high_freq = config.get('ecg_high_freq', 40.0)
+        self.abp_low_freq = config.get('abp_low_freq', 0.5)
+        self.abp_high_freq = config.get('abp_high_freq', 10.0)
+        self.resp_low_freq = config.get('resp_low_freq', 0.1)
+        self.resp_high_freq = config.get('resp_high_freq', 1.0)
+        
+        # Signal name mapping in WFDB files
+        self.signal_name_map = {
+            'pleth': ['PLETH', 'PPG', 'PLETHYSMOGRAM'],
+            'ecg': ['ECG', 'ECG2', 'II', 'LEAD II'],
+            'abp': ['ABP', 'ART', 'ARTERIAL'],
+            'resp': ['RESP', 'RESP1', 'RESPIRATION']
+        }
+        
+        # Cache for loaded records
+        self._record_cache = {}
+        self._max_cache_size = 10
+
+    def __len__(self):
+        return len(self.metadata)
+
+    def __getitem__(self, index):
+        row = self.metadata.iloc[index]
+        
+        # Load WFDB record
+        record_path = row['folder_path'] + '/' + row['signal_file_name']
+        signals, fields = self._load_record(record_path)
+        
+        # Extract signal channels
+        signal_dict = self._extract_signals(signals, fields['sig_name'])
+        
+        # Preprocess each signal
+        processed_signals = {}
+        for sig_type in self.signal_types:
+            if sig_type in signal_dict and signal_dict[sig_type] is not None:
+                processed_signals[sig_type] = self._preprocess_signal(
+                    signal_dict[sig_type], sig_type
+                )
+            else:
+                # Return zeros if signal not available
+                processed_signals[sig_type] = np.zeros(self.window_samples, dtype=np.float32)
+        
+        # Get regression targets
+        targets = self._get_targets(row)
+        
+        # Primary input is PPG (contact)
+        primary_signal = processed_signals.get('pleth', np.zeros(self.window_samples, dtype=np.float32))
+        
+        # Additional signals as auxiliary inputs
+        aux_signals = np.stack([
+            processed_signals.get('ecg', np.zeros(self.window_samples)),
+            processed_signals.get('abp', np.zeros(self.window_samples)),
+            processed_signals.get('resp', np.zeros(self.window_samples))
+        ], axis=0)  # Shape: (3, window_samples)
+        
+        return {
+            'ppg': torch.from_numpy(primary_signal.astype(np.float32)),
+            'aux_signals': torch.from_numpy(aux_signals.astype(np.float32)),
+            'targets': torch.from_numpy(targets.astype(np.float32)),
+            'subject_id': row['subject_id'],
+            'segment_id': row['segment_id'],
+            'rhythm': row.get('event_rhythm', 'UNKNOWN')
+        }
+
+    def _load_record(self, record_path):
+        """Load WFDB record with caching."""
+        if record_path in self._record_cache:
+            return self._record_cache[record_path]
+        
+        signals, fields = rppglib.data_utils.load_wfdb_record(record_path)
+        
+        if len(self._record_cache) >= self._max_cache_size:
+            # Remove oldest entry
+            oldest_key = next(iter(self._record_cache))
+            del self._record_cache[oldest_key]
+        
+        self._record_cache[record_path] = (signals, fields)
+        return signals, fields
+
+    def _extract_signals(self, signals, sig_names):
+        """Extract specific signal types from multi-channel WFDB data."""
+        sig_names_upper = [s.upper() for s in sig_names]
+        extracted = {}
+        
+        for sig_type, possible_names in self.signal_name_map.items():
+            found = False
+            for i, name in enumerate(sig_names_upper):
+                if any(pn in name for pn in possible_names):
+                    extracted[sig_type] = signals[:, i].astype(np.float32)
+                    found = True
+                    break
+            if not found:
+                extracted[sig_type] = None
+        
+        return extracted
+
+    def _preprocess_signal(self, signal, sig_type):
+        """Apply bandpass filtering and normalization based on signal type."""
+        if sig_type == 'pleth':
+            low, high = self.ppg_low_freq, self.ppg_high_freq
+        elif sig_type == 'ecg':
+            low, high = self.ecg_low_freq, self.ecg_high_freq
+        elif sig_type == 'abp':
+            low, high = self.abp_low_freq, self.abp_high_freq
+        elif sig_type == 'resp':
+            low, high = self.resp_low_freq, self.resp_high_freq
+        else:
+            low, high = 0.5, 8.0
+        
+        # Bandpass filter
+        signal = rppglib.processing.bandpass_filter(signal, self.fs, low, high, order=4)
+        
+        # Normalize
+        signal = signal - np.mean(signal)
+        signal = signal / (np.std(signal) + 1e-9)
+        
+        # Ensure correct length
+        if len(signal) > self.window_samples:
+            signal = signal[:self.window_samples]
+        elif len(signal) < self.window_samples:
+            signal = np.pad(signal, (0, self.window_samples - len(signal)), mode='constant')
+        
+        return signal.astype(np.float32)
+
+    def _get_targets(self, row):
+        """Extract regression targets from metadata row."""
+        targets = []
+        
+        if 'hr' in self.target_types:
+            hr = row.get('median_30s_hr', np.nan)
+            targets.append(hr if not np.isnan(hr) else 0.0)
+        
+        if 'rr' in self.target_types:
+            rr = row.get('median_30s_rr', np.nan)
+            targets.append(rr if not np.isnan(rr) else 0.0)
+        
+        if 'sbp' in self.target_types:
+            sbp = row.get('median_30s_sbp', np.nan)
+            targets.append(sbp if not np.isnan(sbp) else 0.0)
+        
+        if 'dbp' in self.target_types:
+            dbp = row.get('median_30s_dbp', np.nan)
+            targets.append(dbp if not np.isnan(dbp) else 0.0)
+        
+        return np.array(targets, dtype=np.float32)
+
+
+def collate_mimic_batch(batch):
+    """Custom collate function for MIMIC dataset."""
+    ppg = torch.stack([item['ppg'] for item in batch])
+    aux_signals = torch.stack([item['aux_signals'] for item in batch])
+    targets = torch.stack([item['targets'] for item in batch])
+    
+    # Keep metadata as lists
+    subject_ids = [item['subject_id'] for item in batch]
+    segment_ids = [item['segment_id'] for item in batch]
+    rhythms = [item['rhythm'] for item in batch]
+    
+    return {
+        'ppg': ppg,
+        'aux_signals': aux_signals,
+        'targets': targets,
+        'subject_ids': subject_ids,
+        'segment_ids': segment_ids,
+        'rhythms': rhythms
+    }
 
 def train_fold(config):
     model = rppglib.models.__dict__[config.model](config)
