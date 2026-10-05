@@ -253,13 +253,20 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   Future<void> _applyAdaptivePpgSettings() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
-    final caps = await NativeHardwareBridge.optimizeSensorForPPG();
+    final facing = _cameraMode == CameraMode.front ? 0 : 1;
+    final caps = await NativeHardwareBridge.optimizeSensorForPPG(facing: facing);
     if (caps == null) {
       debugPrint('Adaptive PPG: could not query native capabilities');
       return;
     }
 
     debugPrint('Adaptive PPG capabilities: $caps');
+
+    final ppgSettings = caps['ppgOptimizedSettings'] as Map<dynamic, dynamic>?;
+    if (ppgSettings != null) {
+      debugPrint('Adaptive PPG: native optimized settings = $ppgSettings');
+      await _applyPpgOptimizedSettings(ppgSettings);
+    }
 
     final aeCompMin = caps['aeCompMin'] is int ? caps['aeCompMin'] as int : 0;
     final aeCompMax = caps['aeCompMax'] is int ? caps['aeCompMax'] as int : 0;
@@ -291,6 +298,44 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
       } catch (e) {
         debugPrint('Adaptive PPG: torch enable failed: $e');
       }
+    }
+  }
+
+  Future<void> _applyPpgOptimizedSettings(Map<dynamic, dynamic> settings) async {
+    try {
+      final shouldLockAe = settings['shouldLockAe'] as bool? ?? false;
+      final shouldLockAwb = settings['shouldLockAwb'] as bool? ?? false;
+      final shouldLockAf = settings['shouldLockAf'] as bool? ?? false;
+      final shouldDisableFlash = settings['shouldDisableFlash'] as bool? ?? false;
+      final hasFixedFocus = settings['hasFixedFocus'] as bool? ?? false;
+      final lensFocusDistance = settings['lensFocusDistance'] as double? ?? 0.0;
+
+      debugPrint('Applying PPG optimized settings: lockAE=$shouldLockAe, lockAWB=$shouldLockAwb, lockAF=$shouldLockAf, disableFlash=$shouldDisableFlash, fixedFocus=$hasFixedFocus, focusDistance=$lensFocusDistance');
+
+      // Disable flash for PPG (both cameras)
+      if (shouldDisableFlash) {
+        await _controller!.setFlashMode(FlashMode.off);
+        debugPrint('Adaptive PPG: flash disabled');
+      }
+
+      // For front camera (rPPG), we want to lock AE/AWB/AF to prevent skin-tone drift
+      // For rear camera (PPG), we also lock but rely on torch for illumination
+      if (_cameraMode == CameraMode.front) {
+        // Front camera: apply exposure compensation for stable skin-tone capture
+        // The native side provides targetExposureNs and targetIso but Flutter camera plugin
+        // only supports exposureOffset. We use the aeCompMin from capabilities.
+        final aeCompMin = settings['aeCompMin'] as int? ?? 0;
+        if (aeCompMin < 0) {
+          await _controller!.setExposureOffset(aeCompMin.toDouble());
+          debugPrint('Adaptive PPG (front): exposure offset set to $aeCompMin');
+        }
+      }
+
+      // Note: Flutter camera plugin doesn't expose direct AE/AWB/AF lock controls
+      // These would require platform-specific implementation or a custom camera plugin
+      // The native query provides the optimal values for reference
+    } catch (e) {
+      debugPrint('Adaptive PPG: applying optimized settings failed: $e');
     }
   }
 

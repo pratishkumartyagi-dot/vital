@@ -14,9 +14,9 @@ class NativeHardwareBridge {
     }
   }
 
-  static Future<Map<String, dynamic>?> optimizeSensorForPPG() async {
+  static Future<Map<String, dynamic>?> optimizeSensorForPPG({int facing = 0}) async {
     try {
-      final result = await _cameraChannel.invokeMethod<Map<dynamic, dynamic>>('configureSafePPG');
+      final result = await _cameraChannel.invokeMethod<Map<dynamic, dynamic>>('configureSafePPG', {'facing': facing});
       if (result != null) {
         return Map<String, dynamic>.from(result);
       }
