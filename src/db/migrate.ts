@@ -1,4 +1,7 @@
-import { runMigrations } from "@kilocode/app-builder-db";
+import { migrate } from "drizzle-orm/libsql/migrator";
 import { getDb } from "./index";
 
-await runMigrations(getDb(), {}, { migrationsFolder: "./src/db/migrations" });
+const db = getDb();
+
+await migrate(db, { migrationsFolder: "./src/db/migrations" });
+console.log("Migrations completed successfully");
