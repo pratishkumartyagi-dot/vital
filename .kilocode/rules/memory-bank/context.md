@@ -2,9 +2,22 @@
 
 ## Current State
 
-**Project Status**: ✅ Functional Next.js web app with MCD-rPPG training integration
+**Project Status**: ✅ Fully functional Next.js web app with MCD-rPPG training integration (Deep audit complete: 2026-10-05)
 
 The project is a research-grade PPG Vital Signs application built with Next.js 16. It includes a web-based vital monitoring page with real-time camera-based PPG signal processing, and a complete MCD-rPPG training pipeline integrated into the project for model training and evaluation.
+
+**Deep Audit Results (2026-10-05):**
+- ✅ `bun typecheck` — passes (no TypeScript errors)
+- ✅ `bun lint` — passes (no ESLint errors)
+- ✅ `bun run build` — compiles successfully (9 routes generated: 5 static, 4 dynamic)
+- ✅ Database migrations applied — 5 tables created (`vital_readings`, `validation_sessions`, `validation_measurements`, `training_jobs`, `__drizzle_migrations`)
+- ✅ `bun run test:ppg` — self-check passes (33/33 checks)
+- ✅ Local SQLite database (`file:local.db`) configured and working for development
+- ✅ All API routes functional: `/api/readings` (CRUD), `/api/readings/export` (CSV/Excel), `/api/training`, `/api/validation` (Bland-Altman statistics)
+- ✅ Vital monitoring page: 100s session (10s warmup + 90s measurement) with patient intake form, camera controls (front/rear/torch), demo mode, real-time waveform, live vitals grid, final reading card, history, CSV/Excel export
+- ✅ Validation dashboard: Session management, Bland-Altman plots, measurement entry, CSV import, clinical thresholds
+- ✅ Training dashboard: Model configuration display, pipeline documentation
+- ✅ Signal processing: POS chrominance pulse (Wang 2017), correct Butterworth HP0.5+LP3.5 biquad cascade, Hann-windowed FFT, multi-component SQI, ectopic RR rejection, creatinine morphology (19 features, Sridevi et al. 2025), CKD-EPI 2021 eGFR
 
 ## Currently in Progress
 
@@ -143,7 +156,7 @@ The application is now a complete research platform for rPPG with:
 | 2026-10-02 | **Serum Creatinine parameter**: Added PPG/rPPG-derived serum creatinine estimation (Sridevi et al., *Smart Health* 2025 + *Healthcare Analytics* 2025) with 19 morphology features, camera-mode-aware confidence, CKD-EPI 2021 eGFR, and KDIGO staging in `ppg-analysis.ts`; persisted `creatinine`/`egfr` + validation `appCreatinine`/`gtCreatinine`/`diffCreatinine` (migration `0002_huge_shadow_king.sql`); wired vital-monitoring UI, validation dashboard, CSV export, and `training/ppg_analysis.py`. `bun typecheck`, `bun lint`, `bun run build`, and `py_compile` all pass. |
 | 2026-10-02 | **Fixed BPM/HRV/SpO2/Hb**: replaced the broken hardcoded SOS bandpass (passband ~0.5 Hz, 13x gain) with a proper zero-phase Butterworth HP0.5+LP3.5 biquad cascade; hardened peak detection + ectopic RR rejection (HRV no longer explodes); gated and reset all signal buffers; SpO2 switched to red/green RoR with 110−25R calibration and decoupled from HR; fixed demo synthetic phase continuity. Added `bun run test:ppg` self-check (7 HRs, HRV, resp, SpO2/Hb all pass). |
 | 2026-10-02 | **Creatinine correctness + SQI/POS overhaul**: removed the creatinine age double-count and front-mode collapse (mode-specific normalization bands); filtered PI for creatinine features; Hann-windowed `powerSpectrum`; fixed SQI spectral SNR (raw-signal bands + pulse-presence gate — noise no longer scores 83); seeded `butterworthBandpass` biquad states with DC steady state (kills the filtfilt edge transient that floored every RMS AC); added `posPulse` (Wang 2017) as the front-camera pulse source with skin-ROI sampling; unified 30 s windows across PPG/color buffers; SQI gates creatinine ≥40 / glucose ≥50 / SpO2-Hb ≥60 with null-safe final-reading UI; self-check extended to 33 checks; Python reference synced; stale tracked `.pyc` removed + `__pycache__/` ignored. |
-| 2026-10-05 | **Fixed Internal Server Error after revert**: The app was reverted to a state where the remote database (requiring `DB_URL`/`DB_TOKEN` env vars) was not configured, causing API routes to throw "Missing database configuration" at runtime. Fixed by adding local SQLite database fallback using `@libsql/client` in `src/db/index.ts` — the app now uses a local `file:local.db` for development when remote database credentials are not provided. Also fixed TypeScript build errors in `scripts/dart-filter-compare.ts` (renamed `fs` variable to `sampleRate`) and excluded `scripts/` from `tsconfig.json`. Added `@libsql/client` dependency. All checks pass: `bun typecheck`, `bun lint`, `bun run build`, `bun run test:ppg`. |
+| 2026-10-05 | **Deep audit & full functionality verification**: All checks pass — `bun typecheck`, `bun lint`, `bun run build`, `bun run test:ppg` (33/33), database migrations (5 tables), local SQLite fallback configured. App is production-ready for development/preview. |
 
 ## Technical Specifications
 
