@@ -87,9 +87,9 @@ export async function POST(request: Request) {
       spo2Offset: spo2Offset || 0,
       videoData: videoBlob ? Buffer.from(videoBlob, "base64") : null,
       videoMimeType: videoMimeType || null,
-      sessionDurationSec: 100,
+      sessionDurationSec: 130,
       warmupSec: 10,
-      measurementSec: 90,
+      measurementSec: 120,
     };
 
     await db.insert(vitalReadings).values(reading);

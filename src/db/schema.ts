@@ -49,9 +49,9 @@ export const vitalReadings = sqliteTable("vital_readings", {
   validationNotes: text("validation_notes"),
 
   // Session info
-  sessionDurationSec: integer("session_duration_sec").notNull().default(100),
+  sessionDurationSec: integer("session_duration_sec").notNull().default(130),
   warmupSec: integer("warmup_sec").notNull().default(10),
-  measurementSec: integer("measurement_sec").notNull().default(90),
+  measurementSec: integer("measurement_sec").notNull().default(120),
 });
 
 export const validationSessions = sqliteTable("validation_sessions", {
