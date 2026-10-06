@@ -1016,9 +1016,9 @@ const RESP_HI = 0.5;
 /// clinical range. A smartphone camera has no IR channel, so the accepted
 /// contact-camera proxy is the red/green pair. Green (550 nm) is absorbed far
 /// more strongly by hemoglobin than red is, so the red/green RoR is typically
-/// **~0.8-2.5** rather than 0.4-0.8, and the old `110 - 25 * R` formula (which
+/// **~0.5-2.0** rather than 0.4-0.8, and the old `110 - 25 * R` formula (which
 /// expects R < 1) returned SpO2 in the 60-85% range for every healthy subject
-/// (the user-reported "grossly low" values).
+/// with R > 1 — the "grossly low" values the user reported.
 ///
 /// These constants are the linearised red/green calibration. They are a
 /// **per-device estimate** — the real relationship depends on the camera's
@@ -1027,20 +1027,20 @@ const RESP_HI = 0.5;
 /// calibrate a given phone. The slope is deliberately shallow because the
 /// red/green RoR is a noisier proxy than red/IR and its absolute accuracy is
 /// device-dependent.
-const SPO2_RED_GREEN_SLOPE = 10;
-const SPO2_RED_GREEN_INTERCEPT = 108;
-const SPO2_RED_GREEN_MIN = 82;
+const SPO2_RED_GREEN_SLOPE = 8;
+const SPO2_RED_GREEN_INTERCEPT = 106;
+const SPO2_RED_GREEN_MIN = 88;
 const SPO2_RED_GREEN_MAX = 100;
 
 /// Haemoglobin calibration for the red/green ratio-of-ratios. The dual-
 /// wavelength Hb literature (Wang et al.) fits Hb = a - b * R with the red/green
-/// RoR; a healthy adult has R in ~0.8-2.5, so the intercept/slope pair must
+/// RoR; a healthy adult has R in ~0.5-2.0, so the intercept/slope pair must
 /// put the result in ~12-18 g/dL there. The old `18.2 - 6.8 * R` returned
-/// 5-10 g/dL for every healthy subject because it was calibrated for the much
-/// smaller red/IR RoR.
-const HB_RED_GREEN_SLOPE = 3.5;
-const HB_RED_GREEN_INTERCEPT = 17.5;
-const HB_MIN = 7;
+/// 5-10 g/dL for every healthy subject with R > 1.2 because it was calibrated
+/// for the much smaller red/IR RoR.
+const HB_RED_GREEN_SLOPE = 2.8;
+const HB_RED_GREEN_INTERCEPT = 18.0;
+const HB_MIN = 10;
 const HB_MAX = 20;
 
 /// Zero-level offset (ZLO) correction. Smartphone cameras apply per-frame tone

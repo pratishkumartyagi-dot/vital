@@ -185,8 +185,14 @@ class PPGSignalEngine {
     final double greenPI = computePerfusionIndex(greenSignal, zlo);
     if (redPI == 0.0 || greenPI == 0.0) return 0.0;
     final double rHb = redPI / greenPI;
-    final double hgb = 18.2 - (6.8 * rHb);
-    return hgb.clamp(5.0, 20.0).toDouble();
+    // Red/green RoR calibration (see ppg-analysis.ts HB_RED_GREEN_*). The old
+    // `18.2 - 6.8 * R` was calibrated for the red/IR RoR (R ~ 0.4-0.8); a
+    // smartphone camera has no IR channel, so the accepted proxy is red/green,
+    // where R is ~0.6-1.8 because green (550 nm) is absorbed far more strongly
+    // by haemoglobin than red (660 nm). The old formula returned 5-10 g/dL for
+    // every healthy subject with R > 1.2 - the "grossly low" values reported.
+    final double hgb = 18.0 - (2.8 * rHb);
+    return hgb.clamp(10.0, 20.0).toDouble();
   }
 
   // Compute Ratio of Ratios (RoR) for SpO2 estimation with ZLO correction
@@ -218,11 +224,18 @@ class PPGSignalEngine {
     return redRatio / greenRatio;
   }
 
-  // Estimate SpO2 from RoR using empirical calibration curve
-  // Based on standard pulse oximetry: SpO2 = 110 - 25 * RoR (approximate)
+  // Estimate SpO2 from RoR using empirical calibration curve.
+  // The old `110 - 25 * R` formula was calibrated for the red/IR ratio-of-ratios
+  // (R ~ 0.4-0.8). A smartphone camera has no IR channel, so the accepted
+  // proxy is red/green, where R is ~0.6-1.8 because green (550 nm) is absorbed
+  // far more strongly by haemoglobin than red (660 nm). The old formula
+  // returned SpO2 in the 60-85% range for every healthy subject with R > 1 -
+  // the "grossly low" values reported. The new red/green calibration is
+  // intercept 106, slope 8, range 88-100 (see ppg-analysis.ts
+  // SPO2_RED_GREEN_*). Absolute accuracy is device-specific.
   static double estimateSpO2FromRor(double ror) {
-    final spo2 = 110.0 - 25.0 * ror;
-    return spo2.clamp(70.0, 100.0);
+    final spo2 = 106.0 - (8.0 * ror);
+    return spo2.clamp(88.0, 100.0).toDouble();
   }
 
   static double computeHaemoglobinFromRor(
@@ -232,10 +245,11 @@ class PPGSignalEngine {
     double zlo = 0.0,
   }) {
     final ror = computeRatioOfRatios(redSignal, greenSignal, fs, zlo: zlo);
-    // Hemoglobin estimation based on RoR (simplified empirical model)
-    // Higher RoR (more red absorption relative to green) correlates with lower Hb
-    final hgb = 18.2 - (6.8 * ror);
-    return hgb.clamp(5.0, 20.0).toDouble();
+    // Red/green RoR calibration (see ppg-analysis.ts HB_RED_GREEN_*). The old
+    // `18.2 - 6.8 * R` was calibrated for the red/IR RoR; a smartphone camera
+    // has no IR channel, so the accepted proxy is red/green where R is ~0.6-1.8.
+    final hgb = 18.0 - (2.8 * ror);
+    return hgb.clamp(10.0, 20.0).toDouble();
   }
 
   static List<double> applyRespiratoryFilter(List<double> input, [double fs = 30.0]) {

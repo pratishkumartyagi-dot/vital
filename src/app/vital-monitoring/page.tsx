@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, selectBestPpgChannel } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, selectBestPpgChannel, estimateSpo2RedGreen, estimateHbRedGreen, resolveZlo } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -440,10 +440,17 @@ export default function VitalMonitoringPage() {
           cameraMode,
           ageYears: patient ? parseInt(patient.age, 10) || null : null,
           sex: patient ? (patient.sex as "male" | "female") : null,
-          // Respiratory rate comes from baseline wander (0.1-0.5 Hz), which the
-          // POS cardiac pulse has removed. For front camera mode this is the
-          // raw green skin-ROI trace; for rear/demo it is the same as analysisSource.
-          respSource: cameraMode === "front" ? greenWin : analysisSource,
+          // Respiratory rate is extracted from baseline wander (0.05-0.5 Hz),
+          // which is BELOW the cardiac band. For rear/demo mode analysisSource
+          // is the 0.5-3.5 Hz bandpassed cardiac pulse, so passing it here
+          // removed the respiratory band entirely and the estimator returned
+          // ~0.0 for every rear-camera measurement. The raw green skin-ROI
+          // trace (and the synthetic buffer in demo mode) carry the full
+          // respiratory modulation and are used instead. For the front camera
+          // the raw green trace is used directly too — the POS chroma pulse is
+          // detrended but still carries the respiratory amplitude modulation.
+          respSource:
+            greenWin.length >= Math.floor(fs * 5) ? greenWin : analysisSource,
         }
       );
       const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
@@ -466,34 +473,38 @@ export default function VitalMonitoringPage() {
         const greenFiltered = butterworthBandpass(greenWin, 0.5, 3.5, fs, true);
         const blueFiltered = butterworthBandpass(blueWin, 0.5, 3.5, fs, true);
 
-        const getAcDc = (raw: number[], filtered: number[]) => {
-          const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
-          let sq = 0;
-          for (const v of filtered) sq += v * v;
-          const ac = Math.sqrt(sq / filtered.length);
-          return { ac, dc };
-        };
+        // ZLO (zero-level offset) correction: smartphone sensor black level /
+        // tone-mapped DC sits above the true zero, biasing every AC/DC ratio.
+        // The calibration database carries a per-model ZLO; the browser uses
+        // the default when the device model is unknown.
+        const zlo = resolveZlo(null);
 
-        const { ac: acR, dc: dcR } = getAcDc(redWin, redFiltered);
-        const { ac: acG, dc: dcG } = getAcDc(greenWin, greenFiltered);
-        const { ac: acB, dc: dcB } = getAcDc(blueWin, blueFiltered);
-
-        const redRatio = dcR > 0 ? acR / dcR : 0;
-        const greenRatio = dcG > 0 ? acG / dcG : 0;
-        const blueRatio = dcB > 0 ? acB / dcB : 0;
-
-        // Ratio-of-ratios on red/green. Green is the highest-SNR camera channel
+        // Red/green ratio-of-ratios. Green is the highest-SNR camera channel
         // and a red/green absorption ratio is the accepted contact-camera proxy
-        // for the red/IR ratio (the textbook SpO2 = A - B*RoR calibration is
-        // applied). Absolute accuracy is device-specific - the offset slider
-        // exists so the validation dashboard can calibrate a given phone.
-        if (redRatio > 0 && greenRatio > 0) {
-          const R = redRatio / greenRatio;
-          spo2Val = Math.min(100, Math.max(88, 110 - 25 * R + spo2Offset));
-          hbVal = Math.min(20, Math.max(5, 18.2 - 6.8 * R));
-        } else if (redRatio > 0 && blueRatio > 0) {
-          const R = redRatio / blueRatio;
-          spo2Val = Math.min(100, Math.max(88, 110 - 25 * R + spo2Offset));
+        // for the red/IR ratio. The calibration constants in ppg-analysis.ts are
+        // linearised for the red/green RoR (which is ~0.8-2.5, not the ~0.4-0.8
+        // of red/IR), so the old `110 - 25 * R` formula returned SpO2 in the
+        // 60-85% range for every healthy subject. Absolute accuracy is
+        // device-specific — the offset slider exists so the validation
+        // dashboard can calibrate a given phone.
+        spo2Val = estimateSpo2RedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo, spo2Offset);
+        hbVal = estimateHbRedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo);
+
+        // Fallback: red/blue ratio-of-ratios (used only when green is
+        // saturated or absent — rare under torch, but keep the branch).
+        if (spo2Val === null && redWin.length > 0 && blueWin.length > 0) {
+          const dcR = redWin.reduce((a, b) => a + b, 0) / redWin.length - zlo;
+          const dcB = blueWin.reduce((a, b) => a + b, 0) / blueWin.length - zlo;
+          if (dcR > 0 && dcB > 0) {
+            let sq = 0;
+            for (const v of redFiltered) sq += v * v;
+            const acR = Math.sqrt(sq / redFiltered.length);
+            sq = 0;
+            for (const v of blueFiltered) sq += v * v;
+            const acB = Math.sqrt(sq / blueFiltered.length);
+            const R = (acR / dcR) / (acB / dcB);
+            spo2Val = Math.min(100, Math.max(88, 110 - 25 * R + spo2Offset));
+          }
         }
       }
 

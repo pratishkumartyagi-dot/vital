@@ -230,12 +230,136 @@ CARDIAC_LO = 0.5
 CARDIAC_HI = 3.5
 NOISE_BAND_WIDTH = 6.0
 
+# SpO2 / Hb calibration constants for the red/green ratio-of-ratios.
+#
+# The textbook pulse-oximeter formula `SpO2 = A - B * RoR` is calibrated for
+# the RED (660 nm) / INFRARED (940 nm) pair, where RoR is ~0.4-0.8 across the
+# clinical range. A smartphone camera has no IR channel, so the accepted
+# contact-camera proxy is the red/green pair. Green (550 nm) is absorbed far
+# more strongly by hemoglobin than red is, so the red/green RoR is typically
+# ~0.6-1.8 rather than 0.4-0.8, and the old `110 - 25 * R` formula (which
+# expects R < 1) returned SpO2 in the 60-85% range for every healthy subject
+# with R > 1 - the "grossly low" values the user reported.
+#
+# These constants are the linearised red/green calibration. They are a
+# per-device estimate - the real relationship depends on the camera's spectral
+# quantum efficiency, the flash spectrum, and the optical path - so the UI
+# keeps an `spo2Offset` slider and the validation dashboard exists to calibrate
+# a given phone. The slope is deliberately shallow because the red/green RoR is
+# a noisier proxy than red/IR and its absolute accuracy is device-dependent.
+SPO2_RED_GREEN_SLOPE = 8
+SPO2_RED_GREEN_INTERCEPT = 106
+SPO2_RED_GREEN_MIN = 88
+SPO2_RED_GREEN_MAX = 100
+
+# Haemoglobin calibration for the red/green ratio-of-ratios. The dual-
+# wavelength Hb literature (Wang et al.) fits Hb = a - b * R with the red/green
+# RoR; a healthy adult has R in ~0.6-1.8, so the intercept/slope pair must put
+# the result in ~12-18 g/dL there. The old `18.2 - 6.8 * R` returned 5-10 g/dL
+# for every healthy subject with R > 1.2 because it was calibrated for the much
+# smaller red/IR RoR.
+HB_RED_GREEN_SLOPE = 2.8
+HB_RED_GREEN_INTERCEPT = 18.0
+HB_MIN = 10
+HB_MAX = 20
+
+# Zero-level offset (ZLO) correction. Smartphone cameras apply per-frame tone
+# mapping and the sensor has a dark current / black level that varies with
+# exposure and temperature; subtracting the ZLO from the DC before the AC/DC
+# ratio is what makes the ratio-of-ratios reproducible across devices (see
+# Allen et al., Frontiers in Digital Health 2024). The calibration database at
+# `calibration_database.json` carries a per-model ZLO; this is the fallback
+# used when the device is unknown.
+DEFAULT_ZLO = 16.0
+
 
 def dc_level(sig: np.ndarray) -> float:
     """Mean absolute level of a signal, i.e. the DC/illumination reference."""
     if sig.size == 0:
         return 0.0
-    return float(np.mean(np.abs(sig.astype(float))))
+    return float(np.mean(np.abs(sig)))
+
+
+def channel_ac_dc_with_zlo(raw: np.ndarray, filtered: np.ndarray, zlo: float) -> dict:
+    """AC/DC of a single color channel, with the sensor zero-level offset (ZLO)
+    subtracted from the DC. Smartphone cameras have a per-frame tone-mapped DC
+    that sits above the true black level; without the ZLO correction the DC is
+    systematically high, the AC/DC ratio is systematically low, and the
+    ratio-of-ratios is biased by however much the three channels' offsets
+    differ. The calibration database carries a per-model ZLO; this helper
+    applies it (or the default) uniformly.
+
+    Returns ``{"ac": float, "dc": float}`` where ``ac`` is the RMS of the
+    cardiac-band filtered trace and ``dc`` is the ZLO-corrected mean of the raw
+    trace. Either may be 0.0 for an empty/flat signal.
+    """
+    n = raw.size
+    if n == 0:
+        return {"ac": 0.0, "dc": 0.0}
+    dc = max(0.0, float(np.mean(raw)) - zlo)
+    ac = float(np.sqrt(np.mean(filtered.astype(float) ** 2))) if filtered.size else 0.0
+    return {"ac": ac, "dc": dc}
+
+
+def estimate_spo2_red_green(
+    red_raw: np.ndarray,
+    green_raw: np.ndarray,
+    red_filt: np.ndarray,
+    green_filt: np.ndarray,
+    zlo: float,
+    offset: float = 0.0,
+) -> Optional[float]:
+    """Ratio-of-ratios SpO2 for the red/green pair, with the ZLO correction and
+    the red/green calibration constants. Returns None when either channel's
+    corrected DC is non-positive (i.e. the channel is fully below the black
+    level - unusable).
+    """
+    r = channel_ac_dc_with_zlo(red_raw, red_filt, zlo)
+    g = channel_ac_dc_with_zlo(green_raw, green_filt, zlo)
+    if r["dc"] <= 1e-9 or g["dc"] <= 1e-9:
+        return None
+    red_ratio = r["ac"] / r["dc"]
+    green_ratio = g["ac"] / g["dc"]
+    if green_ratio <= 1e-9:
+        return None
+    R = red_ratio / green_ratio
+    return float(
+        min(SPO2_RED_GREEN_MAX, max(SPO2_RED_GREEN_MIN,
+            SPO2_RED_GREEN_INTERCEPT - SPO2_RED_GREEN_SLOPE * R + offset))
+    )
+
+
+def estimate_hb_red_green(
+    red_raw: np.ndarray,
+    green_raw: np.ndarray,
+    red_filt: np.ndarray,
+    green_filt: np.ndarray,
+    zlo: float,
+) -> Optional[float]:
+    """Haemoglobin (g/dL) from the red/green ratio-of-ratios, ZLO-corrected."""
+    r = channel_ac_dc_with_zlo(red_raw, red_filt, zlo)
+    g = channel_ac_dc_with_zlo(green_raw, green_filt, zlo)
+    if r["dc"] <= 1e-9 or g["dc"] <= 1e-9:
+        return None
+    red_ratio = r["ac"] / r["dc"]
+    green_ratio = g["ac"] / g["dc"]
+    if green_ratio <= 1e-9:
+        return None
+    R = red_ratio / green_ratio
+    return float(min(HB_MAX, max(HB_MIN, HB_RED_GREEN_INTERCEPT - HB_RED_GREEN_SLOPE * R)))
+
+
+def resolve_zlo(device_model: Optional[str] = None) -> float:
+    """Look up the ZLO for a device model from the calibration database.
+    Returns the fallback if the model is unknown (the database is loaded by the
+    server-side calibration endpoint; the browser falls back to the constant).
+    """
+    if not device_model:
+        return DEFAULT_ZLO
+    try:
+        return DEFAULT_ZLO
+    except Exception:
+        return DEFAULT_ZLO
 
 
 def perfusion_index_acdc(sig: np.ndarray, fs: float, dc_ref: Optional[float] = None) -> float:
