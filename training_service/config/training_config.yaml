@@ -1,0 +1,67 @@
+# Training Service Configuration
+service:
+  host: "0.0.0.0"
+  port: 8000
+  debug: true
+
+data:
+  raw_signals_dir: "./data/raw_signals"
+  processed_dir: "./data/processed"
+  models_dir: "./models"
+  exports_dir: "./exports"
+
+training:
+  # Model architecture: "bpnet", "physformer", "rhythmformer", "pos"
+  default_model: "bpnet"
+  
+  # Training hyperparameters
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 100
+  early_stopping_patience: 10
+  weight_decay: 1e-4
+  
+  # Data splits
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  
+  # Signal processing
+  sampling_rate: 30
+  window_size_seconds: 10
+  window_overlap: 0.5
+  bandpass_low: 0.5
+  bandpass_high: 4.0
+  
+  # Augmentation
+  augment_probability: 0.5
+  noise_std: 0.01
+  time_warp_sigma: 0.1
+
+models:
+  bpnet:
+    input_channels: 3  # RGB
+    hidden_dim: 64
+    num_layers: 4
+    kernel_size: 3
+    dropout: 0.2
+    num_classes: 1  # Regression: HR, SpO2, Hb
+  
+  physformer:
+    input_channels: 3
+    embed_dim: 128
+    num_heads: 8
+    num_layers: 6
+    patch_size: 16
+    dropout: 0.1
+
+export:
+  tflite_optimization: "DEFAULT"  # DEFAULT, FLOAT16, INT8
+  quantize: false
+  representative_dataset_size: 100
+
+logging:
+  level: "INFO"
+  tensorboard_dir: "./logs/tensorboard"
+  wandb_project: "ppg-vital-training"
+  wandb_entity: null

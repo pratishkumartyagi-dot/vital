@@ -5,6 +5,7 @@ import 'ppg_signal_engine.dart';
 import 'native_hardware_bridge.dart';
 import 'dart:math' as math;
 import 'dart:async';
+import 'dart:convert';
 
 enum TrackingState { baseline, profiling, complete, rejected }
 enum CameraMode { front, rear }
@@ -524,6 +525,60 @@ class VitalSignController extends ChangeNotifier {
     
     return _waveformBuffer.map((value) => 
         (value - minVal) / (maxVal - minVal)).toList();
+  }
+
+  /// Export raw PPG signals and metadata for training
+  /// Returns a Map that can be JSON-encoded
+  Map<String, dynamic> exportRawSignals({
+    Map<String, dynamic>? groundTruth,
+    String? sessionId,
+    String? patientId,
+  }) {
+    return {
+      'metadata': {
+        'timestamp': DateTime.now().toIso8601String(),
+        'sessionId': sessionId ?? 'session_${DateTime.now().millisecondsSinceEpoch}',
+        'patientId': patientId,
+        'cameraMode': _cameraMode.name,
+        'samplingRateHz': 30,
+        'durationSeconds': _liveGreenBuffer.length / 30.0,
+        'appVersion': '1.0.0',
+      },
+      'signals': {
+        'red': List<double>.from(_liveRedBuffer),
+        'green': List<double>.from(_liveGreenBuffer),
+        'blue': List<double>.from(_liveBlueBuffer),
+      },
+      'vitals': {
+        'heartRate': _heartRate,
+        'spo2': _spo2Level,
+        'hemoglobin': _hbLevel,
+        'respiratoryRate': _respRate,
+        'signalQuality': signalQuality,
+      },
+      'groundTruth': groundTruth ?? {},
+      'quality': {
+        'perfusionIndex': PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer),
+        'redPI': PPGSignalEngine.computePerfusionIndex(_liveRedBuffer),
+        'bluePI': PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer),
+        'bufferLength': _liveGreenBuffer.length,
+        'state': _currentState.name,
+      },
+    };
+  }
+
+  /// Export raw signals as JSON string
+  String exportRawSignalsJson({
+    Map<String, dynamic>? groundTruth,
+    String? sessionId,
+    String? patientId,
+  }) {
+    final data = exportRawSignals(
+      groundTruth: groundTruth,
+      sessionId: sessionId,
+      patientId: patientId,
+    );
+    return const JsonEncoder.withIndent('  ').convert(data);
   }
 
   @override

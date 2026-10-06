@@ -1,12 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'native_hardware_bridge.dart';
-import 'vital_sign_controller.dart';
+import 'vital_sign_controller.dart'
 import 'waveform_chart.dart';
 import 'package:provider/provider.dart';
 import 'ml_inference.dart';
 import 'feature_extractor.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 late List<CameraDescription> _cameras;
 
@@ -490,6 +493,53 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Exported ${_validationData.length} validation points (check console)')),
     );
+  }
+
+  Future<void> _exportRawSignals(VitalSignController controller) async {
+    try {
+      // Include ground truth if available
+      final groundTruth = _groundTruth?.isNotEmpty == true ? _groundTruth : null;
+      
+      // Get patient ID from validation data if available
+      final patientId = _validationData.isNotEmpty ? 'patient_${_validationData.first['timestamp']?.toString().split('T').first}' : null;
+      
+      // Export raw signals as JSON
+      final jsonString = controller.exportRawSignalsJson(
+        groundTruth: groundTruth,
+        sessionId: 'session_${DateTime.now().millisecondsSinceEpoch}',
+        patientId: patientId,
+      );
+      
+      // Save to file
+      final directory = await getApplicationDocumentsDirectory();
+      final fileName = 'ppg_signals_${DateTime.now().toIso8601String().replaceAll(':', '-')}.json';
+      final file = File('${directory.path}/$fileName');
+      await file.writeAsString(jsonString);
+      
+      debugPrint('Exported raw signals to: ${file.path}');
+      
+      // Share the file
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        text: 'PPG Raw Signals Export - ${controller.cameraMode.name} camera',
+        subject: 'PPG Training Data Export',
+      );
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Exported raw signals (${(jsonString.length / 1024).toStringAsFixed(1)} KB)'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Export raw signals failed: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Export failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   void _toggleInfoOverlay() {
@@ -985,10 +1035,16 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
               if (_measurementMode == MeasurementMode.validation)
                 _controlButton(
                   icon: Icons.download,
-                  label: 'Export',
+                  label: 'Export Val.',
                   color: Colors.green,
                   onPressed: _exportValidationData,
                 ),
+              _controlButton(
+                icon: Icons.save_alt,
+                label: 'Export Signals',
+                color: Colors.purple,
+                onPressed: () => _exportRawSignals(controller),
+              ),
             ],
           ),
           const SizedBox(height: 8),
