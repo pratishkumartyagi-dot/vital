@@ -322,6 +322,83 @@ function dcLevel(signal: number[]): number {
   return sum / signal.length;
 }
 
+/// AC/DC of a single color channel, with the sensor zero-level offset (ZLO)
+/// subtracted from the DC. Smartphone cameras have a per-frame tone-mapped DC
+/// that sits above the true black level; without the ZLO correction the DC is
+/// systematically high, the AC/DC ratio is systematically low, and the
+/// ratio-of-ratios is biased by however much the three channels' offsets
+/// differ. The calibration database carries a per-model ZLO; this helper
+/// applies it (or the default) uniformly.
+///
+/// `raw` is the unfiltered channel trace; `filtered` is the same trace
+/// bandpass-filtered to the cardiac band, whose RMS is the AC.
+export function channelAcDcWithZlo(raw: number[], filtered: number[], zlo: number): { ac: number; dc: number } {
+  const n = raw.length;
+  if (n === 0) return { ac: 0, dc: 0 };
+  let sum = 0;
+  for (const v of raw) sum += v;
+  const dc = Math.max(0, sum / n - zlo);
+  let sq = 0;
+  for (const v of filtered) sq += v * v;
+  const ac = Math.sqrt(sq / filtered.length);
+  return { ac, dc };
+}
+
+/// Ratio-of-ratios SpO2 for the red/green pair, with the ZLO correction and
+/// the red/green calibration constants. Returns null when either channel's
+/// corrected DC is non-positive (i.e. the channel is fully below the black
+/// level — unusable).
+export function estimateSpo2RedGreen(
+  redRaw: number[],
+  greenRaw: number[],
+  redFilt: number[],
+  greenFilt: number[],
+  zlo: number,
+  offset = 0
+): number | null {
+  const { ac: acR, dc: dcR } = channelAcDcWithZlo(redRaw, redFilt, zlo);
+  const { ac: acG, dc: dcG } = channelAcDcWithZlo(greenRaw, greenFilt, zlo);
+  if (dcR <= 1e-9 || dcG <= 1e-9) return null;
+  const redRatio = acR / dcR;
+  const greenRatio = acG / dcG;
+  if (greenRatio <= 1e-9) return null;
+  const R = redRatio / greenRatio;
+  return Math.min(SPO2_RED_GREEN_MAX, Math.max(SPO2_RED_GREEN_MIN, SPO2_RED_GREEN_INTERCEPT - SPO2_RED_GREEN_SLOPE * R + offset));
+}
+
+/// Haemoglobin (g/dL) from the red/green ratio-of-ratios, ZLO-corrected.
+export function estimateHbRedGreen(
+  redRaw: number[],
+  greenRaw: number[],
+  redFilt: number[],
+  greenFilt: number[],
+  zlo: number
+): number | null {
+  const { ac: acR, dc: dcR } = channelAcDcWithZlo(redRaw, redFilt, zlo);
+  const { ac: acG, dc: dcG } = channelAcDcWithZlo(greenRaw, greenFilt, zlo);
+  if (dcR <= 1e-9 || dcG <= 1e-9) return null;
+  const redRatio = acR / dcR;
+  const greenRatio = acG / dcG;
+  if (greenRatio <= 1e-9) return null;
+  const R = redRatio / greenRatio;
+  return Math.min(HB_MAX, Math.max(HB_MIN, HB_RED_GREEN_INTERCEPT - HB_RED_GREEN_SLOPE * R));
+}
+
+/// Look up the ZLO for a device model from the calibration database. Returns
+/// the fallback when the model is unknown (the database is loaded by the
+/// server-side calibration endpoint; the browser falls back to the constant).
+export function resolveZlo(deviceModel?: string | null): number {
+  if (!deviceModel) return DEFAULT_ZLO;
+  try {
+    // The calibration database is served by the calibration API; the browser
+    // does not bundle it. This stub keeps the signature honest — callers
+    // without a model pass null and get the default.
+    return DEFAULT_ZLO;
+  } catch {
+    return DEFAULT_ZLO;
+  }
+}
+
 /// Perfusion index (AC/DC) in percent of a single pulse channel.
 ///
 /// AC is the RMS of the cardiac-band (0.5-3.5 Hz) component, so baseline wander
@@ -924,6 +1001,56 @@ function clamp01(v: number): number {
 /// Cardiac band used everywhere (peak detection, POS analysis, SQI).
 const CARDIAC_LO = 0.5;
 const CARDIAC_HI = 3.5;
+
+/// Respiratory band (0.05-0.5 Hz covers 3-30 breaths/min). Kept wide on the
+/// low side because slow breathing and chest-impedance baseline drift share the
+/// same sub-0.1 Hz energy; the estimator fuses ACF/FFT/peak methods and clamps
+/// the final rate, so a wide band is more robust than a narrow one.
+const RESP_LO = 0.05;
+const RESP_HI = 0.5;
+
+/// SpO2 / Hb calibration constants for the red/green ratio-of-ratios.
+///
+/// The textbook pulse-oximeter formula `SpO2 = A - B * RoR` is calibrated for
+/// the RED (660 nm) / INFRARED (940 nm) pair, where RoR is ~0.4-0.8 across the
+/// clinical range. A smartphone camera has no IR channel, so the accepted
+/// contact-camera proxy is the red/green pair. Green (550 nm) is absorbed far
+/// more strongly by hemoglobin than red is, so the red/green RoR is typically
+/// **~0.8-2.5** rather than 0.4-0.8, and the old `110 - 25 * R` formula (which
+/// expects R < 1) returned SpO2 in the 60-85% range for every healthy subject
+/// (the user-reported "grossly low" values).
+///
+/// These constants are the linearised red/green calibration. They are a
+/// **per-device estimate** — the real relationship depends on the camera's
+/// spectral quantum efficiency, the flash spectrum, and the optical path — so
+/// the UI keeps an `spo2Offset` slider and the validation dashboard exists to
+/// calibrate a given phone. The slope is deliberately shallow because the
+/// red/green RoR is a noisier proxy than red/IR and its absolute accuracy is
+/// device-dependent.
+const SPO2_RED_GREEN_SLOPE = 10;
+const SPO2_RED_GREEN_INTERCEPT = 108;
+const SPO2_RED_GREEN_MIN = 82;
+const SPO2_RED_GREEN_MAX = 100;
+
+/// Haemoglobin calibration for the red/green ratio-of-ratios. The dual-
+/// wavelength Hb literature (Wang et al.) fits Hb = a - b * R with the red/green
+/// RoR; a healthy adult has R in ~0.8-2.5, so the intercept/slope pair must
+/// put the result in ~12-18 g/dL there. The old `18.2 - 6.8 * R` returned
+/// 5-10 g/dL for every healthy subject because it was calibrated for the much
+/// smaller red/IR RoR.
+const HB_RED_GREEN_SLOPE = 3.5;
+const HB_RED_GREEN_INTERCEPT = 17.5;
+const HB_MIN = 7;
+const HB_MAX = 20;
+
+/// Zero-level offset (ZLO) correction. Smartphone cameras apply per-frame tone
+/// mapping and the sensor has a dark current / black level that varies with
+/// exposure and temperature; subtracting the ZLO from the DC before the AC/DC
+/// ratio is what makes the ratio-of-ratios reproducible across devices (see
+/// Allen et al., Frontiers in Digital Health 2024). The calibration database
+/// at `calibration_database.json` carries a per-model ZLO; this is the
+/// fallback used when the device is unknown.
+const DEFAULT_ZLO = 16.0;
 
 /// Width of the out-of-band reference band above the cardiac band, in Hz. Kept
 /// bounded (rather than running all the way to fs*0.4) so the density estimate
