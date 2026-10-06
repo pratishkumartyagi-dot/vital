@@ -7,7 +7,8 @@ import kotlin.math.PI
 
 class PpgSignalProcessor(
     private val sampleRateHz: Double = 30.0,
-    private val windowSizeSeconds: Int = 10
+    private val windowSizeSeconds: Int = 10,
+    private val zlo: Double = 0.0
 ) {
     private val maxBufferSize = (sampleRateHz * windowSizeSeconds).toInt()
     private val rawSignalBuffer = ArrayList<Double>()
@@ -21,14 +22,32 @@ class PpgSignalProcessor(
     )
 
     fun addSample(value: Double) {
+        val correctedValue = applyZloCorrection(value)
+        if (rawSignalBuffer.size >= maxBufferSize) {
+            rawSignalBuffer.removeAt(0)
+        }
+        rawSignalBuffer.add(correctedValue)
+    }
+
+    fun addRawSample(value: Double) {
         if (rawSignalBuffer.size >= maxBufferSize) {
             rawSignalBuffer.removeAt(0)
         }
         rawSignalBuffer.add(value)
     }
 
+    private fun applyZloCorrection(rawValue: Double): Double {
+        if (zlo <= 0.0) return rawValue
+        val corrected = rawValue - zlo
+        return if (corrected > 0.0) corrected else 0.0
+    }
+
     fun reset() {
         rawSignalBuffer.clear()
+    }
+
+    fun updateZlo(newZlo: Double): PpgSignalProcessor {
+        return PpgSignalProcessor(sampleRateHz, windowSizeSeconds, newZlo)
     }
 
     fun processWindow(): Double? {
@@ -40,6 +59,11 @@ class PpgSignalProcessor(
         val filtered = applyBandpassFilter(detrended)
 
         return calculateHeartRate(filtered)
+    }
+
+    fun processWindowRaw(): DoubleArray? {
+        if (rawSignalBuffer.size < maxBufferSize) return null
+        return rawSignalBuffer.toDoubleArray()
     }
 
     private fun applyBandpassFilter(input: DoubleArray): DoubleArray {
@@ -55,11 +79,9 @@ class PpgSignalProcessor(
         val lp = lowpassBiquad(high, fs)
         val dc = input.average()
 
-        // Forward pass: highpass (seeded with DC steady-state) then lowpass
         var y = applyBiquad(input, hp, dc, 0.0)
         y = applyBiquad(y, lp, 0.0, 0.0)
 
-        // Zero-phase (filtfilt): reverse and run forward/backward
         y = y.reversed().toDoubleArray()
         y = applyBiquad(y, hp, 0.0, 0.0)
         y = applyBiquad(y, lp, 0.0, 0.0)
@@ -142,5 +164,18 @@ class PpgSignalProcessor(
         val bpm = 60.0 / averageIntervalSeconds
 
         return if (bpm in 45.0..180.0) bpm else null
+    }
+
+    companion object {
+        fun createWithCalibration(
+            sampleRateHz: Double = 30.0,
+            windowSizeSeconds: Int = 10,
+            model: String,
+            manufacturer: String,
+            apiLevel: Int = android.os.Build.VERSION.SDK_INT
+        ): PpgSignalProcessor {
+            val zlo = CameraCalibration.getZloForDevice(model, manufacturer, apiLevel)
+            return PpgSignalProcessor(sampleRateHz, windowSizeSeconds, zlo)
+        }
     }
 }

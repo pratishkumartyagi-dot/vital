@@ -5,6 +5,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.TonemapCurve
 import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -17,7 +18,7 @@ class MainActivity : FlutterActivity() {
 
     private var ppgHandlerThread: android.os.HandlerThread? = null
     private var ppgHandler: android.os.Handler? = null
-    private val ppgProcessor = PpgSignalProcessor()
+    private var ppgProcessor = PpgSignalProcessor()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -29,8 +30,16 @@ class MainActivity : FlutterActivity() {
                     val caps = queryPpgCapabilities(facing)
                     if (caps != null) {
                         val appliedSettings = applyPpgOptimizedSettings(caps["cameraId"] as String, facing)
+                        val calibration = CameraCalibration.getCalibrationInfo(
+                            Build.MODEL, Build.MANUFACTURER, Build.VERSION.SDK_INT
+                        )
+                        // Create PPG processor with calibration
+                        val zlo = calibration["zlo"] as Double
+                        ppgProcessor = PpgSignalProcessor(30.0, 10, zlo)
+                        
                         val response = caps.toMutableMap()
                         response["ppgOptimizedSettings"] = appliedSettings
+                        response["calibration"] = calibration
                         result.success(response)
                     } else {
                         result.error("CAMERA_ERROR", "Could not query camera capabilities for facing: $facing", null)
@@ -168,6 +177,9 @@ class MainActivity : FlutterActivity() {
 
         val shouldDisableFlash = facing == CameraCharacteristics.LENS_FACING_FRONT
 
+        val tonemapCurve = createLinearTonemapCurve()
+        val supportsTonemapCurve = characteristics.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) != null
+
         return mapOf(
             "targetExposureNs" to targetExposureNs,
             "targetIso" to targetIsoVal,
@@ -180,8 +192,24 @@ class MainActivity : FlutterActivity() {
             "shouldLockAf" to true,
             "shouldDisableFlash" to shouldDisableFlash,
             "aeCompMin" to aeCompMin,
-            "aeCompMax" to aeCompMax
+            "aeCompMax" to aeCompMax,
+            "tonemapMode" to CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE,
+            "tonemapCurveRed" to tonemapCurve,
+            "tonemapCurveGreen" to tonemapCurve,
+            "tonemapCurveBlue" to tonemapCurve,
+            "supportsTonemapCurve" to supportsTonemapCurve,
+            "colorCorrectionMode" to CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX,
+            "colorCorrectionGainsRed" to 2.0f,
+            "colorCorrectionGainsGreenEven" to 1.0f,
+            "colorCorrectionGainsGreenOdd" to 1.0f,
+            "colorCorrectionGainsBlue" to 2.0f,
+            "colorCorrectionTransform" to intArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 1)
         )
+    }
+
+    private fun createLinearTonemapCurve(): TonemapCurve {
+        val points = floatArrayOf(0f, 0f, 1f, 1f)
+        return TonemapCurve(points, points, points)
     }
 
     override fun onResume() {

@@ -1,5 +1,37 @@
 import 'dart:math' as math;
 
+class CalibrationProfile {
+  final String model;
+  final String manufacturer;
+  final double zlo;
+  final bool matched;
+
+  CalibrationProfile({
+    required this.model,
+    required this.manufacturer,
+    required this.zlo,
+    required this.matched,
+  });
+
+  factory CalibrationProfile.fromMap(Map<String, dynamic> map) {
+    return CalibrationProfile(
+      model: map['model']?.toString() ?? '',
+      manufacturer: map['manufacturer']?.toString() ?? '',
+      zlo: (map['zlo'] as num?)?.toDouble() ?? 16.0,
+      matched: map['matched'] as bool? ?? false,
+    );
+  }
+
+  static CalibrationProfile defaultProfile() {
+    return CalibrationProfile(
+      model: '',
+      manufacturer: '',
+      zlo: 16.0,
+      matched: false,
+    );
+  }
+}
+
 class PPGSignalEngine {
   static const double cardiacLo = 0.5;
   static const double cardiacHi = 3.5;
@@ -95,21 +127,32 @@ class PPGSignalEngine {
     return out;
   }
 
-  static double computeHaemoglobin(List<double> redSignal, List<double> greenSignal) {
-    final double redPI = computePerfusionIndex(redSignal);
-    final double greenPI = computePerfusionIndex(greenSignal);
-    if (redPI == 0.0 || greenPI == 0.0) return 0.0;
-    final double rHb = redPI / greenPI;
-    final double hgb = 18.2 - (6.8 * rHb);
-    return hgb.clamp(5.0, 20.0).toDouble();
+  // ZLO (Zero Light Offset) Correction
+  // Based on: Xuan et al., "A calibration method for smartphone camera photoplethysmography"
+  // Frontiers in Digital Health, 2023
+  static double applyZloCorrection(double rawPixelValue, double zlo) {
+    if (zlo <= 0.0) return rawPixelValue;
+    final corrected = rawPixelValue - zlo;
+    return corrected > 0.0 ? corrected : 0.0;
   }
 
-  static double computePerfusionIndex(List<double> rawSignal) {
+  static List<double> applyZloCorrectionToSignal(List<double> signal, double zlo) {
+    if (zlo <= 0.0) return List<double>.from(signal);
+    return signal.map((v) => applyZloCorrection(v, zlo)).toList();
+  }
+
+  static double computeZloCorrectedDc(List<double> rawSignal, double zlo) {
+    final correctedSignal = applyZloCorrectionToSignal(rawSignal, zlo);
+    if (correctedSignal.isEmpty) return 0.0;
+    return correctedSignal.reduce((a, b) => a + b) / correctedSignal.length;
+  }
+
+  static double computePerfusionIndex(List<double> rawSignal, [double zlo = 0.0]) {
     if (rawSignal.length < 10) return 0.0;
 
     final filtered = applyBandpassFilter(rawSignal);
     
-    const dc = rawSignal.reduce((a, b) => a + b) / rawSignal.length;
+    final dc = computeZloCorrectedDc(rawSignal, zlo);
     if (dc <= 1e-9) return 0.0;
 
     double sq = 0.0;
@@ -121,20 +164,78 @@ class PPGSignalEngine {
     return (ac / dc) * 100.0;
   }
 
-  static double perfusionIndexACDC(List<double> signal, double fs, [double? dcRef]) {
+  static double perfusionIndexACDC(List<double> signal, double fs, [double? dcRef, double zlo = 0.0]) {
     if (signal.length < 10) return 0.0;
-    final dc = dcRef != null && dcRef > 1e-9 ? dcRef : dcLevel(signal);
+    final dc = dcRef != null && dcRef > 1e-9 ? dcRef : (zlo > 0 ? computeZloCorrectedDc(signal, zlo) : dcLevel(signal));
     if (dc <= 1e-9) return 0.0;
     final ac = rms(applyBandpassFilterCustom(signal, cardiacLo, cardiacHi, fs));
     return (ac / dc) * 100.0;
   }
 
-  static double filteredPerfusionIndex(List<double> signal, double fs) {
+  static double filteredPerfusionIndex(List<double> signal, double fs, [double zlo = 0.0]) {
     if (signal.length < fs * 2) return 0.0;
     final filtered = applyBandpassFilterCustom(signal, cardiacLo, cardiacHi, fs);
-    final dc = signal.reduce((a, b) => a + b, 0) / signal.length;
+    final dc = zlo > 0 ? computeZloCorrectedDc(signal, zlo) : (signal.reduce((a, b) => a + b, 0) / signal.length);
     if (dc <= 1e-9) return 0.0;
     return (rms(filtered) / dc) * 100.0;
+  }
+
+  static double computeHaemoglobin(List<double> redSignal, List<double> greenSignal, [double zlo = 0.0]) {
+    final double redPI = computePerfusionIndex(redSignal, zlo);
+    final double greenPI = computePerfusionIndex(greenSignal, zlo);
+    if (redPI == 0.0 || greenPI == 0.0) return 0.0;
+    final double rHb = redPI / greenPI;
+    final double hgb = 18.2 - (6.8 * rHb);
+    return hgb.clamp(5.0, 20.0).toDouble();
+  }
+
+  // Compute Ratio of Ratios (RoR) for SpO2 estimation with ZLO correction
+  // RoR = (AC_red / DC_red) / (AC_green / DC_green)
+  static double computeRatioOfRatios(
+    List<double> redSignal,
+    List<double> greenSignal,
+    double fs, {
+    double zlo = 0.0,
+  }) {
+    if (redSignal.length < fs * 2 || greenSignal.length < fs * 2) return 1.0;
+    
+    final redFiltered = applyBandpassFilterCustom(redSignal, cardiacLo, cardiacHi, fs);
+    final greenFiltered = applyBandpassFilterCustom(greenSignal, cardiacLo, cardiacHi, fs);
+    
+    final redDc = zlo > 0 ? computeZloCorrectedDc(redSignal, zlo) : dcLevel(redSignal);
+    final greenDc = zlo > 0 ? computeZloCorrectedDc(greenSignal, zlo) : dcLevel(greenSignal);
+    
+    if (redDc <= 1e-9 || greenDc <= 1e-9) return 1.0;
+    
+    final redAc = rms(redFiltered);
+    final greenAc = rms(greenFiltered);
+    
+    if (greenAc <= 1e-9) return 1.0;
+    
+    final redRatio = redAc / redDc;
+    final greenRatio = greenAc / greenDc;
+    
+    return redRatio / greenRatio;
+  }
+
+  // Estimate SpO2 from RoR using empirical calibration curve
+  // Based on standard pulse oximetry: SpO2 = 110 - 25 * RoR (approximate)
+  static double estimateSpO2FromRor(double ror) {
+    final spo2 = 110.0 - 25.0 * ror;
+    return spo2.clamp(70.0, 100.0);
+  }
+
+  static double computeHaemoglobinFromRor(
+    List<double> redSignal,
+    List<double> greenSignal,
+    double fs, {
+    double zlo = 0.0,
+  }) {
+    final ror = computeRatioOfRatios(redSignal, greenSignal, fs, zlo: zlo);
+    // Hemoglobin estimation based on RoR (simplified empirical model)
+    // Higher RoR (more red absorption relative to green) correlates with lower Hb
+    final hgb = 18.2 - (6.8 * ror);
+    return hgb.clamp(5.0, 20.0).toDouble();
   }
 
   static List<double> applyRespiratoryFilter(List<double> input, [double fs = 30.0]) {
