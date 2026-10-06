@@ -312,7 +312,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
 
       debugPrint('Applying PPG optimized settings: lockAE=$shouldLockAe, lockAWB=$shouldLockAwb, lockAF=$shouldLockAf, disableFlash=$shouldDisableFlash, fixedFocus=$hasFixedFocus, focusDistance=$lensFocusDistance');
 
-      // Disable flash for PPG (both cameras)
+      // Disable flash for front camera (rPPG) only; rear camera uses torch
       if (shouldDisableFlash) {
         await _controller!.setFlashMode(FlashMode.off);
         debugPrint('Adaptive PPG: flash disabled');

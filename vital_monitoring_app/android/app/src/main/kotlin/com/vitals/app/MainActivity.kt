@@ -166,6 +166,8 @@ class MainActivity : FlutterActivity() {
                 ?.contains(CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE) ?: false
         } else false
 
+        val shouldDisableFlash = facing == CameraCharacteristics.LENS_FACING_FRONT
+
         return mapOf(
             "targetExposureNs" to targetExposureNs,
             "targetIso" to targetIsoVal,
@@ -176,7 +178,7 @@ class MainActivity : FlutterActivity() {
             "shouldLockAe" to true,
             "shouldLockAwb" to true,
             "shouldLockAf" to true,
-            "shouldDisableFlash" to true,
+            "shouldDisableFlash" to shouldDisableFlash,
             "aeCompMin" to aeCompMin,
             "aeCompMax" to aeCompMax
         )
