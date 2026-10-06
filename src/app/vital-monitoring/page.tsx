@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, combinePpgChannels } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, selectBestPpgChannel } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -422,12 +422,13 @@ export default function VitalMonitoringPage() {
         const pos = posPulse(redWin, greenWin, blueWin, Math.max(16, Math.round(fs)));
         analysisSource = pos.length >= Math.floor(fs * 5) ? pos : ppgWin;
       } else {
-        // Rear camera: fuse all three color channels for the PPG source.
-        // A fingertip under torch illumination carries pulsatile signal in
-        // every channel; green usually dominates, but red and blue still
-        // contribute measurable AC and improve SNR when fused.
-        const combined = combinePpgChannels(redWin, greenWin, blueWin);
-        analysisSource = combined.length >= Math.floor(fs * 5) ? combined : ppgWin;
+        // Rear camera: pick the single channel (red or green) with the best
+        // spectral SNR in the cardiac band. Green is the default because
+        // hemoglobin absorbs green strongly and flash saturation is rare,
+        // but red can win on thick/dark/cold fingers where green is
+        // attenuated, provided the channel is not clipped by the torch.
+        const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs);
+        analysisSource = selected.length >= Math.floor(fs * 5) ? selected : ppgWin;
       }
       const analysis: VitalAnalysis = analyzeVitals(
         analysisSource,
