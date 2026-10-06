@@ -862,12 +862,12 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     final gtGlucose = _groundTruth?['glucose'];
     final gtResp = _groundTruth?['respRate'];
     
-    // Calculate SpO2 from red/blue ratio if available
-    final spo2 = _estimateSpO2(controller);
-    final bpSys = _estimateBpSys(controller);
-    final bpDia = _estimateBpDia(controller);
-    final glucose = _estimateGlucose(controller);
-    final respRate = _estimateRespRate(controller);
+    // Use the controller's computed values from PPGSignalEngine
+    final spo2 = controller.spo2Level > 0 ? controller.spo2Level : null;
+    final bpSys = controller.bpSys > 0 ? controller.bpSys : null;
+    final bpDia = controller.bpDia > 0 ? controller.bpDia : null;
+    final glucose = controller.glucoseLevel > 0 ? controller.glucoseLevel : null;
+    final respRate = controller.respRate > 0 ? controller.respRate : null;
 
     return Wrap(
       spacing: 8,
@@ -979,31 +979,6 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   double? _extractNumericValue(String value) {
     final match = RegExp(r'([\d.]+)').firstMatch(value);
     return match != null ? double.tryParse(match.group(1)!) : null;
-  }
-
-  double? _estimateSpO2(VitalSignController controller) {
-    // Placeholder - would need access to red/blue channel data
-    return 95 + (DateTime.now().millisecondsSinceEpoch % 5) / 10.0;
-  }
-
-  int? _estimateBpSys(VitalSignController controller) {
-    // Placeholder - ML inference would provide this
-    return 110 + (DateTime.now().millisecondsSinceEpoch % 30);
-  }
-
-  int? _estimateBpDia(VitalSignController controller) {
-    // Placeholder
-    return 70 + (DateTime.now().millisecondsSinceEpoch % 20);
-  }
-
-  int? _estimateGlucose(VitalSignController controller) {
-    // Placeholder
-    return 90 + (DateTime.now().millisecondsSinceEpoch % 40);
-  }
-
-  double? _estimateRespRate(VitalSignController controller) {
-    // Placeholder - from respiratory sinus arrhythmia
-    return 14.0 + (DateTime.now().millisecondsSinceEpoch % 6) / 10.0;
   }
 
   Widget _buildControlsSection(VitalSignController controller) {

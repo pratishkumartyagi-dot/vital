@@ -1,49 +1,67 @@
 // Port of vital_monitoring_app/lib/ppg_signal_engine.dart
-// applyBandpassFilter (SOS) + computePerfusionIndex, to check for correctness
+// applyBandpassFilter (RBJ biquad HP0.5+LP3.5, zero-phase) +
+// computePerfusionIndex (RMS AC / mean DC), to check correctness.
+
+function lowpassBiquad(fc: number, fs: number, q = Math.SQRT1_2) {
+  const w0 = (2 * Math.PI * fc) / fs;
+  const cw = Math.cos(w0), sw = Math.sin(w0);
+  const alpha = sw / (2 * q);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 - cw) / 2 / a0, b1: (1 - cw) / a0, b2: (1 - cw) / 2 / a0,
+    a1: (-2 * cw) / a0, a2: (1 - alpha) / a0,
+  };
+}
+
+function highpassBiquad(fc: number, fs: number, q = Math.SQRT1_2) {
+  const w0 = (2 * Math.PI * fc) / fs;
+  const cw = Math.cos(w0), sw = Math.sin(w0);
+  const alpha = sw / (2 * q);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 + cw) / 2 / a0, b1: -(1 + cw) / a0, b2: (1 + cw) / 2 / a0,
+    a1: (-2 * cw) / a0, a2: (1 - alpha) / a0,
+  };
+}
+
+function applyBiquad(signal: number[], c: any, seedX = 0, seedY = 0): number[] {
+  const out = new Array(signal.length).fill(0);
+  let x1 = seedX, x2 = seedX, y1 = seedY, y2 = seedY;
+  for (let i = 0; i < signal.length; i++) {
+    const y = c.b0 * signal[i] + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+    out[i] = y;
+    x2 = x1; x1 = signal[i];
+    y2 = y1; y1 = y;
+  }
+  return out;
+}
 
 function applyBandpassFilter(input: number[]): number[] {
-  const length = input.length;
-  const sos = [
-    [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916],
-    [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327],
-  ];
-  let stage = input.slice();
-  for (const section of sos) {
-    const [b0, b1, b2, a0, a1, a2] = section;
-    const out = new Array(length).fill(0);
-    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
-    for (let i = 0; i < length; i++) {
-      const x0 = stage[i];
-      const y0 = (b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
-      out[i] = y0;
-      x2 = x1; x1 = x0;
-      y2 = y1; y1 = y0;
-    }
-    stage = out;
+  const fs = 30, low = 0.5, high = 3.5;
+  if (input.length < 10 || fs <= 0 || low <= 0 || high <= low || high >= fs / 2) {
+    return [...input];
   }
-  return stage;
+  const hp = highpassBiquad(low, fs);
+  const lp = lowpassBiquad(high, fs);
+  const dc = input.reduce((a, b) => a + b, 0) / input.length;
+  let y = applyBiquad(input, hp, dc, 0);
+  y = applyBiquad(y, lp, 0, 0);
+  y = [...y].reverse();
+  y = applyBiquad(y, hp, 0, 0);
+  y = applyBiquad(y, lp, 0, 0);
+  y = [...y].reverse();
+  return y;
 }
 
 function computePerfusionIndex(rawSignal: number[]): number {
   if (rawSignal.length < 10) return 0.0;
   const filtered = applyBandpassFilter(rawSignal);
-  const peaks: number[] = [];
-  const troughs: number[] = [];
-  for (let i = 1; i < filtered.length - 1; i++) {
-    if (filtered[i] > filtered[i - 1] && filtered[i] > filtered[i + 1]) peaks.push(i);
-    if (filtered[i] < filtered[i - 1] && filtered[i] < filtered[i + 1]) troughs.push(i);
-  }
-  if (peaks.length === 0 || troughs.length === 0) return 0.0;
-  let totalAc = 0, count = 0;
-  for (const peakIdx of peaks) {
-    const closestTrough = troughs.reduce((a, b) => Math.abs(a - peakIdx) < Math.abs(b - peakIdx) ? a : b);
-    totalAc += Math.abs(filtered[peakIdx] - filtered[closestTrough]);
-    count++;
-  }
-  if (count === 0) return 0.0;
-  const meanAc = totalAc / count;
   const dc = rawSignal.reduce((a, b) => a + b, 0) / rawSignal.length;
-  return dc === 0 ? 0.0 : (meanAc / dc) * 100.0;
+  if (dc <= 1e-9) return 0.0;
+  let sq = 0;
+  for (const v of filtered) sq += v * v;
+  const ac = Math.sqrt(sq / filtered.length);
+  return (ac / dc) * 100.0;
 }
 
 const fs = 30;
@@ -84,3 +102,7 @@ const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
 console.log("\nBandpass gain (RMS in-band / RMS out-of-band):");
 console.log("  1.2 Hz (cardiac) RMS in:", ac(cardiac).toFixed(2), "out:", ac(bpCardiac).toFixed(2), "ratio:", (ac(bpCardiac)/ac(cardiac)).toFixed(2));
 console.log("  0.25 Hz (resp)    RMS in:", ac(respTone).toFixed(2), "out:", ac(bpResp).toFixed(2), "ratio:", (ac(bpResp)/ac(respTone)).toFixed(2));
+
+// Flat-signal rejection (PI should collapse to ~0)
+const flat = new Array(300).fill(110).map(() => 110 + (Math.random() - 0.5) * 0.5);
+console.log("\nFlat signal PI:", computePerfusionIndex(flat).toFixed(3), "% (should be ~0)");

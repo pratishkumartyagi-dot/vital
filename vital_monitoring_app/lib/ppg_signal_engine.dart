@@ -101,7 +101,7 @@ class PPGSignalEngine {
     if (redPI == 0.0 || greenPI == 0.0) return 0.0;
     final double rHb = redPI / greenPI;
     final double hgb = 18.2 - (6.8 * rHb);
-    return hgb.clamp(5.0, 20.0);
+    return hgb.clamp(5.0, 20.0).toDouble();
   }
 
   static double computePerfusionIndex(List<double> rawSignal) {
@@ -219,7 +219,7 @@ class PPGSignalEngine {
       return HeartMetrics(bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: 'unknown', signalQuality: 0);
     }
 
-    final trimmed = ppg.sublist(math.min(fs.toInt(), ppg.length));
+    final trimmed = ppg.sublist(math.min(fs.toInt(), ppg.length).toInt());
     final peaks = detectPeaks(trimmed, fs);
     if (peaks.length < 3) {
       return HeartMetrics(bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: 'unknown', signalQuality: 0);
@@ -273,7 +273,7 @@ class PPGSignalEngine {
     final piScore = clamp01(math.sqrt(pi / 0.5));
 
     final snrResult = spectralSnr(raw, fs);
-    final snrScore = snrResult.snr > 0 ? clamp01((math.log(snrResult.snr) / math.ln10 + 0.3) / 1.2) : 0.0;
+    final snrScore = snrResult.snr > 0 ? clamp01((math.log(snrResult.snr) / math.log(10) + 0.3) / 1.2) : 0.0;
 
     final rrMs = <double>[];
     for (int i = 1; i < peaks.length; i++) {
@@ -283,7 +283,7 @@ class PPGSignalEngine {
     final filteredRr = med > 0 ? rrMs.where((d) => (d - med).abs() / med <= 0.3).toList() : List<double>.from(rrMs);
     final rrMsClean = filteredRr.length >= 2 ? filteredRr : rrMs;
     final cv = rrMsClean.length > 1 ? (stddev(rrMsClean) / mean(rrMsClean)) * 100 : 0.0;
-    final regScore = cv < 10 ? 1.0 : math.max(0.0, 1.0 - (cv - 10) / 30);
+    final regScore = cv < 10 ? 1.0 : math.max(0.0, 1.0 - (cv - 10) / 30).toDouble();
 
     final prominence = cardiacSpectralProminence(raw, fs);
     final pulseGate = clamp01((prominence - 4) / 12);
@@ -297,7 +297,7 @@ class PPGSignalEngine {
     final ps = powerSpectrum(signal, fs);
     if (ps.freqs.isEmpty) return none;
 
-    final noiseHi = math.min((fs / 2) * 0.9, cardiacHi + noiseBandWidth);
+    final noiseHi = math.min((fs / 2) * 0.9, cardiacHi + noiseBandWidth).toDouble();
     double signalPower = 0.0;
     int sigBins = 0;
     double noisePower = 0.0;
@@ -377,10 +377,10 @@ class PPGSignalEngine {
   }
 
   static List<double> posPulse(List<double> red, List<double> green, List<double> blue, [int winLen = 32]) {
-    final n = math.min(red.length, math.min(green.length, blue.length));
+    final n = math.min(red.length, math.min(green.length, blue.length)).toInt();
     if (n < winLen || winLen < 8) return List<double>.empty();
 
-    final hop = math.max(1, (winLen / 2).floor());
+    final hop = math.max(1, (winLen / 2).floor()).toInt();
     final sqrt6 = math.sqrt(6);
     final acc = List<double>.filled(n, 0.0);
     final wsum = List<double>.filled(n, 0.0);
@@ -447,7 +447,7 @@ class PPGSignalEngine {
   }
 
   static List<double> combinePpgChannels(List<double> red, List<double> green, List<double> blue) {
-    final n = math.min(red.length, math.min(green.length, blue.length));
+    final n = math.min(red.length, math.min(green.length, blue.length)).toInt();
     if (n == 0) return green.isNotEmpty ? List<double>.from(green) : (red.isNotEmpty ? List<double>.from(red) : List<double>.from(blue));
 
     final dcR = red.reduce((a, b) => a + b, 0) / n;
@@ -475,8 +475,8 @@ class PPGSignalEngine {
   }
 
   static List<double> selectBestPpgChannel(List<double> red, List<double> green, List<double> blue, double fs) {
-    final n = math.min(red.length, green.length);
-    if (n < (fs * 2).floor()) return green.sublist(0, math.min(n, green.length));
+    final n = math.min(red.length, green.length).toInt();
+    if (n < (fs * 2).floor()) return green.sublist(0, math.min(n, green.length).toInt());
 
     final satThreshold = 250.0;
     final redSatFrac = red.where((v) => v >= satThreshold).length / red.length;
@@ -540,7 +540,7 @@ class PPGSignalEngine {
     final peakAmp = avgCycle[sysIdx];
 
     int notchIdx = sysIdx;
-    final notchSearchEnd = math.min(cycleLen, sysIdx + (fs * 0.5).floor());
+    final notchSearchEnd = math.min(cycleLen, sysIdx + (fs * 0.5).floor()).toInt();
     for (int j = sysIdx + 1; j < notchSearchEnd; j++) {
       if (avgCycle[j] < avgCycle[notchIdx]) notchIdx = j;
     }
@@ -553,7 +553,7 @@ class PPGSignalEngine {
 
     final augmentationIndex = peakAmp > 1e-6 ? avgCycle[diasIdx] / peakAmp : 0.0;
     final stiffnessRatio = peakAmp > 1e-6 ? (peakAmp - dicroticAmp) / peakAmp : 0.0;
-    final riseSpan = math.max(1, sysIdx);
+    final riseSpan = math.max(1, sysIdx).toInt();
     final riseSlope = (avgCycle[sysIdx] - avgCycle[0]) / riseSpan;
 
     final midLevel = (avgCycle[0] + avgCycle[sysIdx]) / 2;
@@ -590,7 +590,7 @@ class PPGSignalEngine {
     }
     final firstDerivMinTime = firstMin > 0 ? firstMin / cycleLen : 0.0;
 
-    final diastolicNotchDuration = math.max(0.0, (diasIdx - notchIdx) / cycleLen);
+    final diastolicNotchDuration = math.max(0.0, (diasIdx - notchIdx) / cycleLen).toDouble();
     final systolicPeakDuration = sysIdx / cycleLen;
 
     double totalArea = 0.0;
@@ -601,7 +601,7 @@ class PPGSignalEngine {
       cumulative.add(totalArea);
     }
     final inflectionIdx = firstMax > 0 ? firstMax : sysIdx;
-    final inflectionAreaRatio = totalArea > 1e-9 ? cumulative[math.min(inflectionIdx, cumulative.length - 1)] / totalArea : 0.0;
+    final inflectionAreaRatio = totalArea > 1e-9 ? cumulative[math.min(inflectionIdx, cumulative.length - 1).toInt()] / totalArea : 0.0;
 
     final pulseInterval = mean(intervals) / fs;
     final rrMs = intervals.map((v) => (v / fs) * 1000).toList();
@@ -685,13 +685,13 @@ class PPGSignalEngine {
         0.08 * (derivMin - 0.5) +
         0.1 * rrCv;
 
-    creatinine = math.min(12.0, math.max(0.4, creatinine));
+    creatinine = math.min(12.0, math.max(0.4, creatinine)).toDouble();
     creatinine = (creatinine * 100).roundToDouble() / 100;
 
     final creatinineClass = creatinine > 1.3 ? 'high' : (creatinine < 0.6 ? 'low' : 'normal');
     final sqNorm = clamp01(signalQuality / 100);
     final beatAdequacy = clamp01(features.beats / 15);
-    final confidence = math.min(isFront ? 0.55 : 0.8, 0.12 + 0.55 * sqNorm + 0.15 * beatAdequacy);
+    final confidence = math.min(isFront ? 0.55 : 0.8, 0.12 + 0.55 * sqNorm + 0.15 * beatAdequacy).toDouble();
 
     final age = ageYears != null && ageYears > 0 ? ageYears : 45;
     final egfr = estimateEgfr(creatinine, age, sex);
@@ -714,13 +714,12 @@ class PPGSignalEngine {
     final k = female ? 0.7 : 0.9;
     final a = female ? -0.241 : -0.302;
     final ratio = creatinineMgDl / k;
-    final egfr =
-        142 *
-        math.pow(math.min(ratio, 1), a) *
-        math.pow(math.max(ratio, 1), -1.2) *
-        math.pow(0.9938, age) *
-        (female ? 1.012 : 1.0);
-    return egfr;
+    final egfr = (142 *
+        math.pow(math.min(ratio, 1), a).toDouble() *
+        math.pow(math.max(ratio, 1), -1.2).toDouble() *
+        math.pow(0.9938, age).toDouble() *
+        (female ? 1.012 : 1.0));
+    return egfr.toDouble();
   }
 
   static String? kdigoStage(double? egfr) {
@@ -804,8 +803,8 @@ class PPGSignalEngine {
     const winSize = 15;
     final result = List<double>.filled(signal.length, 0.0);
     for (int i = 0; i < signal.length; i++) {
-      final start = (i - winSize).clamp(0, signal.length - 1);
-      final end = (i + winSize + 1).clamp(0, signal.length);
+      final start = (i - winSize).clamp(0, signal.length - 1).toInt();
+      final end = (i + winSize + 1).clamp(0, signal.length).toInt();
       double minVal = signal[start];
       double maxVal = signal[start];
       for (int j = start; j < end; j++) {
@@ -815,6 +814,12 @@ class PPGSignalEngine {
       result[i] = (maxVal - minVal) / 2.0;
     }
     return result;
+  }
+
+  /// Public wrapper around the internal two-stage respiratory-rate
+  /// estimator (cardiac-band AM envelope + baseline-wander fusion).
+  static double estimateRespiratoryRate(List<double> signal) {
+    return _estimateRespiratoryRate(signal);
   }
 
   static double _estimateRespiratoryRate(List<double> signal) {
@@ -854,7 +859,7 @@ class PPGSignalEngine {
     }
 
     if (respBpm < 5 || respBpm > 50) return 15.0;
-    return respBpm.clamp(8.0, 35.0);
+    return respBpm.clamp(8.0, 35.0).toDouble();
   }
 
   static double mean(List<double> arr) {
@@ -899,7 +904,7 @@ class PPGSignalEngine {
 
   static double clamp01(double v) {
     if (!v.isFinite) return 0.0;
-    return math.min(1.0, math.max(0.0, v));
+    return math.min(1.0, math.max(0.0, v)).toDouble();
   }
 
   static double normalizeRange(double v, double lo, double hi) {
@@ -990,13 +995,13 @@ class PPGSignalEngine {
 
     final pulsePressure = baseSystolic - baseDiastolic;
     final map = baseDiastolic + pulsePressure / 3;
-    final confidence = math.min(0.7, 0.3 + stiffnessFactor * 0.2 + reflectionFactor * 0.2);
+    final confidence = math.min(0.7, 0.3 + stiffnessFactor * 0.2 + reflectionFactor * 0.2).toDouble();
 
     return BloodPressureMetrics(
-      systolic: math.max(80, math.min(200, baseSystolic)),
-      diastolic: math.max(50, math.min(130, baseDiastolic)),
-      map: math.max(60, math.min(150, map)),
-      pulsePressure: math.max(20, math.min(100, pulsePressure)),
+      systolic: math.max(80, math.min(200, baseSystolic)).toDouble(),
+      diastolic: math.max(50, math.min(130, baseDiastolic)).toDouble(),
+      map: math.max(60, math.min(150, map)).toDouble(),
+      pulsePressure: math.max(20, math.min(100, pulsePressure)).toDouble(),
       confidence: confidence,
     );
   }
@@ -1012,11 +1017,11 @@ class PPGSignalEngine {
     int peakIdx = peakIndices.isNotEmpty ? peakIndices.first : (n ~/ 2);
     if (peakIdx >= n) peakIdx = n - 1;
 
-    final systolicArea = filtered.sublist(0, math.min(peakIdx + 1, n)).fold<double>(0, (a, b) => a + b.abs());
-    final diastolicArea = filtered.sublist(math.min(peakIdx + 1, n)).fold<double>(0, (a, b) => a + b.abs());
+    final systolicArea = filtered.sublist(0, math.min(peakIdx + 1, n).toInt()).fold<double>(0, (a, b) => a + b.abs());
+    final diastolicArea = filtered.sublist(math.min(peakIdx + 1, n).toInt()).fold<double>(0, (a, b) => a + b.abs());
 
     int troughIdx = peakIdx;
-    for (int i = peakIdx + 1; i < math.min(n, peakIdx + (fs / 2).floor()); i++) {
+    for (int i = peakIdx + 1; i < math.min(n, peakIdx + (fs / 2).floor()).toInt(); i++) {
       if (filtered[i] < filtered[troughIdx]) troughIdx = i;
     }
 
@@ -1064,11 +1069,11 @@ class PPGSignalEngine {
       baseGlucose += (cv - 5) * 0.5;
     }
 
-    final piConfidence = math.min((redPI + greenPI + bluePI) / 6, 1.0);
-    final confidence = math.min(0.6, 0.2 + piConfidence * 0.4);
+    final piConfidence = math.min((redPI + greenPI + bluePI) / 6, 1.0).toDouble();
+    final confidence = math.min(0.6, 0.2 + piConfidence * 0.4).toDouble();
 
     return GlucoseMetrics(
-      glucose: math.max(70, math.min(200, baseGlucose.roundToDouble())),
+      glucose: math.max(70, math.min(200, baseGlucose.roundToDouble())).toDouble(),
       confidence: confidence,
     );
   }
