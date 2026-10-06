@@ -7,21 +7,34 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.TonemapCurve
 import android.os.Build
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlin.math.max
 
 class MainActivity : FlutterActivity() {
     private val PPG_CHANNEL = "com.vitals.app/ppg_processor"
     private val CAMERA_CHANNEL = "com.vitals.app/camera_control"
+    private val CALIBRATION_CHANNEL = "com.vitals.app/calibration"
 
     private var ppgHandlerThread: android.os.HandlerThread? = null
     private var ppgHandler: android.os.Handler? = null
     private var ppgProcessor = PpgSignalProcessor()
+    
+    private val calibrationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var remoteCalibrationManager: RemoteCalibrationManager? = null
+    private var currentCalibrationResult: RemoteCalibrationManager.CalibrationResult? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        remoteCalibrationManager = RemoteCalibrationManager(this)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CAMERA_CHANNEL).setMethodCallHandler { call, result ->
             if (call.method == "configureSafePPG") {
@@ -49,6 +62,96 @@ class MainActivity : FlutterActivity() {
                 }
             } else {
                 result.notImplemented()
+            }
+        }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CALIBRATION_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "fetchCalibration" -> {
+                    calibrationScope.launch {
+                        val calibrationResult = remoteCalibrationManager?.fetchAndCacheRemote()
+                        currentCalibrationResult = calibrationResult
+                        if (calibrationResult != null) {
+                            runOnUiThread {
+                                val profile = calibrationResult.profile
+                                val response = mapOf(
+                                    "source" to calibrationResult.source.name,
+                                    "isStale" to calibrationResult.isStale,
+                                    "model" to profile.model,
+                                    "marketingName" to profile.marketingName,
+                                    "manufacturer" to profile.manufacturer,
+                                    "zlo" to profile.zlo,
+                                    "sensorLinearSlope" to profile.sensorLinearSlope,
+                                    "apiLevelMin" to profile.apiLevelMin,
+                                    "apiLevelMax" to profile.apiLevelMax,
+                                    "calibrationVersion" to profile.calibrationVersion
+                                )
+                                result.success(response)
+                            }
+                        } else {
+                            runOnUiThread {
+                                result.error("CALIBRATION_ERROR", "Failed to fetch calibration", null)
+                            }
+                        }
+                    }
+                }
+                "getCurrentCalibration" -> {
+                    val calibrationResult = currentCalibrationResult ?: remoteCalibrationManager?.getCalibration()
+                    if (calibrationResult != null) {
+                        val profile = calibrationResult.profile
+                        val response = mapOf(
+                            "source" to calibrationResult.source.name,
+                            "isStale" to calibrationResult.isStale,
+                            "model" to profile.model,
+                            "marketingName" to profile.marketingName,
+                            "manufacturer" to profile.manufacturer,
+                            "zlo" to profile.zlo,
+                            "sensorLinearSlope" to profile.sensorLinearSlope,
+                            "apiLevelMin" to profile.apiLevelMin,
+                            "apiLevelMax" to profile.apiLevelMax,
+                            "calibrationVersion" to profile.calibrationVersion
+                        )
+                        result.success(response)
+                    } else {
+                        result.error("CALIBRATION_ERROR", "No calibration available", null)
+                    }
+                }
+                "applyZloCorrection" -> {
+                    val value = call.argument<Double>("value")
+                    if (value != null) {
+                        val corrected = remoteCalibrationManager?.applyZloCorrection(value) ?: value
+                        result.success(corrected)
+                    } else {
+                        result.error("INVALID_ARG", "Missing value", null)
+                    }
+                }
+                "forceRefreshCalibration" -> {
+                    calibrationScope.launch {
+                        val calibrationResult = remoteCalibrationManager?.forceRefresh()
+                        currentCalibrationResult = calibrationResult
+                        if (calibrationResult != null) {
+                            runOnUiThread {
+                                val profile = calibrationResult.profile
+                                val response = mapOf(
+                                    "source" to calibrationResult.source.name,
+                                    "isStale" to calibrationResult.isStale,
+                                    "model" to profile.model,
+                                    "marketingName" to profile.marketingName,
+                                    "manufacturer" to profile.manufacturer,
+                                    "zlo" to profile.zlo,
+                                    "sensorLinearSlope" to profile.sensorLinearSlope,
+                                    "calibrationVersion" to profile.calibrationVersion
+                                )
+                                result.success(response)
+                            }
+                        } else {
+                            runOnUiThread {
+                                result.error("CALIBRATION_ERROR", "Failed to refresh calibration", null)
+                            }
+                        }
+                    }
+                }
+                else -> result.notImplemented()
             }
         }
 
@@ -225,5 +328,11 @@ class MainActivity : FlutterActivity() {
         ppgHandlerThread?.quitSafely()
         ppgHandlerThread = null
         ppgHandler = null
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        calibrationScope.cancel()
+        remoteCalibrationManager?.shutdown()
     }
 }

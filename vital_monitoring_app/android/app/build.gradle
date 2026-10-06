@@ -23,6 +23,7 @@ if (flutterVersionName == null) {
 
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
+apply plugin: 'kotlinx-serialization'
 apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
@@ -65,4 +66,17 @@ flutter {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+    
+    // Ktor HTTP Client
+    implementation "io.ktor:ktor-client-core:2.3.8"
+    implementation "io.ktor:ktor-client-okhttp:2.3.8"
+    implementation "io.ktor:ktor-client-content-negotiation:2.3.8"
+    implementation "io.ktor:ktor-client-logging:2.3.8"
+    implementation "io.ktor:ktor-serialization-kotlinx-json:2.3.8"
+    
+    // Kotlinx Serialization
+    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3"
+    
+    // Coroutines
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
 }

@@ -1,0 +1,228 @@
+{
+  "profiles": [
+    {
+      "model": "Pixel 4",
+      "marketingName": "Google Pixel 4",
+      "manufacturer": "Google",
+      "zlo": 22.5,
+      "sensorLinearSlope": 1.02,
+      "apiLevelMin": 29,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "Pixel 7",
+      "marketingName": "Google Pixel 7",
+      "manufacturer": "Google",
+      "zlo": 14.0,
+      "sensorLinearSlope": 1.05,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "Pixel 7 Pro",
+      "marketingName": "Google Pixel 7 Pro",
+      "manufacturer": "Google",
+      "zlo": 14.0,
+      "sensorLinearSlope": 1.05,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "Pixel 7a",
+      "marketingName": "Google Pixel 7a",
+      "manufacturer": "Google",
+      "zlo": 14.0,
+      "sensorLinearSlope": 1.05,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "Pixel 8",
+      "marketingName": "Google Pixel 8",
+      "manufacturer": "Google",
+      "zlo": 14.0,
+      "sensorLinearSlope": 1.05,
+      "apiLevelMin": 34,
+      "apiLevelMax": 36,
+      "last_updated": "2024-10-01",
+      "calibration_version": 4
+    },
+    {
+      "model": "Pixel 8 Pro",
+      "marketingName": "Google Pixel 8 Pro",
+      "manufacturer": "Google",
+      "zlo": 14.0,
+      "sensorLinearSlope": 1.05,
+      "apiLevelMin": 34,
+      "apiLevelMax": 36,
+      "last_updated": "2024-10-01",
+      "calibration_version": 4
+    },
+    {
+      "model": "SM-S901B",
+      "marketingName": "Samsung Galaxy S22 (Global)",
+      "manufacturer": "Samsung",
+      "zlo": 19.6,
+      "sensorLinearSlope": 0.98,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "SM-S901U",
+      "marketingName": "Samsung Galaxy S22 (US)",
+      "manufacturer": "Samsung",
+      "zlo": 19.4,
+      "sensorLinearSlope": 0.97,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "SM-S911B",
+      "marketingName": "Samsung Galaxy S23 (Global)",
+      "manufacturer": "Samsung",
+      "zlo": 19.6,
+      "sensorLinearSlope": 0.98,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "SM-S911U",
+      "marketingName": "Samsung Galaxy S23 (US)",
+      "manufacturer": "Samsung",
+      "zlo": 19.4,
+      "sensorLinearSlope": 0.97,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "SM-S918B",
+      "marketingName": "Samsung Galaxy S23 Ultra (Global)",
+      "manufacturer": "Samsung",
+      "zlo": 19.6,
+      "sensorLinearSlope": 0.98,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "SM-S921B",
+      "marketingName": "Samsung Galaxy S24 (Global)",
+      "manufacturer": "Samsung",
+      "zlo": 19.6,
+      "sensorLinearSlope": 0.98,
+      "apiLevelMin": 34,
+      "apiLevelMax": 36,
+      "last_updated": "2024-01-15",
+      "calibration_version": 4
+    },
+    {
+      "model": "SM-S928B",
+      "marketingName": "Samsung Galaxy S24 Ultra (Global)",
+      "manufacturer": "Samsung",
+      "zlo": 19.6,
+      "sensorLinearSlope": 0.98,
+      "apiLevelMin": 34,
+      "apiLevelMax": 36,
+      "last_updated": "2024-01-15",
+      "calibration_version": 4
+    },
+    {
+      "model": "Moto G 2022",
+      "marketingName": "Motorola Moto G (2022)",
+      "manufacturer": "Motorola",
+      "zlo": 14.9,
+      "sensorLinearSlope": 1.00,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 2
+    },
+    {
+      "model": "Moto G Power 2022",
+      "marketingName": "Motorola Moto G Power (2022)",
+      "manufacturer": "Motorola",
+      "zlo": 14.9,
+      "sensorLinearSlope": 1.00,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 2
+    },
+    {
+      "model": "Moto G Stylus 2022",
+      "marketingName": "Motorola Moto G Stylus (2022)",
+      "manufacturer": "Motorola",
+      "zlo": 14.9,
+      "sensorLinearSlope": 1.00,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 2
+    },
+    {
+      "model": "NE2210",
+      "marketingName": "OnePlus 10 Pro",
+      "manufacturer": "OnePlus",
+      "zlo": 18.0,
+      "sensorLinearSlope": 1.01,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 2
+    },
+    {
+      "model": "NE2220",
+      "marketingName": "OnePlus 11",
+      "manufacturer": "OnePlus",
+      "zlo": 18.0,
+      "sensorLinearSlope": 1.01,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    },
+    {
+      "model": "2201123G",
+      "marketingName": "Xiaomi 12",
+      "manufacturer": "Xiaomi",
+      "zlo": 16.5,
+      "sensorLinearSlope": 1.00,
+      "apiLevelMin": 31,
+      "apiLevelMax": 34,
+      "last_updated": "2024-01-15",
+      "calibration_version": 2
+    },
+    {
+      "model": "2211133G",
+      "marketingName": "Xiaomi 13",
+      "manufacturer": "Xiaomi",
+      "zlo": 16.5,
+      "sensorLinearSlope": 1.00,
+      "apiLevelMin": 33,
+      "apiLevelMax": 35,
+      "last_updated": "2024-01-15",
+      "calibration_version": 3
+    }
+  ],
+  "version": 4,
+  "min_app_version": 100,
+  "fallback_zlo": 16.0,
+  "fallback_slope": 1.0
+}
