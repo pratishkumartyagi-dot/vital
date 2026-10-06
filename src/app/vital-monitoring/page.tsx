@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, combinePpgChannels } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -107,6 +107,8 @@ export default function VitalMonitoringPage() {
   const samplesRef = useRef<{ bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
+  const spo2SmoothedRef = useRef<number | null>(null);
+  const hbSmoothedRef = useRef<number | null>(null);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -420,7 +422,12 @@ export default function VitalMonitoringPage() {
         const pos = posPulse(redWin, greenWin, blueWin, Math.max(16, Math.round(fs)));
         analysisSource = pos.length >= Math.floor(fs * 5) ? pos : ppgWin;
       } else {
-        analysisSource = ppgWin;
+        // Rear camera: fuse all three color channels for the PPG source.
+        // A fingertip under torch illumination carries pulsatile signal in
+        // every channel; green usually dominates, but red and blue still
+        // contribute measurable AC and improve SNR when fused.
+        const combined = combinePpgChannels(redWin, greenWin, blueWin);
+        analysisSource = combined.length >= Math.floor(fs * 5) ? combined : ppgWin;
       }
       const analysis: VitalAnalysis = analyzeVitals(
         analysisSource,
@@ -635,6 +642,12 @@ export default function VitalMonitoringPage() {
         if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
       }
       return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
+    const median = (vals: number[]): number | null => {
+      if (vals.length === 0) return null;
+      const sorted = vals.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
     };
     const mode = <T extends string>(items: T[]): T => {
       const m = new Map<T, number>();

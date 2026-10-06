@@ -821,6 +821,59 @@ const EMPTY_CREATININE_FEATURES: CreatinineFeatures = {
   beats: 0,
 };
 
+function channelAcDc(signal: number[]): number {
+  if (signal.length < 3) return 0;
+  const n = signal.length;
+  const dc = signal.reduce((a, b) => a + b, 0) / n;
+  if (dc <= 1e-9) return 0;
+  const mean = dc;
+  let sq = 0;
+  for (const v of signal) sq += (v - mean) ** 2;
+  const ac = Math.sqrt(sq / n);
+  return ac / dc;
+}
+
+/// For rear-camera contact PPG through a fingertip, all three color channels
+/// carry useful pulsatile signal. Green usually has the highest SNR, but red
+/// and blue still contribute measurable AC, especially under strong torch
+/// illumination. This helper fuses the three raw traces into one optimized
+/// PPG signal by weighting each channel by its own AC/DC (perfusion index)
+/// so the strongest channel dominates automatically.
+export function combinePpgChannels(red: number[], green: number[], blue: number[]): number[] {
+  const n = Math.min(red.length, green.length, blue.length);
+  if (n === 0) return green.length > 0 ? green : red.length > 0 ? red : blue;
+
+  const dcR = red.reduce((a, b) => a + b, 0) / n;
+  const dcG = green.reduce((a, b) => a + b, 0) / n;
+  const dcB = blue.reduce((a, b) => a + b, 0) / n;
+
+  const piR = channelAcDc(red);
+  const piG = channelAcDc(green);
+  const piB = channelAcDc(blue);
+  const totalPi = piR + piG + piB;
+
+  let wR: number, wG: number, wB: number;
+  if (totalPi > 1e-9) {
+    wR = piR / totalPi;
+    wG = piG / totalPi;
+    wB = piB / totalPi;
+  } else {
+    wR = 0.25;
+    wG = 0.5;
+    wB = 0.25;
+  }
+
+  const result: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const rNorm = (red[i] - dcR) / dcR;
+    const gNorm = (green[i] - dcG) / dcG;
+    const bNorm = (blue[i] - dcB) / dcB;
+    const combined = wR * rNorm + wG * gNorm + wB * bNorm;
+    result.push(dcG + combined * dcG);
+  }
+  return result;
+}
+
 function clamp01(v: number): number {
   if (!Number.isFinite(v)) return 0;
   return Math.min(1, Math.max(0, v));
