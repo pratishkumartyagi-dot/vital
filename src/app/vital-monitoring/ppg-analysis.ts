@@ -377,9 +377,14 @@ function computeSignalQuality(
   for (let i = 1; i < peaks.length; i++) {
     rrMs.push(((peaks[i].index - peaks[i - 1].index) / fs) * 1000);
   }
+  // Apply ectopic/motion interval rejection (same as HRV computation) so that
+  // a single outlier interval does not destroy the regularity score.
+  const med = median(rrMs);
+  const filteredRr = med > 0 ? rrMs.filter((d) => Math.abs(d - med) / med <= 0.3) : rrMs.slice();
+  const rrMsClean = filteredRr.length >= 2 ? filteredRr : rrMs;
   // A single interval is no evidence of irregularity; the old code substituted
   // cv = 100 there and scored it 0.
-  const cv = rrMs.length > 1 ? (stddev(rrMs) / mean(rrMs)) * 100 : 0;
+  const cv = rrMsClean.length > 1 ? (stddev(rrMsClean) / mean(rrMsClean)) * 100 : 0;
   const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30);
 
   // 4. Pulse-presence gate. The previous band-power version compared the

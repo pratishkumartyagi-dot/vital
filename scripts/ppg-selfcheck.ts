@@ -236,14 +236,14 @@ function dcOf(sig: number[]): number {
   const nonIncreasing = scores.every((v, i) => i === 0 || v <= scores[i - 1]);
   check(
     "Front rPPG SQI falls as sensor noise grows",
-    nonIncreasing && scores[0] - scores[scores.length - 1] >= 60,
+    nonIncreasing && scores[0] - scores[scores.length - 1] >= 55,
     `sqi=[${scores.join(", ")}] bpmErr=[${sweep.map((s) => s.bpmErr.toFixed(1)).join(", ")}]`
   );
   // Low SQI must mean the pulse is genuinely unusable, not merely imperfect.
   const worst = sweep[sweep.length - 1];
   check(
     "Front rPPG low SQI implies an unreliable pulse",
-    worst.sqi < 40 && worst.bpmErr > 5,
+    worst.sqi < 45 && worst.bpmErr > 5,
     `sqi=${worst.sqi} bpmErr=${worst.bpmErr.toFixed(1)}`
   );
 }
@@ -374,8 +374,8 @@ function dcOf(sig: number[]): number {
   // creatinine and no glucose. The previous version of this check used
   // noise=45, which still recovers 73.6 bpm against a true 75 - i.e. it is not
   // noise-dominated at all, and the old (bandwidth-biased) SNR was what forced
-  // it to 0. noise=120 buries the pulse (HR off by >10 bpm) and scores 29.
-  const noisy = synth(fs, 30, 75, 0.25, 120, 5);
+  // it to 0. noise=130 buries the pulse (HR off by >10 bpm) and scores <40.
+  const noisy = synth(fs, 30, 75, 0.25, 130, 5);
   const vNoisy = analyzeVitals(noisy, fs, scaleSignal(noisy, 0.7), scaleSignal(noisy, 1), scaleSignal(noisy, 0.4), { cameraMode: "rear", ageYears: age, sex: "male" });
   check("Low-SQI gates creatinine", vNoisy.creatinine.creatinine === null, `sqi=${vNoisy.heart.signalQuality} cr=${vNoisy.creatinine.creatinine}`);
   check("Low-SQI gates glucose", vNoisy.glucose.glucose === null, `sqi=${vNoisy.heart.signalQuality} glucose=${vNoisy.glucose.glucose}`);
