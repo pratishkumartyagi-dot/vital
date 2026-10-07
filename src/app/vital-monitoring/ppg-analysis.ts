@@ -13,6 +13,11 @@ export interface HRVMetrics {
 
 export interface HeartMetrics {
   bpm: number | null;
+  peaks: number[];
+  rrIntervals: number[];
+  hrv: HRVMetrics | null;
+  rhythm: "regular" | "irregular" | "unknown";
+  signalQuality: number;
   method: "peaks" | "spectral" | "none";
   bpmPeaks: number | null;
   bpmSpectral: number | null;
@@ -550,80 +555,159 @@ export function powerSpectrum(signal: number[], fs: number): { freqs: number[]; 
   return { freqs, psd };
 }
 
-export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartMetrics {
-  if (ppg.length < fs * 5) {
-    return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
-  }
-  // Discard the first second of the window. The zero-phase filtfilt bandpass
-  // has a residual edge transient (the detrend step at the left boundary
-  // excites the highpass biquad), which can produce a spurious local maximum
-  // at the very start of the window. If that spurious peak is accepted as the
-  // first "real" beat, all subsequent true peaks are > 2000 ms away and the
-  // refractory+upper-bound combination rejects them all, returning null.
-  const trimmed = ppg.slice(Math.min(fs, ppg.length));
-  const { peaks, filtered } = detectPeaks(trimmed, fs);
-  if (peaks.length < 3) {
-    const sorted = filtered.slice().sort((a, b) => a - b);
-    const n = sorted.length;
-    const p10 = sorted[Math.floor(n * 0.10)];
-    const p90 = sorted[Math.floor(n * 0.90)];
-    const p97 = sorted[Math.floor(n * 0.97)];
-    const minH = Math.max(p10 + 0.5 * (p90 - p10), 0.45 * p97);
-    const allLocalMax = filtered.filter((v, i) => i > 0 && i < filtered.length - 1 && v > filtered[i - 1] && v >= filtered[i + 1]).length;
-    return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
-  }
-  // Accept a peak only if its interval from the last accepted peak is
-  // physiologic, so one spurious detection cannot corrupt all later intervals.
-  // Use an adaptive threshold: dtMs >= 400ms (max HR ~150) OR dtMs >= 60% of
-  // the running median RR interval (to reject dicrotic notches at ~0.4-0.5x RR).
-  const valid: Peak[] = [];
-  for (const p of peaks) {
-    if (valid.length === 0) {
-      valid.push(p);
-      continue;
+
+function spectralHR(f: number[], fs: number): { bpm: number | null; snrDb: number } {
+  const n = f.length;
+  const w = f.map((v, i) => v * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1))));
+  const freqs: number[] = [];
+  const power: number[] = [];
+  for (let fr = 0.5; fr <= 3.5 + 1e-9; fr += 0.005) {
+    let re = 0, im = 0;
+    const k = (2 * Math.PI * fr) / fs;
+    for (let i = 0; i < n; i++) {
+      re += w[i] * Math.cos(k * i);
+      im -= w[i] * Math.sin(k * i);
     }
-    const dtMs = ((p.index - valid[valid.length - 1].index) / fs) * 1000;
-    // Compute running median RR of accepted peaks so far
-    let adaptiveMin = 400;
-    if (valid.length >= 2) {
-      const rrSoFar: number[] = [];
-      for (let i = 1; i < valid.length; i++) {
-        rrSoFar.push(((valid[i].index - valid[i - 1].index) / fs) * 1000);
+    freqs.push(fr);
+    power.push(re * re + im * im);
+  }
+  let pk = 0;
+  for (let i = 1; i < power.length; i++) if (power[i] > power[pk]) pk = i;
+  const f0 = freqs[pk];
+  let sig = 0, tot = 0;
+  for (let i = 0; i < freqs.length; i++) {
+    tot += power[i];
+    const near = Math.abs(freqs[i] - f0) <= 0.15;
+    const harm = Math.abs(freqs[i] - 2 * f0) <= 0.15;
+    if (near || harm) sig += power[i];
+  }
+  const noise = Math.max(tot - sig, 1e-12);
+  const snrDb = 10 * Math.log10(Math.max(sig, 1e-12) / noise);
+  return { bpm: f0 * 60, snrDb };
+}
+
+function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloorMs: number, thrWinSec: number): number[] {
+  const n = f.length;
+  const half = Math.round((thrWinSec * fs) / 2);
+  const peaksIdx: number[] = [];
+  const peaksAmp: number[] = [];
+  const recentRR: number[] = [];
+
+  const thresholdAt = (i: number): number => {
+    const seg = f.slice(Math.max(0, i - half), Math.min(n, i + half + 1)).sort((a, b) => a - b);
+    const p10 = seg[Math.floor(seg.length * 0.10)];
+    const iqr = seg[Math.floor(seg.length * 0.75)] - seg[Math.floor(seg.length * 0.10)];
+    const p97 = seg[Math.floor(seg.length * 0.97)];
+    return Math.max(p10 + 0.5 * iqr, 0.45 * p97);
+  };
+
+  for (let i = 1; i < n - 1; i++) {
+    if (!(f[i] > f[i - 1] && f[i] >= f[i + 1])) continue;
+    if (f[i] < thresholdAt(i)) continue;
+
+    const medRR = recentRR.length >= 3 ? median(recentRR.slice(-8)) : seedRrMs;
+    const minInt = Math.max(minFloorMs, 0.6 * medRR);
+
+    if (peaksIdx.length) {
+      const last = peaksIdx[peaksIdx.length - 1];
+      const dtMs = ((i - last) / fs) * 1000;
+      if (dtMs < minInt) {
+        if (f[i] > peaksAmp[peaksAmp.length - 1]) {
+          peaksIdx[peaksIdx.length - 1] = i;
+          peaksAmp[peaksAmp.length - 1] = f[i];
+        }
+        continue;
       }
-      const sortedRr = [...rrSoFar].sort((a, b) => a - b);
-      const med = sortedRr[Math.floor(sortedRr.length / 2)];
-      adaptiveMin = Math.max(400, med * 0.6);
+      recentRR.push(dtMs);
     }
-    if (dtMs >= adaptiveMin) valid.push(p);
+    peaksIdx.push(i);
+    peaksAmp.push(f[i]);
   }
-  if (valid.length < 3) {
-    return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
+
+  return peaksIdx.map((i) => {
+    const y0 = f[i - 1], y1 = f[i], y2 = f[i + 1];
+    const den = y0 - 2 * y1 + y2;
+    const d = Math.abs(den) > 1e-12 ? Math.max(-0.5, Math.min(0.5, (0.5 * (y0 - y2)) / den)) : 0;
+    return ((i + d) / fs) * 1000;
+  });
+}
+
+
+export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartMetrics {
+  const minFloorMs = 300;
+  const thresholdWindowSec = 8;
+  const maxPeakSpectralDiffBpm = 8;
+  const minValidFraction = 0.7;
+  const minSnrDb = 0;
+
+  if (!ppg || ppg.length < fs * 5) {
+    return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false };
   }
+
+  // Normalise
+  let x = dcRef && dcRef > 0 ? ppg.map((v) => v / dcRef - 1) : ppg.slice();
+  const mean = x.reduce((a, b) => a + b, 0) / x.length;
+  x = x.map((v) => -(v - mean));
+
+  // Band-pass using existing butterworthBandpass
+  const f = butterworthBandpass(x, 0.5, 3.5, fs, true);
+
+  // Spectral estimate
+  const spec = spectralHR(f, fs);
+  const bpmSpectral = spec.bpm;
+  const seedRr = bpmSpectral ? 60000 / bpmSpectral : 800;
+
+  // Peak detection with new algorithm
+  const peakTimesMs = detectPeaksAdaptive(f, fs, seedRr, minFloorMs, thresholdWindowSec);
+  if (peakTimesMs.length < 4) {
+    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false };
+  }
+
+  // Convert peak times to sample indices for backward compatibility
+  const peaks = peakTimesMs.map((t) => Math.round((t / 1000) * fs));
+
+  // RR intervals
   const rrAll: number[] = [];
-  for (let i = 1; i < valid.length; i++) {
-    rrAll.push(((valid[i].index - valid[i - 1].index) / fs) * 1000);
-  }
-  // Reject ectopic / motion intervals (>30% from the median) before HRV, which
-  // is what previously produced SDNN/RMSSD values in the thousands of ms.
-  // Also reject dicrotic notch intervals (<65% of median) which appear when
-  // a prominent notch is counted as a separate beat.
+  for (let i = 1; i < peakTimesMs.length; i++) rrAll.push(peakTimesMs[i] - peakTimesMs[i - 1]);
   const med = median(rrAll);
-  const filteredRr = med > 0
-    ? rrAll.filter((d) => d >= med * 0.65 && Math.abs(d - med) / med <= 0.3)
-    : rrAll.slice();
-  const rrMs = filteredRr.length >= 2 ? filteredRr : rrAll;
-  const meanRR = mean(rrMs);
-  const bpm = meanRR > 0 ? 60000 / meanRR : 0;
+  const ok = rrAll.map((r) => r >= 0.7 * med && r <= 1.3 * med);
+  const rrMs = rrAll.filter((_, i) => ok[i]);
+  if (rrMs.length < 3) {
+    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false };
+  }
+
+  const bpmVal = 60000 / median(rrMs);
+  const bpm = bpmVal > 30 && bpmVal < 220 ? bpmVal : null;
   const hrv = computeHRV(rrMs);
   const rhythm = classifyRhythm(rrMs);
-  const quality = computeSignalQuality(filtered, ppg, valid, fs, dcRef ?? dcLevel(ppg));
+
+  // Quality gate from new algorithm
+  const bpmForQuality = bpm ?? bpmSpectral ?? 60;
+  const durSec = f.length / fs;
+  const expectedBeats = Math.max(1, (durSec * bpmForQuality) / 60 - 1);
+  const validFraction = Math.min(1, rrMs.length / expectedBeats);
+  const agree = bpm !== null && bpmSpectral !== null && Math.abs(bpm - bpmSpectral) <= maxPeakSpectralDiffBpm;
+  const snrOk = spec.snrDb >= minSnrDb;
+  const reliable = validFraction >= minValidFraction && agree && snrOk;
+  const signalQuality = reliable ? Math.round(Math.min(100, Math.max(0, (spec.snrDb + 3) * 8))) : 0;
+
   return {
-    bpm: bpm > 30 && bpm < 220 ? bpm : null,
-    peaks: valid.map((p) => p.index),
+    bpm,
+    peaks,
     rrIntervals: rrMs,
     hrv,
     rhythm,
-    signalQuality: quality,
+    signalQuality,
+    method: reliable ? "peaks" : "spectral",
+    bpmPeaks: bpm,
+    bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null,
+    rrMs,
+    peakTimesMs,
+    validFraction,
+    snrDb: spec.snrDb,
+    sdnn: hrv?.sdnn ?? null,
+    rmssd: hrv?.rmssd ?? null,
+    reliable,
   };
 }
 
