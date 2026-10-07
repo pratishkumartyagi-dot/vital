@@ -644,6 +644,21 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false };
   }
 
+  // Signal quality helper for early returns (uses raw signal)
+  const computeBasicSQI = (signal: number[], fs: number, dcRef?: number): number => {
+    const rawFiltered = butterworthBandpass(detrend(signal), 0.5, 3.5, fs, true);
+    const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(signal);
+    const ac = rms(rawFiltered);
+    const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
+    const piScore = clamp01(Math.sqrt(pi / 0.5));
+    const { snr } = spectralSnr(signal, fs);
+    const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
+    const prominence = cardiacSpectralProminence(signal, fs);
+    const pulseGate = clamp01((prominence - 4) / 12);
+    const baseQuality = 0.4 * snrScore + 0.35 * piScore + 0.25 * 0; // no regularity without peaks
+    return Math.round(clamp01(baseQuality * pulseGate) * 100);
+  };
+
   // Normalise
   let x = dcRef && dcRef > 0 ? ppg.map((v) => v / dcRef - 1) : ppg.slice();
   const xMean = x.reduce((a, b) => a + b, 0) / x.length;
@@ -660,7 +675,8 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   // Peak detection with new algorithm
   const peakTimesMs = detectPeaksAdaptive(f, fs, seedRr, minFloorMs, thresholdWindowSec);
   if (peakTimesMs.length < 4) {
-    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false };
+    const basicSQI = computeBasicSQI(ppg, fs, dcRef);
+    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false };
   }
 
   // Convert peak times to sample indices for backward compatibility
@@ -673,7 +689,8 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   const ok = rrAll.map((r) => r >= 0.7 * med && r <= 1.3 * med);
   const rrMs = rrAll.filter((_, i) => ok[i]);
   if (rrMs.length < 3) {
-    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false };
+    const basicSQI = computeBasicSQI(ppg, fs, dcRef);
+    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false };
   }
 
   const bpmVal = 60000 / median(rrMs);
