@@ -57,7 +57,6 @@ export default function VitalMonitoringPage() {
   const [cameraMode, setCameraMode] = useState<"front" | "rear">("front");
   const [torchOn, setTorchOn] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
-  const [spo2Offset, setSpo2Offset] = useState(0);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
   const [bp, setBp] = useState<string | null>(null);
@@ -485,9 +484,8 @@ export default function VitalMonitoringPage() {
         // linearised for the red/green RoR (which is ~0.8-2.5, not the ~0.4-0.8
         // of red/IR), so the old `110 - 25 * R` formula returned SpO2 in the
         // 60-85% range for every healthy subject. Absolute accuracy is
-        // device-specific — the offset slider exists so the validation
-        // dashboard can calibrate a given phone.
-        spo2Val = estimateSpo2RedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo, spo2Offset);
+        // device-specific — accuracy is device-dependent.
+        spo2Val = estimateSpo2RedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo);
         hbVal = estimateHbRedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo);
 
         // Fallback: red/blue ratio-of-ratios (used only when green is
@@ -503,7 +501,7 @@ export default function VitalMonitoringPage() {
             for (const v of blueFiltered) sq += v * v;
             const acB = Math.sqrt(sq / blueFiltered.length);
             const R = (acR / dcR) / (acB / dcB);
-            spo2Val = Math.min(100, Math.max(88, 110 - 25 * R + spo2Offset));
+            spo2Val = Math.min(100, Math.max(88, 110 - 25 * R));
           }
         }
       }
@@ -564,7 +562,7 @@ export default function VitalMonitoringPage() {
     if (cameraOnRef.current) {
       animFrame.current = requestAnimationFrame(processFrame);
     }
-  }, [drawWaveform, spo2Offset, cameraMode, demoMode, patient]);
+  }, [drawWaveform, cameraMode, demoMode, patient]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -777,11 +775,10 @@ export default function VitalMonitoringPage() {
         vitals: storedVitals,
         cameraMode,
         demoMode,
-        spo2Offset,
       }, videoBlob);
       await loadReadings();
     }
-  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
+  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -1330,19 +1327,6 @@ export default function VitalMonitoringPage() {
             >
               {demoMode ? "Demo: On" : "Demo: Off"}
             </button>
-            <div className="ml-auto flex items-center gap-2">
-              <label className="text-[10px] text-neutral-400">SpO₂ offset</label>
-              <input
-                type="range"
-                min="-10"
-                max="10"
-                step="1"
-                value={spo2Offset}
-                onChange={(e) => setSpo2Offset(Number(e.target.value))}
-                className="w-24"
-              />
-              <span className="text-[10px] text-neutral-500 w-6">{spo2Offset > 0 ? `+${spo2Offset}` : spo2Offset}</span>
-            </div>
           </div>
         </div>
         <div className="px-4 pb-4">
