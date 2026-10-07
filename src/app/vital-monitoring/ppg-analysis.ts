@@ -13,11 +13,16 @@ export interface HRVMetrics {
 
 export interface HeartMetrics {
   bpm: number | null;
-  peaks: number[];
-  rrIntervals: number[];
-  hrv: HRVMetrics | null;
-  rhythm: "regular" | "irregular" | "unknown";
-  signalQuality: number;
+  method: "peaks" | "spectral" | "none";
+  bpmPeaks: number | null;
+  bpmSpectral: number | null;
+  rrMs: number[];
+  peakTimesMs: number[];
+  validFraction: number;
+  snrDb: number;
+  sdnn: number | null;
+  rmssd: number | null;
+  reliable: boolean;
 }
 
 export interface RespMetrics {
