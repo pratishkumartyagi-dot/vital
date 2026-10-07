@@ -646,8 +646,8 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
 
   // Normalise
   let x = dcRef && dcRef > 0 ? ppg.map((v) => v / dcRef - 1) : ppg.slice();
-  const mean = x.reduce((a, b) => a + b, 0) / x.length;
-  x = x.map((v) => -(v - mean));
+  const xMean = x.reduce((a, b) => a + b, 0) / x.length;
+  x = x.map((v) => -(v - xMean));
 
   // Band-pass using existing butterworthBandpass
   const f = butterworthBandpass(x, 0.5, 3.5, fs, true);
@@ -681,7 +681,32 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   const hrv = computeHRV(rrMs);
   const rhythm = classifyRhythm(rrMs);
 
-  // Quality gate from new algorithm
+  // Signal quality using refined computation (like old computeSignalQuality)
+  // Use raw signal for perfusion index and SNR (matches old computeSignalQuality)
+  const rawFiltered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true);
+  const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(ppg);
+  const ac = rms(rawFiltered);
+  const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
+  const piScore = clamp01(Math.sqrt(pi / 0.5));
+
+  // 2. Bandwidth-matched spectral SNR on raw signal
+  const { snr } = spectralSnr(ppg, fs);
+  const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
+
+  // 3. Pulse regularity (CV of RR intervals)
+  const rrMsClean = rrMs.length >= 2 ? rrMs : [];
+  const cv = rrMsClean.length > 1 ? (stddev(rrMsClean) / mean(rrMsClean)) * 100 : 0;
+  const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30);
+
+  // 4. Pulse-presence gate using cardiac spectral prominence
+  const prominence = cardiacSpectralProminence(ppg, fs);
+  const pulseGate = clamp01((prominence - 4) / 12);
+
+  // Weighted average, scaled by pulse gate
+  const baseQuality = 0.4 * snrScore + 0.35 * piScore + 0.25 * regScore;
+  const signalQuality = Math.round(clamp01(baseQuality * pulseGate) * 100);
+
+  // New reliability gate for SpO2/glucose/creatinine gating
   const bpmForQuality = bpm ?? bpmSpectral ?? 60;
   const durSec = f.length / fs;
   const expectedBeats = Math.max(1, (durSec * bpmForQuality) / 60 - 1);
@@ -689,7 +714,6 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   const agree = bpm !== null && bpmSpectral !== null && Math.abs(bpm - bpmSpectral) <= maxPeakSpectralDiffBpm;
   const snrOk = spec.snrDb >= minSnrDb;
   const reliable = validFraction >= minValidFraction && agree && snrOk;
-  const signalQuality = reliable ? Math.round(Math.min(100, Math.max(0, (spec.snrDb + 3) * 8))) : 0;
 
   return {
     bpm,
