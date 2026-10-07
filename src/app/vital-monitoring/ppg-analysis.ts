@@ -363,6 +363,11 @@ export function estimateSpo2RedGreen(
   const greenRatio = acG / dcG;
   if (greenRatio <= 1e-9) return null;
   const R = redRatio / greenRatio;
+
+  // Reject saturated green channel (>30% samples at >= 250) which biases AC/DC
+  const satFrac = greenRaw.filter((v) => v >= 250).length / greenRaw.length;
+  if (satFrac > 0.3) return null;
+
   return Math.min(SPO2_RED_GREEN_MAX, Math.max(SPO2_RED_GREEN_MIN, SPO2_RED_GREEN_INTERCEPT - SPO2_RED_GREEN_SLOPE * R + offset));
 }
 
@@ -564,6 +569,8 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   }
   // Accept a peak only if its interval from the last accepted peak is
   // physiologic, so one spurious detection cannot corrupt all later intervals.
+  // Use an adaptive threshold: dtMs >= 400ms (max HR ~150) OR dtMs >= 60% of
+  // the running median RR interval (to reject dicrotic notches at ~0.4-0.5x RR).
   const valid: Peak[] = [];
   for (const p of peaks) {
     if (valid.length === 0) {
@@ -571,7 +578,18 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
       continue;
     }
     const dtMs = ((p.index - valid[valid.length - 1].index) / fs) * 1000;
-    if (dtMs >= 300) valid.push(p);
+    // Compute running median RR of accepted peaks so far
+    let adaptiveMin = 400;
+    if (valid.length >= 2) {
+      const rrSoFar: number[] = [];
+      for (let i = 1; i < valid.length; i++) {
+        rrSoFar.push(((valid[i].index - valid[i - 1].index) / fs) * 1000);
+      }
+      const sortedRr = [...rrSoFar].sort((a, b) => a - b);
+      const med = sortedRr[Math.floor(sortedRr.length / 2)];
+      adaptiveMin = Math.max(400, med * 0.6);
+    }
+    if (dtMs >= adaptiveMin) valid.push(p);
   }
   if (valid.length < 3) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0 };
@@ -582,8 +600,12 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   }
   // Reject ectopic / motion intervals (>30% from the median) before HRV, which
   // is what previously produced SDNN/RMSSD values in the thousands of ms.
+  // Also reject dicrotic notch intervals (<65% of median) which appear when
+  // a prominent notch is counted as a separate beat.
   const med = median(rrAll);
-  const filteredRr = med > 0 ? rrAll.filter((d) => Math.abs(d - med) / med <= 0.3) : rrAll.slice();
+  const filteredRr = med > 0
+    ? rrAll.filter((d) => d >= med * 0.65 && Math.abs(d - med) / med <= 0.3)
+    : rrAll.slice();
   const rrMs = filteredRr.length >= 2 ? filteredRr : rrAll;
   const meanRR = mean(rrMs);
   const bpm = meanRR > 0 ? 60000 / meanRR : 0;
@@ -1024,11 +1046,11 @@ const RESP_HI = 0.5;
 /// **per-device estimate** — the real relationship depends on the camera's
 /// spectral quantum efficiency, the flash spectrum, and the optical path — so
 /// the UI keeps an `spo2Offset` slider and the validation dashboard exists to
-/// calibrate a given phone. The slope is deliberately shallow because the
-/// red/green RoR is a noisier proxy than red/IR and its absolute accuracy is
-/// device-dependent.
-const SPO2_RED_GREEN_SLOPE = 8;
-const SPO2_RED_GREEN_INTERCEPT = 106;
+/// calibrate a given phone. The slope is tuned for the red/green RoR which is
+/// typically 0.5-1.3 for contact PPG; a healthy subject (SpO2 97-99%) has
+/// R ~ 0.55-0.75, so slope ~ 20 and intercept ~ 110 map this to 97-99%.
+const SPO2_RED_GREEN_SLOPE = 20;
+const SPO2_RED_GREEN_INTERCEPT = 110;
 const SPO2_RED_GREEN_MIN = 88;
 const SPO2_RED_GREEN_MAX = 100;
 
@@ -1449,7 +1471,8 @@ function estimateCreatinine(
   };
 }
 
-import { estimateBPDeep, BPResult } from './bpnet-inference';
+// BPNet type import only — the heavy tfjs module is loaded dynamically on demand
+import type { BPResult } from './bpnet-inference';
 
 export interface VitalAnalysis {
   heart: HeartMetrics;
@@ -1541,6 +1564,7 @@ export async function analyzeVitalsWithDeepBP(
   options: AnalyzeOptions = {}
 ): Promise<VitalAnalysis> {
   const base = analyzeVitals(ppg, fs, redSignal, greenSignal, blueSignal, options);
+  const { estimateBPDeep } = await import('./bpnet-inference');
   const bpDeep = await estimateBPDeep(ppg, fs);
   return { ...base, bpDeep };
 }

@@ -97,6 +97,7 @@ export default function ValidationPage() {
     cameraMode: 'rear' as 'front' | 'rear',
     referenceDevice: '',
     protocolNotes: '',
+    sex: '' as '' | 'male' | 'female',
   });
 
   const [newMeasurement, setNewMeasurement] = useState({
@@ -282,7 +283,11 @@ export default function ValidationPage() {
 
   const handleCreateSession = async () => {
     try {
-      await createValidationSession(newSession);
+      const { sex, ...rest } = newSession;
+      await createValidationSession({
+        ...rest,
+        sex: (sex === "male" || sex === "female") ? sex : undefined,
+      });
       setShowNewSession(false);
       setNewSession({
         subjectId: '',
@@ -290,6 +295,7 @@ export default function ValidationPage() {
         cameraMode: 'rear',
         referenceDevice: '',
         protocolNotes: '',
+        sex: '',
       });
       loadData();
     } catch (error) {
@@ -794,6 +800,33 @@ export default function ValidationPage() {
                     <option value="rear">Rear (PPG - Fingertip)</option>
                     <option value="front">Front (rPPG - Face)</option>
                   </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-neutral-400 mb-1">Subject Sex</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setNewSession({ ...newSession, sex: "female" })}
+                      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                        newSession.sex === "female"
+                          ? "bg-red-600 border-red-500 text-white"
+                          : "bg-neutral-800 border-neutral-700 text-neutral-300 hover:border-neutral-600"
+                      }`}
+                    >
+                      Female
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewSession({ ...newSession, sex: "male" })}
+                      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                        newSession.sex === "male"
+                          ? "bg-red-600 border-red-500 text-white"
+                          : "bg-neutral-800 border-neutral-700 text-neutral-300 hover:border-neutral-600"
+                      }`}
+                    >
+                      Male
+                    </button>
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm text-neutral-400 mb-1">Reference Device</label>

@@ -410,6 +410,7 @@ export async function createValidationSession(data: {
   cameraMode: "front" | "rear";
   referenceDevice?: string;
   protocolNotes?: string;
+  sex?: "male" | "female";
 }) {
   const response = await fetch("/api/validation", {
     method: "POST",
