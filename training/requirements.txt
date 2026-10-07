@@ -1,3 +1,4 @@
+# Core dependencies
 torch==2.6.0
 torchaudio==2.6.0
 numpy==2.3.5
@@ -12,3 +13,17 @@ face-alignment==1.4.1
 tqdm==4.67.1
 sk-video==1.1.10
 imageio==2.37.0
+
+# rPPG-Toolbox dependencies
+yacs==0.1.8
+scikit-image==0.24.0
+tensorboardX==2.6.2.2
+mat73==0.59
+neurokit2==0.2.10
+thop==0.1.1.post22090722038
+causal-conv1d==1.5.0.post8
+mamba-ssm==2.2.4
+protobuf==5.29.3
+h5py==3.13.0
+PyYAML==6.0.2
+fsspec==2025.5.1
