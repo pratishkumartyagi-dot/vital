@@ -25,7 +25,15 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 TRAINING_DIR = Path(__file__).parent
 sys.path.insert(0, str(TRAINING_DIR))
 
-from rppglib.models.BPNet import BPNet, BPNetTrainer, create_bpnet
+# Import BPNet directly to avoid circular import via rppglib.models.__init__
+import importlib.util
+bpnet_path = TRAINING_DIR / 'rppglib' / 'models' / 'BPNet.py'
+spec = importlib.util.spec_from_file_location("BPNet", bpnet_path)
+bpnet_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bpnet_module)
+BPNet = bpnet_module.BPNet
+BPNetTrainer = bpnet_module.BPNetTrainer
+create_bpnet = bpnet_module.create_bpnet
 
 
 class PPGBPDataset(torch.utils.data.Dataset):
@@ -144,7 +152,9 @@ def train_bpnet(
 ):
     Path(results_folder).mkdir(parents=True, exist_ok=True)
 
-    model = create_bpnet(config).to(device)
+    # Filter config for BPNet (remove training params)
+    bpnet_config = {k: v for k, v in config.items() if k != 'lr'}
+    model = create_bpnet(bpnet_config).to(device)
     trainer = BPNetTrainer(model, device=device, lr=config.get('lr', 0.001))
 
     best_val_mae = float('inf')

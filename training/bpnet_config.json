@@ -1,0 +1,9 @@
+{
+  "input_length": 1024,
+  "cnn_filters": [32, 64, 128],
+  "kernel_size": 3,
+  "pool_size": 2,
+  "lstm_hidden": 128,
+  "lstm_layers": 2,
+  "dropout": 0.2
+}
