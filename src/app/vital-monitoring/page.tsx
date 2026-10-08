@@ -91,6 +91,7 @@ export default function VitalMonitoringPage() {
   const [fingerDetected, setFingerDetected] = useState(false);
   const [skinDetected, setSkinDetected] = useState(false);
   const [fingerPressure, setFingerPressure] = useState<"low" | "adequate" | "excessive" | null>(null);
+  const [pressureDetail, setPressureDetail] = useState<"TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL" | "NO_FINGER" | null>(null);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
@@ -109,6 +110,12 @@ export default function VitalMonitoringPage() {
   const countdownTimerRef = useRef<number | null>(null);
   const spo2SmoothedRef = useRef<number | null>(null);
   const hbSmoothedRef = useRef<number | null>(null);
+  // Pressure state machine refs
+  const pressureStateRef = useRef<"NO_FINGER" | "TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL" | null>(null);
+  const prevDcLevelRef = useRef<number | null>(null);
+  const prevPerfusionRef = useRef<number | null>(null);
+  const adequateDwellRef = useRef<number>(0);
+  const unstableDwellRef = useRef<number>(0);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -459,34 +466,98 @@ export default function VitalMonitoringPage() {
       const sqi = analysis.heart.signalQuality;
       setSignalQuality(sqi / 100);
 
-      // Finger pressure classification (rear camera only)
-      if (cameraMode === "rear" && !demoMode && fingerDetected) {
-        const perfusion = analysis.heart.perfusionIndex ?? 0;
+      // Finger pressure state machine (rear camera only)
+      if (cameraMode === "rear" && !demoMode) {
+        // Use raw green window for DC and perfusion
         const dcLevel = greenWin.length > 0 ? greenWin.reduce((a, b) => a + b, 0) / greenWin.length : 0;
-        // Perfusion index % (AC/DC * 100). Typical range: 0.5-5% for fingertip PPG
-        // DC level: 0-255, finger on lens typically 90-180
-        // Both low and excessive pressure reduce perfusion, but DC distinguishes them:
-        // - Low pressure: poor contact → low perfusion + HIGH DC (ambient light)
-        // - Excessive pressure: occlusion → low perfusion + LOW DC (blood squeezed out)
-        // - Adequate: normal perfusion (0.5-5%) + moderate DC (80-180)
-        let pressure: "low" | "adequate" | "excessive" | null = null;
-        if (perfusion >= 0.5 && perfusion <= 5.0 && dcLevel >= 80 && dcLevel <= 180) {
-          pressure = "adequate";
-        } else if (perfusion < 0.5) {
-          if (dcLevel > 180) {
-            pressure = "low";        // Poor contact - ambient light leaking
-          } else if (dcLevel < 80) {
-            pressure = "excessive";  // Occlusion - blood flow restricted
-          } else {
-            pressure = "low";        // Low perfusion with moderate DC - likely poor contact
-          }
+        const perfusion = analysis.heart.perfusionIndex ?? 0;
+        const snr = sqi; // Use composite SQI as SNR proxy (0-100)
+        const prevDc = prevDcLevelRef.current;
+        const prevPi = prevPerfusionRef.current;
+
+        // Update history
+        prevDcLevelRef.current = dcLevel;
+        prevPerfusionRef.current = perfusion;
+
+        // Finger presence check (min coverage)
+        const fingerCoverage = fingerDetected && dcLevel > 30 && dcLevel < 230;
+        if (!fingerCoverage) {
+          pressureStateRef.current = "NO_FINGER";
+          adequateDwellRef.current = 0;
+          unstableDwellRef.current = 0;
         } else {
-          // Perfusion > 5% or DC out of range - treat as low quality contact
-          pressure = "low";
+          // Trend detection
+          const dcRising = prevDc !== null && dcLevel > prevDc + 2; // DC increasing (finger pressing down)
+          const piCollapsed = prevPi !== null && perfusion < prevPi * 0.7 && prevPi > 0.5; // PI dropping sharply
+          const dcDriftHigh = prevDc !== null && Math.abs(dcLevel - prevDc) > 5; // DC unstable (>5 units/2s)
+          const piTooHigh = perfusion > 8; // PI implausibly high = motion artifact
+          const saturated = dcLevel > 230 || dcLevel < 20; // Sensor clipping
+          const lightLeakEvidence = dcLevel > 180 && perfusion < 1.0 && (blueWin.length > 0 ? blueWin.reduce((a, b) => a + b, 0) / blueWin.length : 0) > dcLevel * 0.6; // Blue ~ Green = ambient light
+
+          let newState: typeof pressureStateRef.current = pressureStateRef.current;
+
+          // Priority 1: TOO_HEAVY - occlusion evidence
+          if (saturated || (dcRising && piCollapsed)) {
+            newState = "TOO_HEAVY";
+            adequateDwellRef.current = 0;
+            unstableDwellRef.current = 0;
+          }
+          // Priority 2: UNSTABLE - motion/artifact, not pressure
+          else if (piTooHigh || dcDriftHigh) {
+            newState = "UNSTABLE";
+            adequateDwellRef.current = 0;
+            unstableDwellRef.current = Math.min(5, unstableDwellRef.current + 1);
+          }
+          // Priority 3: ADEQUATE - stable good signal (with dwell + hysteresis)
+          else if (perfusion >= 0.5 && perfusion <= 5.0 && dcLevel >= 80 && dcLevel <= 180 && snr >= 30) {
+            adequateDwellRef.current = Math.min(5, adequateDwellRef.current + 1); // ~10s dwell at 2s intervals
+            if (adequateDwellRef.current >= 3) { // 6s stable
+              newState = "ADEQUATE";
+              unstableDwellRef.current = 0;
+            } else {
+              newState = "WEAK_SIGNAL"; // Building up
+            }
+          }
+          // Priority 4: TOO_LIGHT - ambient light leak
+          else if (lightLeakEvidence) {
+            newState = "TOO_LIGHT";
+            adequateDwellRef.current = 0;
+            unstableDwellRef.current = 0;
+          }
+          // Priority 5: WEAK_SIGNAL - neutral fallback
+          else {
+            adequateDwellRef.current = 0;
+            unstableDwellRef.current = 0;
+            newState = "WEAK_SIGNAL";
+          }
+
+          // Hysteresis: don't flip-flop TOO_HEAVY <-> TOO_LIGHT rapidly
+          if (newState === "TOO_HEAVY" && pressureStateRef.current === "TOO_LIGHT") {
+            newState = "TOO_LIGHT"; // Stick with light until clear heavy evidence
+          } else if (newState === "TOO_LIGHT" && pressureStateRef.current === "TOO_HEAVY") {
+            newState = "TOO_HEAVY";
+          }
+
+          pressureStateRef.current = newState;
         }
-        setFingerPressure(pressure);
+
+        // Map to display state
+        const displayMap: Record<string, "low" | "adequate" | "excessive" | null> = {
+          NO_FINGER: null,
+          TOO_HEAVY: "excessive",
+          UNSTABLE: "adequate", // Show as adequate but with "Hold still" hint
+          ADEQUATE: "adequate",
+          TOO_LIGHT: "low",
+          WEAK_SIGNAL: "low",
+        };
+        setFingerPressure(displayMap[pressureStateRef.current ?? "NO_FINGER"] ?? null);
+        setPressureDetail(pressureStateRef.current);
       } else {
         setFingerPressure(null);
+        setPressureDetail(null);
+        pressureStateRef.current = null;
+        adequateDwellRef.current = 0;
+        unstableDwellRef.current = 0;
       }
 
       // Compute SpO2 and Hb from the gated (measuring-phase) color buffers,
@@ -619,6 +690,7 @@ export default function VitalMonitoringPage() {
       setFingerDetected(false);
       setSkinDetected(false);
       setFingerPressure(null);
+      setPressureDetail(null);
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -1257,13 +1329,17 @@ export default function VitalMonitoringPage() {
                   fingerPressure === "low" ? "bg-amber-700/90 text-amber-50" :
                   "bg-red-700/90 text-red-50"
                 } flex items-center gap-1`}>
-                  {fingerPressure === "adequate" && <span className="text-emerald-300">✓</span>}
+                  {pressureDetail === "ADEQUATE" && <span className="text-emerald-300">✓</span>}
+                  {pressureDetail === "UNSTABLE" && <span className="text-sky-300">↻</span>}
                   {fingerPressure === "low" && <span className="text-amber-300">⚠</span>}
                   {fingerPressure === "excessive" && <span className="text-red-300">⚠</span>}
                   <span>
-                    {fingerPressure === "low" ? "Press firmer" :
-                     fingerPressure === "excessive" ? "Press lighter" :
-                     "Pressure OK"}
+                    {pressureDetail === "TOO_HEAVY" ? "Press lighter — occlusion detected" :
+                     pressureDetail === "TOO_LIGHT" ? "Press firmer — light leak" :
+                     pressureDetail === "UNSTABLE" ? "Hold still — motion detected" :
+                     pressureDetail === "WEAK_SIGNAL" ? "Adjust gently, keep still" :
+                     pressureDetail === "ADEQUATE" ? "Pressure OK" :
+                     "Adjust pressure"}
                   </span>
                 </div>
               )}
