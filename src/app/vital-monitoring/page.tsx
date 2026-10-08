@@ -90,6 +90,7 @@ export default function VitalMonitoringPage() {
   const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
   const [fingerDetected, setFingerDetected] = useState(false);
   const [skinDetected, setSkinDetected] = useState(false);
+  const [fingerPressure, setFingerPressure] = useState<"low" | "adequate" | "excessive" | null>(null);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
@@ -458,6 +459,25 @@ export default function VitalMonitoringPage() {
       const sqi = analysis.heart.signalQuality;
       setSignalQuality(sqi / 100);
 
+      // Finger pressure classification (rear camera only)
+      if (cameraMode === "rear" && !demoMode && fingerDetected) {
+        const perfusion = analysis.heart.perfusionIndex ?? 0;
+        const dcLevel = greenWin.length > 0 ? greenWin.reduce((a, b) => a + b, 0) / greenWin.length : 0;
+        // Perfusion index % (AC/DC * 100). Typical range: 0.5-5% for fingertip PPG
+        // DC level: 0-255, finger on lens typically 90-200
+        let pressure: "low" | "adequate" | "excessive" | null = null;
+        if (perfusion < 0.8 || dcLevel > 200) {
+          pressure = "low"; // Poor contact or too light
+        } else if (perfusion < 0.3 || dcLevel < 70) {
+          pressure = "excessive"; // Occlusion - blood flow restricted
+        } else {
+          pressure = "adequate";
+        }
+        setFingerPressure(pressure);
+      } else {
+        setFingerPressure(null);
+      }
+
       // Compute SpO2 and Hb from the gated (measuring-phase) color buffers,
       // but only when the composite signal quality is high enough for
       // ratio-of-ratios math to be meaningful (weak/motion signals previously
@@ -587,6 +607,7 @@ export default function VitalMonitoringPage() {
       setCreatinine(null);
       setFingerDetected(false);
       setSkinDetected(false);
+      setFingerPressure(null);
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -1215,8 +1236,26 @@ export default function VitalMonitoringPage() {
         <div className="relative h-64 bg-black">
           <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
           {cameraOn && cameraMode === "rear" && (
-            <div className={`absolute top-2 right-2 ${fingerDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"} text-xs px-2 py-1 rounded`}>
-              {fingerDetected ? "Finger detected" : "Place fingertip over lens"}
+            <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
+              <div className={`text-xs px-2 py-1 rounded ${fingerDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"}`}>
+                {fingerDetected ? "Finger detected" : "Place fingertip over lens"}
+              </div>
+              {fingerDetected && fingerPressure && (
+                <div className={`text-xs px-2 py-1 rounded font-medium ${
+                  fingerPressure === "adequate" ? "bg-emerald-700/90 text-emerald-50" :
+                  fingerPressure === "low" ? "bg-amber-700/90 text-amber-50" :
+                  "bg-red-700/90 text-red-50"
+                } flex items-center gap-1`}>
+                  {fingerPressure === "adequate" && <span className="text-emerald-300">✓</span>}
+                  {fingerPressure === "low" && <span className="text-amber-300">⚠</span>}
+                  {fingerPressure === "excessive" && <span className="text-red-300">⚠</span>}
+                  <span>
+                    {fingerPressure === "low" ? "Press firmer" :
+                     fingerPressure === "excessive" ? "Press lighter" :
+                     "Pressure OK"}
+                  </span>
+                </div>
+              )}
             </div>
           )}
           {cameraOn && cameraMode === "front" && !demoMode && (
