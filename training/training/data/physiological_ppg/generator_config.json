@@ -1,0 +1,7 @@
+{
+  "fs": 125,
+  "segment_length": 1024,
+  "duration": 8.192,
+  "model": "3-element Windkessel",
+  "n_samples": 5000
+}
