@@ -464,14 +464,25 @@ export default function VitalMonitoringPage() {
         const perfusion = analysis.heart.perfusionIndex ?? 0;
         const dcLevel = greenWin.length > 0 ? greenWin.reduce((a, b) => a + b, 0) / greenWin.length : 0;
         // Perfusion index % (AC/DC * 100). Typical range: 0.5-5% for fingertip PPG
-        // DC level: 0-255, finger on lens typically 90-200
+        // DC level: 0-255, finger on lens typically 90-180
+        // Both low and excessive pressure reduce perfusion, but DC distinguishes them:
+        // - Low pressure: poor contact → low perfusion + HIGH DC (ambient light)
+        // - Excessive pressure: occlusion → low perfusion + LOW DC (blood squeezed out)
+        // - Adequate: normal perfusion (0.5-5%) + moderate DC (80-180)
         let pressure: "low" | "adequate" | "excessive" | null = null;
-        if (perfusion < 0.8 || dcLevel > 200) {
-          pressure = "low"; // Poor contact or too light
-        } else if (perfusion < 0.3 || dcLevel < 70) {
-          pressure = "excessive"; // Occlusion - blood flow restricted
-        } else {
+        if (perfusion >= 0.5 && perfusion <= 5.0 && dcLevel >= 80 && dcLevel <= 180) {
           pressure = "adequate";
+        } else if (perfusion < 0.5) {
+          if (dcLevel > 180) {
+            pressure = "low";        // Poor contact - ambient light leaking
+          } else if (dcLevel < 80) {
+            pressure = "excessive";  // Occlusion - blood flow restricted
+          } else {
+            pressure = "low";        // Low perfusion with moderate DC - likely poor contact
+          }
+        } else {
+          // Perfusion > 5% or DC out of range - treat as low quality contact
+          pressure = "low";
         }
         setFingerPressure(pressure);
       } else {
