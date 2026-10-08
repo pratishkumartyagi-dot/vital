@@ -261,7 +261,7 @@ export function extractRPPGRespiration(
   return estimateRespRateRPPG(pos, fs);
 }
 
-function posPulse(red: number[], green: number[], blue: number[], winLen = 32): number[] {
+function posPulse(red: number[], green: number[], blue: number[], winLen = 120): number[] {
   const n = Math.min(red.length, green.length, blue.length);
   if (n < winLen || winLen < 8) return [];
   const hop = Math.max(1, Math.floor(winLen / 2));

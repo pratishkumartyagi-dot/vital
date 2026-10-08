@@ -200,9 +200,9 @@ function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): {
 /// h = S1 + alpha*S2 with alpha = std(S1)/std(S2). Common-mode illumination and
 /// motion artifacts cancel in both projections while the pulse boosts, which
 /// far outperforms any single raw channel for front-camera facial rPPG.
-/// Windows of ~1 s are Hann-weighted and overlap-added so block edges do not
+/// Windows of ~4 s are Hann-weighted and overlap-added so block edges do not
 /// inject discontinuities into the downstream bandpass.
-export function posPulse(red: number[], green: number[], blue: number[], winLen = 32): number[] {
+export function posPulse(red: number[], green: number[], blue: number[], winLen = 120): number[] {
   const n = Math.min(red.length, green.length, blue.length);
   if (n < winLen || winLen < 8) return [];
   const hop = Math.max(1, Math.floor(winLen / 2));
@@ -453,11 +453,11 @@ function computeSignalQuality(
   const dc = dcRef > 1e-9 ? dcRef : dcLevel(raw);
   const ac = rms(filtered);
   const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
-  // Facial rPPG runs at 0.05-0.5% AC/DC and contact fingertip PPG at 0.5-5%, so
-  // full credit at 0.5% with a square-root law keeps the entire remote-PPG range
-  // usable instead of collapsing it to zero, while still discriminating a
-  // strong pulse from a weak one.
-  const piScore = clamp01(Math.sqrt(pi / 0.5));
+  // Facial rPPG runs at 0.05-0.5% AC/DC and contact fingertip PPG at 0.5-5%.
+  // Full credit at 0.1% (sqrt(pi/0.1)) keeps the remote-PPG range usable while
+  // still discriminating strong pulse from weak. The old 0.5% reference
+  // collapsed good facial rPPG (0.1-0.3%) to ~0.3-0.5 score.
+  const piScore = clamp01(Math.sqrt(pi / 0.1));
 
   // 2. Bandwidth-matched spectral SNR on the RAW signal (see spectralSnr).
   //    Log-scaled because the usable range spans orders of magnitude:
@@ -651,7 +651,8 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
     const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(signal);
     const ac = rms(rawFiltered);
     const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
-    const piScore = clamp01(Math.sqrt(pi / 0.5));
+    // Facial rPPG runs at 0.05-0.5% AC/DC; full credit at 0.1%
+    const piScore = clamp01(Math.sqrt(pi / 0.1));
     const { snr } = spectralSnr(signal, fs);
     const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
     const prominence = cardiacSpectralProminence(signal, fs);
@@ -707,7 +708,8 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(ppg);
   const ac = rms(rawFiltered);
   const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
-  const piScore = clamp01(Math.sqrt(pi / 0.5));
+  // Facial rPPG runs at 0.05-0.5% AC/DC; full credit at 0.1%
+  const piScore = clamp01(Math.sqrt(pi / 0.1));
 
   // 2. Bandwidth-matched spectral SNR on raw signal
   const { snr } = spectralSnr(ppg, fs);
