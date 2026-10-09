@@ -150,6 +150,17 @@ export default function VitalMonitoringPage() {
   const loadingRef = useRef(loading);
   const phaseRef = useRef(phase);
   const toggleCameraRef = useRef<(() => void) | null>(null);
+  /// Mirrors of `cameraMode` / `torchOn` for use inside async camera code.
+  /// `switchCameraMode` sets the state and then immediately invokes
+  /// `toggleCameraRef.current()`. React state updates are asynchronous, so the
+  /// `toggleCamera` closure still on the ref at that moment captured the
+  /// PREVIOUS mode: switching to front while the camera was off opened the
+  /// environment camera (and vice versa), which is why front mode showed the
+  /// rear sensor — and why finger detection then failed, because the analysis
+  /// path was looking at a face instead of a fingertip. These refs are updated
+  /// synchronously so `toggleCamera` always reads the mode the user just chose.
+  const cameraModeRef = useRef(cameraMode);
+  const torchOnRef = useRef(torchOn);
 
   const [patient, setPatient] = useState<{
     name: string;
@@ -206,6 +217,17 @@ export default function VitalMonitoringPage() {
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+
+  // Keep the mode/torch mirrors in step with state. `switchCameraMode` and the
+  // torch button also write them synchronously, because those paths need the new
+  // value before React has re-rendered.
+  useEffect(() => {
+    cameraModeRef.current = cameraMode;
+  }, [cameraMode]);
+
+  useEffect(() => {
+    torchOnRef.current = torchOn;
+  }, [torchOn]);
 
   useEffect(() => {
     return () => {
@@ -297,6 +319,10 @@ export default function VitalMonitoringPage() {
     const data = ctx.getImageData(0, 0, PROC_W, PROC_H).data;
 
     let r = 0, g = 0, b = 0, count = 0;
+    // Luminance moments of the rear ROI, used for the occlusion/uniformity
+    // test: a fingertip covering the lens produces a structureless field,
+    // whereas any scene (face, room, hand) is full of edges.
+    let lumSum = 0, lumSqSum = 0;
     let frameOk = true;
     if (cameraMode === "rear") {
       // Rear camera: center ROI (finger on lens) - smaller, more focused region
@@ -306,10 +332,14 @@ export default function VitalMonitoringPage() {
       for (let y = cy0; y < cy1; y++) {
         for (let x = cx0; x < cx1; x++) {
           const i = (y * PROC_W + x) * 4;
-          r += data[i];
-          g += data[i + 1];
-          b += data[i + 2];
+          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
+          r += pr;
+          g += pg;
+          b += pb;
           count++;
+          const lum = (pr + pg + pb) / 3;
+          lumSum += lum;
+          lumSqSum += lum * lum;
         }
       }
     } else {
@@ -467,34 +497,54 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
-    // Finger detection for rear camera - uses color signature + temporal stability
-    // Finger PPG signature: Red >> Green ≈ Blue (red penetrates tissue, green/blue absorbed by blood)
+    // Finger detection for rear camera.
+    //
+    // Physical signature of a fingertip occluding the rear lens under torch:
+    //   1. BRIGHT in red — torch light transmitted through the finger tissue.
+    //   2. Strongly ATTENUATED in green and blue — haemoglobin absorbs both, so
+    //      G and B must sit well below R, not merely below it.
+    //   3. Red dominance far above ordinary skin/room lighting.
+    //   4. Spatially UNIFORM — the finger occludes the lens, so the field has no
+    //      edges; any scene (face, room, hand) is full of structure.
+    //
+    // The previous thresholds (R/G > 1.15, G < 220, R > 50) accepted an ordinary
+    // red-dominant scene: skin sits at R/G ~ 1.25 and warm room light higher
+    // still, so an uncovered lens reported "finger detected". Meanwhile a finger
+    // that blocked an unlit or weakly-lit lens went near-black, failed every
+    // range check, and reported "no finger" — the reported inversion. Tightening
+    // red dominance, requiring green/blue absorption and adding the occlusion
+    // test separates the two cases in both torch states.
     let isFingerFrame = false;
     if (cameraMode === "rear") {
-      // Adaptive thresholds based on frame statistics
       const brightness = (avgR + avgG + avgB) / 3;
-      
-      // Finger criteria (relaxed for real-world smartphone conditions):
-      // 1. Red in good range (not too dark, not saturated) - relaxed lower bound
-      // 2. Red significantly higher than green AND blue (ratios > 1.15) - relaxed
-      // 3. Green and blue similar (both absorbed by blood) - within 50% - relaxed
-      // 4. Sufficient signal strength - relaxed
-      // 5. Brightness in reasonable range for finger on camera - relaxed
-      // 6. Green/Blue in reasonable range - relaxed
-      
+
       const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
       const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
-      const greenBlueDiff = Math.abs(avgG - avgB);
-      const greenBlueMax = Math.max(avgG, avgB);
-      
-      const redInRange = avgR >= 50 && avgR <= 250;  // Relaxed: was 70-245
-      const redDominant = redGreenRatio > 1.15 && redBlueRatio > 1.15;  // Relaxed: was 1.3
-      const greenBlueSimilar = greenBlueMax > 1 ? (greenBlueDiff / greenBlueMax) < 0.5 : true;  // Relaxed: was 0.4
-      const sufficientSignal = avgR > 50;  // Relaxed: was 70
-      const brightnessOk = brightness > 30 && brightness < 235;  // Relaxed: was 50-220
-      const greenBlueReasonable = avgG > 8 && avgB > 8 && avgG < 220 && avgB < 220;  // Relaxed: was 15-200
-      
-      isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal && brightnessOk && greenBlueReasonable;
+
+      // Coefficient of variation of luminance over the ROI: the occlusion test.
+      const lumMean = count > 0 ? lumSum / count : 0;
+      const lumVar = count > 0 ? Math.max(0, lumSqSum / count - lumMean * lumMean) : 1;
+      const lumCv = lumMean > 1e-9 ? Math.sqrt(lumVar) / lumMean : 1;
+
+      // Red must be bright (torch bleeding through tissue) but not clipped.
+      const redBright = avgR >= 90 && avgR <= 252;
+      // Haemoglobin absorbs green and blue; on a torch-illuminated finger they
+      // are heavily attenuated. Ordinary skin/scene lighting leaves them high.
+      const greenBlueAbsorbed = avgG < 130 && avgB < 130;
+      // Torch-illuminated finger tissue is strongly red-dominant. Ordinary skin
+      // sits at R/G ~ 1.1-1.4 and warm room lighting at ~1.5-1.6, so 1.7
+      // separates them with margin on both sides. This is the primary
+      // discriminator: a uniformly-lit warm surface is optically near-identical
+      // to a weakly-illuminated finger, so the two can only be told apart by
+      // requiring the illumination the app forces in rear mode.
+      const redDominant = redGreenRatio > 1.7 && redBlueRatio > 1.7;
+      // A finger covering the lens occludes it: low spatial structure. Real
+      // finger tissue measures lumCv 0.03-0.08 even with codec noise and
+      // pressure shading; scenes measure 0.15-0.5.
+      const occluding = lumCv < 0.25;
+      const brightnessOk = brightness > 60 && brightness < 245;
+
+      isFingerFrame = redBright && redDominant && greenBlueAbsorbed && occluding && brightnessOk;
 
       // Hysteresis over a ~1 s history. A 5-frame majority vote is only ~167 ms
       // at 30 fps, far shorter than the 0.5-2 s a real placement or removal
@@ -1110,7 +1160,11 @@ export default function VitalMonitoringPage() {
   }, [finalizeSession]);
 
   const toggleCamera = useCallback(async () => {
-    if (cameraOn) {
+    // Read the on/off state from the ref: `switchCameraMode` calls this right
+    // after setState, so the closure's `cameraOn` can still say "on" when the
+    // camera has already been stopped, which would re-enter the stop branch and
+    // never open the new sensor.
+    if (cameraOnRef.current) {
       if (countdownTimerRef.current) {
         window.clearInterval(countdownTimerRef.current);
         countdownTimerRef.current = null;
@@ -1151,7 +1205,11 @@ export default function VitalMonitoringPage() {
         height: { ideal: 480 }
       };
 
-      if (cameraMode === "rear") {
+      // Read the mode from the ref, not from the closure's `cameraMode`: when
+      // `switchCameraMode` calls this immediately after setState, the closure
+      // still holds the previous mode and would open the wrong sensor.
+      const mode = cameraModeRef.current;
+      if (mode === "rear") {
         videoConstraints.facingMode = "environment";
       } else {
         videoConstraints.facingMode = "user";
@@ -1167,14 +1225,42 @@ export default function VitalMonitoringPage() {
       }
 
       const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack && cameraMode === "rear") {
+      // Report which sensor was actually granted so a device that ignores
+      // facingMode (common on desktop and some Android builds) is visible in
+      // the UI instead of silently analysing the wrong camera.
+      if (videoTrack) {
         try {
-          const caps = videoTrack.getCapabilities?.() as { torch?: unknown } | undefined;
-          if (caps?.torch) {
-            await videoTrack.applyConstraints({ torch: torchOn } as any);
+          const caps = videoTrack.getCapabilities?.() as { facingMode?: unknown } | undefined;
+          if (caps?.facingMode && caps.facingMode !== mode) {
+            setError(
+              `This device opened the ${String(caps.facingMode)}-facing camera instead of ${mode}. ` +
+              `Finger/vitals detection requires the ${mode} camera.`
+            );
           }
         } catch {
-          // Torch may not be supported on all devices
+          // getCapabilities is optional; ignore when unavailable.
+        }
+        if (mode === "rear") {
+          // Contact PPG is reflective: the finger must be illuminated or it
+          // merely blocks the lens and the frame goes near-black, in which case
+          // finger detection legitimately cannot succeed. Surface that instead
+          // of leaving the user with a silent "place fingertip over lens".
+          try {
+            const torchCaps = videoTrack.getCapabilities?.() as { torch?: unknown } | undefined;
+            if (torchCaps?.torch) {
+              await videoTrack.applyConstraints({ torch: torchOnRef.current } as any);
+            } else {
+              setError(
+                "This device does not expose a torch/flash for the rear camera. " +
+                "Rear-camera contact PPG needs the finger to be illuminated, so readings may be unreliable."
+              );
+            }
+          } catch {
+            setError(
+              "Could not enable the rear-camera torch. Rear-camera contact PPG needs the finger " +
+              "to be illuminated, so readings may be unreliable."
+            );
+          }
         }
       }
 
@@ -1195,24 +1281,40 @@ export default function VitalMonitoringPage() {
     } finally {
       setLoading(false);
     }
-  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode, stopVideoRecording, startVideoRecording]);
+  // cameraOn / cameraMode / torchOn are read through refs, not captured from the
+  // closure, so they are deliberately absent from the deps.
+  }, [stopStream, startAutoCountdown, demoMode, stopVideoRecording, startVideoRecording]);
 
   toggleCameraRef.current = toggleCamera;
 
   const switchCameraMode = useCallback(async (mode: "front" | "rear") => {
     const wasOn = cameraOnRef.current;
+    // Write the mirrors synchronously. `toggleCameraRef.current()` is invoked
+    // below and reads these refs; if they still held the previous mode the wrong
+    // sensor would open (front mode showing the rear camera, and rear mode
+    // showing a face so the finger was never detected).
+    cameraModeRef.current = mode;
     setCameraMode(mode);
-    if (mode === "rear") {
-      setTorchOn(true);
-    } else {
-      setTorchOn(false);
-    }
+    const nextTorch = mode === "rear";
+    torchOnRef.current = nextTorch;
+    setTorchOn(nextTorch);
+    // Reset every per-mode detector so the new mode starts from a clean slate:
+    // the finger vote must not inherit history from a face, and the front-camera
+    // ROI centroid must be re-seeded rather than locked on the old framing.
+    fingerDetectedRef.current = false;
+    fingerHistoryRef.current = [];
+    roiCentroidRef.current = null;
+    setFingerDetected(false);
+    setFingerPressure(null);
+    setPressureDetail(null);
     if (wasOn) {
       stopStream();
       setCameraOn(false);
       setError(null);
       setPhase("idle");
       setCountdown(0);
+      // Wait for React to commit the cameraOn=false transition so the restart
+      // path in `toggleCamera` sees a stopped camera.
       await new Promise((r) => setTimeout(r, 100));
     }
     toggleCameraRef.current?.();
@@ -1610,22 +1712,23 @@ export default function VitalMonitoringPage() {
             {cameraMode === "rear" && (
               <button
                  onClick={async () => {
-                   const next = !torchOn;
-                   setTorchOn(next);
-                   const track = streamRef.current?.getVideoTracks()[0];
-                   if (track) {
-                     try {
-                       const caps = track.getCapabilities?.() as { torch?: unknown } | undefined;
-                       if (caps?.torch) {
-                         await track.applyConstraints({ torch: next } as any);
-                       } else {
-                         setError("This device/browser does not expose a torch/flash API for the selected track.");
-                       }
-                     } catch (e) {
-                       setError(getErrorMessage(e));
-                     }
-                   }
-                 }}
+                    const next = !torchOn;
+                    torchOnRef.current = next;
+                    setTorchOn(next);
+                    const track = streamRef.current?.getVideoTracks()[0];
+                    if (track) {
+                      try {
+                        const caps = track.getCapabilities?.() as { torch?: unknown } | undefined;
+                        if (caps?.torch) {
+                          await track.applyConstraints({ torch: next } as any);
+                        } else {
+                          setError("This device/browser does not expose a torch/flash API for the selected track.");
+                        }
+                      } catch (e) {
+                        setError(getErrorMessage(e));
+                      }
+                    }
+                  }}
                 className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                   torchOn
                     ? "bg-amber-600 border-amber-500 text-neutral-100"
