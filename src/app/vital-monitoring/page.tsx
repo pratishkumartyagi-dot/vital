@@ -613,7 +613,11 @@ export default function VitalMonitoringPage() {
       const collecting = phaseRef.current === "measuring" && frameOk &&
         (cameraMode !== "rear" || fingerPresent || signalLooksLikeFinger);
       if (collecting) {
-        ppgBufferRef.current.push(avgG);
+        // For rear camera, red is typically the best contact PPG channel
+        // (haemoglobin absorbs green more strongly, so red penetrates deeper).
+        // Store the best-guess channel in ppgBufferRef for fallback use.
+        const ppgValue = cameraMode === "rear" ? avgR : avgG;
+        ppgBufferRef.current.push(ppgValue);
         if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
         redRef.current.push(avgR);
         greenRef.current.push(avgG);
@@ -623,7 +627,7 @@ export default function VitalMonitoringPage() {
         if (blueRef.current.length > 1800) blueRef.current.shift();
       }
 
-      valuesRef.current.push(avgR);
+      valuesRef.current.push(cameraMode === "rear" ? avgR : avgG);
       if (valuesRef.current.length > 180) valuesRef.current.shift();
     }
 
