@@ -1435,6 +1435,9 @@ export interface PpgChannelSelection {
 /// Both channels are bandpass-filtered 0.5-8 Hz before SNR estimation
 /// so the metric reflects usable cardiac content, not raw DC or
 /// high-frequency sensor noise.
+///
+/// Returns the RAW winning channel (not bandpassed) so the caller can apply
+/// its own filtering. The dcRef is the mean of the raw winning channel.
 export function selectBestPpgChannel(
   red: number[],
   green: number[],
@@ -1469,8 +1472,8 @@ export function selectBestPpgChannel(
   const dcRed = red.reduce((a, b) => a + b, 0) / red.length;
   const dcGreen = green.reduce((a, b) => a + b, 0) / green.length;
   return redWin
-    ? { signal: redFiltered, channel: "red", dcRef: dcRed, redSnr, greenSnr }
-    : { signal: greenFiltered, channel: "green", dcRef: dcGreen, redSnr, greenSnr };
+    ? { signal: red.slice(-n), channel: "red", dcRef: dcRed, redSnr, greenSnr }
+    : { signal: green.slice(-n), channel: "green", dcRef: dcGreen, redSnr, greenSnr };
 }
 
 function clamp01(v: number): number {
