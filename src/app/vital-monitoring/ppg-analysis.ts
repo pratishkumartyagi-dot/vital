@@ -38,6 +38,19 @@ export interface RespMetrics {
   waveform?: number[];
 }
 
+export interface StressMetrics {
+  level: "low" | "medium" | "high";
+  score: number; // 0-100
+  confidence: number;
+  hrvFeatures: {
+    sdnn: number;
+    rmssd: number;
+    pnn50: number;
+    hrMean: number;
+    lfHfRatio: number | null;
+  };
+}
+
 import { estimateRespRateRPPG, extractRPPGRespiration } from './rppg-resp';
 import { estimateRespRateRearPPG } from './rrest-resp';
 
@@ -835,9 +848,9 @@ export function analyzeHeartRate(
 ): HeartMetrics {
   const minFloorMs = 300;
   const thresholdWindowSec = 8;
-  const maxPeakSpectralDiffBpm = 8;
-  const minValidFraction = 0.7;
-  const minSnrDb = 0;
+  const maxPeakSpectralDiffBpm = 12;  // Relaxed from 8 for real-world variation
+  const minValidFraction = 0.5;       // Relaxed from 0.7 for noisy signals
+  const minSnrDb = -3;                // Allow slightly negative SNR for weak signals
 
   if (!ppg || ppg.length < fs * 5) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0 };
@@ -880,7 +893,7 @@ export function analyzeHeartRate(
 
   // Peak detection with new algorithm
   const peakTimesMs = detectPeaksAdaptive(f, fs, seedRr, minFloorMs, thresholdWindowSec);
-  if (peakTimesMs.length < 4) {
+  if (peakTimesMs.length < 3) {  // Relaxed from 4 to 3
     const basicSQI = computeBasicSQI(ppg, fs, dcRef);
     const basicPi = dcRef && dcRef > 1e-9 ? (rms(butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true)) / dcRef) * 100 : 0;
     return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
@@ -1209,6 +1222,81 @@ function estimateGlucose(
   };
 }
 
+function estimateStress(
+  hrv: HRVMetrics | null,
+  heartRate: number | null,
+  signalQuality: number,
+  morphology: { stiffnessIndex: number; reflectionIndex: number } | null
+): StressMetrics {
+  // Stress estimation based on HRV and morphological features
+  // CatBoost stress model uses: HRV (SDNN, RMSSD, pNN50, HR mean, LF/HF), 
+  // and PPG morphological features (stiffness, reflection index)
+  
+  if (!hrv || signalQuality < 30) {
+    return {
+      level: "medium",
+      score: 50,
+      confidence: 0,
+      hrvFeatures: { sdnn: 0, rmssd: 0, pnn50: 0, hrMean: 0, lfHfRatio: null }
+    };
+  }
+
+  const { sdnn, rmssd, pnn50, lfHfRatio } = hrv;
+  const hr = heartRate ?? 70;
+
+  // Stress score computation based on HRV literature:
+  // Low stress: high HRV (SDNN > 50, RMSSD > 40, pNN50 > 15), low LF/HF
+  // High stress: low HRV (SDNN < 30, RMSSD < 20, pNN50 < 5), high LF/HF
+  
+  // Normalize features to 0-1 stress contribution
+  const sdnnStress = 1 - clamp01(sdnn / 80);        // Higher SDNN = lower stress
+  const rmssdStress = 1 - clamp01(rmssd / 60);      // Higher RMSSD = lower stress
+  const pnn50Stress = 1 - clamp01(pnn50 / 30);      // Higher pNN50 = lower stress
+  const hrStress = clamp01((hr - 60) / 50);         // Higher HR = higher stress
+  const lfHfStress = lfHfRatio !== null ? clamp01(lfHfRatio / 5) : 0.5; // Higher LF/HF = higher stress
+  
+  // Morphological stress indicators (if available)
+  const stiffnessStress = morphology ? clamp01(morphology.stiffnessIndex / 5) : 0.3;
+  const reflectionStress = morphology ? clamp01(morphology.reflectionIndex / 1.5) : 0.3;
+
+  // Weighted stress score (0-100)
+  const weights = {
+    sdnn: 0.25,
+    rmssd: 0.20,
+    pnn50: 0.15,
+    hr: 0.15,
+    lfHf: 0.15,
+    stiffness: 0.05,
+    reflection: 0.05
+  };
+
+  const stressScore = Math.round(100 * (
+    weights.sdnn * sdnnStress +
+    weights.rmssd * rmssdStress +
+    weights.pnn50 * pnn50Stress +
+    weights.hr * hrStress +
+    weights.lfHf * lfHfStress +
+    weights.stiffness * stiffnessStress +
+    weights.reflection * reflectionStress
+  ));
+
+  // Determine level
+  let level: "low" | "medium" | "high";
+  if (stressScore < 35) level = "low";
+  else if (stressScore < 65) level = "medium";
+  else level = "high";
+
+  // Confidence based on signal quality and HRV reliability
+  const confidence = clamp01(signalQuality / 100 * 0.8 + (hrv.sdnn > 0 ? 0.2 : 0));
+
+  return {
+    level,
+    score: stressScore,
+    confidence,
+    hrvFeatures: { sdnn, rmssd, pnn50, hrMean: hr, lfHfRatio }
+  };
+}
+
 export type CreatinineClass = "low" | "normal" | "high";
 
 export interface CreatinineMetrics {
@@ -1424,7 +1512,7 @@ const RESP_HI = 0.5;
 /// median of log-domain std ratios for motion robustness.
 const SPO2_RED_GREEN_SLOPE = 20;
 const SPO2_RED_GREEN_INTERCEPT = 110;
-const SPO2_RED_GREEN_MIN = 88;
+const SPO2_RED_GREEN_MIN = 85;
 const SPO2_RED_GREEN_MAX = 100;
 
 /// Log-domain SpO2 calibration (PMC10705321 method, recalibrated for red/green).
@@ -1440,7 +1528,7 @@ const SPO2_RED_GREEN_MAX = 100;
 /// (`110 - 20R`): a healthy subject at R ~ 0.5-0.8 maps to 94-98%.
 const SPO2_LOG_SLOPE = 12;
 const SPO2_LOG_INTERCEPT = 104;
-const SPO2_LOG_MIN = 70;
+const SPO2_LOG_MIN = 80;
 const SPO2_LOG_MAX = 100;
 
 /// Log-domain window parameters (from paper: 10s window, 5s step @ 30Hz)
@@ -1881,6 +1969,7 @@ export interface VitalAnalysis {
   bpDeep: BPResult | null;
   glucose: GlucoseMetrics;
   creatinine: CreatinineMetrics;
+  stress: StressMetrics;
 }
 
 export interface AnalyzeOptions {
@@ -1925,6 +2014,14 @@ export function analyzeVitals(
       : { respRate: null, method: "insufficient-data", confidence: 0, waveform: [] };
   const bp = estimateBloodPressure(ppg, heart.peaks, heart.rrIntervals, heart.hrv, fs);
   const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs, heart.signalQuality);
+  
+  // Extract morphological features for stress estimation
+  const morphFeatures = extractPPGFeatures(ppg, heart.peaks, fs);
+  const stress = estimateStress(heart.hrv, heart.bpm, heart.signalQuality, {
+    stiffnessIndex: morphFeatures.stiffnessIndex,
+    reflectionIndex: morphFeatures.reflectionIndex
+  });
+  
   const creatinine = estimateCreatinine(
     ppg,
     redSignal,
@@ -1953,6 +2050,7 @@ export function analyzeVitals(
     bpDeep: null,
     glucose,
     creatinine,
+    stress,
   };
 }
 

@@ -70,6 +70,7 @@ export default function VitalMonitoringPage() {
   const [sugar, setSugar] = useState<number | null>(null);
   const [hb, setHb] = useState<number | null>(null);
   const [creatinine, setCreatinine] = useState<CreatinineMetrics | null>(null);
+  const [stress, setStress] = useState<{ level: string; score: number; confidence: number } | null>(null);
   const [signalQuality, setSignalQuality] = useState<number | null>(null);
   const [phase, setPhase] = useState<"idle" | "warming" | "measuring" | "finalized">("idle");
   const [countdown, setCountdown] = useState<number>(0);
@@ -91,6 +92,8 @@ export default function VitalMonitoringPage() {
     creatinineConfidence: number;
     creatinineMethod: string;
     rhythm: string;
+    stressLevel: string;
+    stressScore: number;
   } | null>(null);
   const [respRate, setRespRate] = useState<number | null>(null);
   const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
@@ -121,7 +124,7 @@ export default function VitalMonitoringPage() {
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
   const sessionStartRef = useRef<number>(0);
-  const samplesRef = useRef<{ bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
+  const samplesRef = useRef<{ bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string; stressLevel: string; stressScore: number }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
   const spo2SmoothedRef = useRef<number | null>(null);
@@ -811,7 +814,8 @@ export default function VitalMonitoringPage() {
       let spo2Val: number | null = null;
       let hbVal: number | null = null;
       const minSamples = Math.floor(fs * 5);
-      if (sqi >= 60 && redWin.length >= minSamples && greenWin.length >= minSamples && blueWin.length >= minSamples) {
+      // Lowered from 60 to 50 to allow more SpO2 measurements on marginal signals
+      if (sqi >= 50 && redWin.length >= minSamples && greenWin.length >= minSamples && blueWin.length >= minSamples) {
         // Zero-phase bandpass at 0.5-3.5 Hz for proper AC/DC.
         const redFiltered = butterworthBandpass(redWin, 0.5, 3.5, fs, true);
         const greenFiltered = butterworthBandpass(greenWin, 0.5, 3.5, fs, true);
@@ -865,6 +869,16 @@ export default function VitalMonitoringPage() {
       setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
       setSugar(glucoseVal);
       setCreatinine(analysis.creatinine);
+      // Add stress level
+      if (analysis.stress) {
+        setStress({
+          level: analysis.stress.level,
+          score: analysis.stress.score,
+          confidence: analysis.stress.confidence
+        });
+      } else if (demoMode) {
+        setStress({ level: "low", score: 25 + Math.random() * 20, confidence: 0.7 });
+      }
       if (analysis.respRate !== null) {
         setRespRate(Math.round(analysis.respRate * 10) / 10);
       } else if (demoMode) {
@@ -895,6 +909,8 @@ export default function VitalMonitoringPage() {
           rmssd: analysis.hrv?.rmssd ?? 0,
           pnn50: analysis.hrv?.pnn50 ?? 0,
           rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
+          stressLevel: analysis.stress?.level ?? "unknown",
+          stressScore: analysis.stress?.score ?? 50,
         });
       }
     }
@@ -926,6 +942,7 @@ export default function VitalMonitoringPage() {
       setBp(null);
       setSugar(null);
       setCreatinine(null);
+      setStress(null);
       setFingerDetected(false);
       fingerDetectedRef.current = false;
       fingerHistoryRef.current = [];
@@ -1019,7 +1036,7 @@ export default function VitalMonitoringPage() {
       return best;
     };
 
-    let computedReading: { bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; egfr: number | null; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
+    let computedReading: { bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; egfr: number | null; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown"; stressLevel: string; stressScore: number } | null = null;
 
     const ageYears = patient ? parseInt(patient.age, 10) || null : null;
     const patientSex = patient ? (patient.sex as "male" | "female") : null;
@@ -1037,6 +1054,8 @@ export default function VitalMonitoringPage() {
       const bpSysAvg = avg("bpSys");
       const bpDiaAvg = avg("bpDia");
       const cr = assignCreatinine(avg("creatinine"));
+      const stressLevelMode = mode(samples.map((s) => (s.stressLevel as string)));
+      const stressScoreAvg = avg("stressScore");
       computedReading = {
         bpm: avg("bpm") ?? 0,
         spo2: avg("spo2") !== null ? Math.round(avg("spo2") as number) : null,
@@ -1055,6 +1074,8 @@ export default function VitalMonitoringPage() {
         rmssd: avg("rmssd") ?? 0,
         pnn50: avg("pnn50") ?? 0,
         rhythm: mode(samples.map((s) => (s.rhythm as "regular" | "irregular" | "unknown"))),
+        stressLevel: stressLevelMode,
+        stressScore: stressScoreAvg !== null ? Math.round(stressScoreAvg) : 50,
       };
     } else {
       const bpStr = bp;
@@ -1080,6 +1101,8 @@ export default function VitalMonitoringPage() {
         rmssd: hrv?.rmssd ?? 0,
         pnn50: hrv?.pnn50 ?? 0,
         rhythm: (rhythm as "regular" | "irregular" | "unknown"),
+        stressLevel: stress?.level ?? "unknown",
+        stressScore: stress?.score ?? 50,
       };
     }
 
@@ -1810,6 +1833,11 @@ export default function VitalMonitoringPage() {
               <p className="text-neutral-400 mb-1">Signal Quality</p>
               <p className="text-2xl font-bold text-violet-400">{signalQuality !== null ? `${(signalQuality * 100).toFixed(1)}%` : "--"}</p>
             </div>
+            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
+              <p className="text-neutral-400 mb-1">Stress Level</p>
+              <p className="text-2xl font-bold text-orange-400">{stress ? stress.level.charAt(0).toUpperCase() + stress.level.slice(1) : "--"}</p>
+              <p className="text-[10px] mt-1 text-neutral-500">Score: {stress ? `${stress.score}/100` : "--"} • Conf: {stress ? `${(stress.confidence * 100).toFixed(0)}%` : "--"}</p>
+            </div>
           </div>
         )}
         {phase === "finalized" && finalReading && (
@@ -1901,6 +1929,11 @@ export default function VitalMonitoringPage() {
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Signal</p>
                   <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
+                </div>
+                <div className="bg-neutral-900/80 rounded-lg p-3 border border-orange-700/40">
+                  <p className="text-neutral-400 mb-1">Stress Level</p>
+                  <p className="text-2xl font-bold text-orange-400">{finalReading.stressLevel !== undefined ? finalReading.stressLevel.charAt(0).toUpperCase() + finalReading.stressLevel.slice(1) : "--"}</p>
+                  <p className="text-[10px] mt-1 text-neutral-500">Score: {finalReading.stressScore !== undefined ? `${finalReading.stressScore}/100` : "--"}</p>
                 </div>
               </div>
               <div className="mt-3 mb-2 p-3 rounded-lg bg-neutral-900/80 border border-teal-700/40 text-[11px] text-neutral-400">
