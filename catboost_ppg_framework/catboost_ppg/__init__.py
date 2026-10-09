@@ -16,19 +16,37 @@ References:
 - CatBoost: Categorical Boosting for tabular data
 """
 
-from .preprocessing import PPGPreprocessor
-from .features import PPGFeatureExtractor
+from .preprocessing import PPGPreprocessor, PreprocessingConfig, SignalQualityMetrics
+from .features import PPGFeatureExtractor, PPGFeatures, MorphologyFeatures, FrequencyFeatures, HRVFeatures
 from .models import CatBoostBPModel, CatBoostGlucoseModel, CatBoostStressModel
-from .pipeline import CatBoostPPGPipeline
+from .pipeline import (
+    CatBoostPPGPipeline,
+    PipelineConfig,
+    PipelineResult,
+    BPPrediction,
+    GlucosePrediction,
+    StressPrediction
+)
 
 __version__ = "1.0.0"
 __author__ = "CatBoost PPG Framework Team"
 
 __all__ = [
     "PPGPreprocessor",
-    "PPGFeatureExtractor", 
+    "PreprocessingConfig",
+    "SignalQualityMetrics",
+    "PPGFeatureExtractor",
+    "PPGFeatures",
+    "MorphologyFeatures",
+    "FrequencyFeatures",
+    "HRVFeatures",
     "CatBoostBPModel",
     "CatBoostGlucoseModel",
     "CatBoostStressModel",
     "CatBoostPPGPipeline",
+    "PipelineConfig",
+    "PipelineResult",
+    "BPPrediction",
+    "GlucosePrediction",
+    "StressPrediction",
 ]

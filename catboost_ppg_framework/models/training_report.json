@@ -1,0 +1,47 @@
+{
+  "bp_metrics": {
+    "sbp_best_score": {
+      "learn": {
+        "MAE": 2.9177893285508696
+      },
+      "validation": {
+        "MAE": 4.230235302110516
+      }
+    },
+    "dbp_best_score": {
+      "learn": {
+        "MAE": 1.0954537227074963
+      },
+      "validation": {
+        "MAE": 2.3331869288507976
+      }
+    },
+    "sbp_iterations": 43
+  },
+  "glucose_metrics": {
+    "best_score": {
+      "learn": {
+        "RMSE": 7.220466503605242
+      },
+      "validation": {
+        "RMSE": 9.845256266202139
+      }
+    },
+    "iterations": 181
+  },
+  "stress_metrics": {
+    "best_score": {
+      "learn": {
+        "Accuracy": 0.8327401420408453,
+        "MultiClass": 0.5358157913228649
+      },
+      "validation": {
+        "Accuracy": 0.8071269465743588,
+        "MultiClass": 0.6210675100409145
+      }
+    },
+    "iterations": 6
+  },
+  "n_samples": 1000,
+  "feature_count": 27
+}
