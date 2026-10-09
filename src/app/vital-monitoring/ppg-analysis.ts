@@ -1221,12 +1221,11 @@ export function combinePpgChannels(red: number[], green: number[], blue: number[
   return result;
 }
 
-/// Select the best single PPG channel (red or green) for heart-rate
-/// analysis based on per-recording spectral SNR. Green is the default
-/// because hemoglobin absorbs green strongly and flash saturation is
-/// rare, but red can outperform it on thick/dark/cold fingers where
-/// green is attenuated, provided the channel is not clipped by the
-/// torch.
+/// Select the best single PPG channel for heart-rate
+/// analysis based on per-recording spectral SNR. For rear-camera finger PPG, RED is preferred
+/// because hemoglobin absorbs red less strongly than green, giving better
+/// penetration through finger tissue and higher SNR. For front-camera rPPG,
+/// GREEN is preferred because the POS algorithm uses green as the reference.
 ///
 /// Saturation rejection: any channel with >10% samples at or above
 /// 250 (out of 255) is treated as unusable and automatically loses.
@@ -1238,7 +1237,8 @@ export function selectBestPpgChannel(
   red: number[],
   green: number[],
   blue: number[],
-  fs: number
+  fs: number,
+  preferRed = false
 ): number[] {
   const n = Math.min(red.length, green.length);
   if (n < Math.floor(fs * 2)) return green.slice(-n);
@@ -1256,11 +1256,20 @@ export function selectBestPpgChannel(
   const redScore = redSatFrac > 0.1 ? -1 : redSnr.snr;
   const greenScore = greenSatFrac > 0.1 ? -1 : greenSnr.snr;
 
-  // Higher SNR wins; stay on green when the two are close (within 20%).
-  if (greenScore >= redScore || greenScore >= redScore * 0.8) {
+  // For rear camera (finger PPG): prefer RED unless green is significantly better
+  // For front camera (rPPG): prefer GREEN as reference channel
+  if (preferRed) {
+    if (redScore >= greenScore || redScore >= greenScore * 0.8) {
+      return redFiltered;
+    }
     return greenFiltered;
+  } else {
+    // Higher SNR wins; stay on green when the two are close (within 20%).
+    if (greenScore >= redScore || greenScore >= redScore * 0.8) {
+      return greenFiltered;
+    }
+    return redFiltered;
   }
-  return redFiltered;
 }
 
 function clamp01(v: number): number {

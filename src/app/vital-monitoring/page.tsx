@@ -101,6 +101,8 @@ export default function VitalMonitoringPage() {
   const synthTimeRef = useRef<number>(0);
   const baseHrvRef = useRef<{ sdnn: number; rmssd: number; pnn50: number }>({ sdnn: 45, rmssd: 38, pnn50: 12 });
   const fpsRef = useRef<number>(30);
+  const frameIntervalsRef = useRef<number[]>([]);
+  const fingerHistoryRef = useRef<boolean[]>([]);
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
@@ -268,21 +270,28 @@ export default function VitalMonitoringPage() {
       return;
     }
 
+    // Increased resolution from 64x64 to 160x120 for better skin pixel count
+    // and more reliable facial ROI extraction (forehead, cheeks)
+    const PROC_W = 160;
+    const PROC_H = 120;
     const c = document.createElement("canvas");
-    c.width = 64;
-    c.height = 64;
+    c.width = PROC_W;
+    c.height = PROC_H;
     const ctx = c.getContext("2d");
     if (!ctx) return;
-    if (video) ctx.drawImage(video, 0, 0, 64, 64);
-    const data = ctx.getImageData(0, 0, 64, 64).data;
+    if (video) ctx.drawImage(video, 0, 0, PROC_W, PROC_H);
+    const data = ctx.getImageData(0, 0, PROC_W, PROC_H).data;
 
     let r = 0, g = 0, b = 0, count = 0;
     let frameOk = true;
     if (cameraMode === "rear") {
-      const cx0 = 22, cy0 = 22, cx1 = 42, cy1 = 42;
+      // Rear camera: center ROI (finger on lens) - smaller, more focused region
+      // Use 25%-75% to get a tighter center region
+      const cx0 = Math.floor(PROC_W * 0.25), cy0 = Math.floor(PROC_H * 0.25);
+      const cx1 = Math.floor(PROC_W * 0.75), cy1 = Math.floor(PROC_H * 0.75);
       for (let y = cy0; y < cy1; y++) {
         for (let x = cx0; x < cx1; x++) {
-          const i = (y * 64 + x) * 4;
+          const i = (y * PROC_W + x) * 4;
           r += data[i];
           g += data[i + 1];
           b += data[i + 2];
@@ -290,22 +299,45 @@ export default function VitalMonitoringPage() {
         }
       }
     } else {
-      // Skin-ROI sampling (front camera): average only skin-tone pixels
-      // (YCbCr band) so background, hair and clothing cannot dominate the
-      // pulse signal. The previous full-frame average diluted the facial
-      // rPPG waveform with scene content.
+      // Front camera: Focus on upper face region (forehead + upper cheeks)
+      // This avoids mouth/nose movement artifacts and gets better rPPG signal
+      const foreheadY0 = 0;
+      const foreheadY1 = Math.floor(PROC_H * 0.45);  // Upper 45% = forehead region
+      const foreheadX0 = Math.floor(PROC_W * 0.2);   // Center 60% width
+      const foreheadX1 = Math.floor(PROC_W * 0.8);
+      
       let skinR = 0, skinG = 0, skinB = 0, skinCount = 0;
-      for (let y = 0; y < 64; y++) {
-        for (let x = 0; x < 64; x++) {
-          const i = (y * 64 + x) * 4;
+      
+      // Adaptive skin detection: compute frame statistics first
+      let totalBrightness = 0, brightPixels = 0;
+      for (let y = foreheadY0; y < foreheadY1; y++) {
+        for (let x = foreheadX0; x < foreheadX1; x++) {
+          const i = (y * PROC_W + x) * 4;
+          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
+          const brightness = (pr + pg + pb) / 3;
+          totalBrightness += brightness;
+          brightPixels++;
+        }
+      }
+      const avgBrightness = brightPixels > 0 ? totalBrightness / brightPixels : 128;
+      
+      // Adaptive brightness gate: reject very dark/bright relative to frame mean
+      const brightLow = Math.max(30, avgBrightness * 0.3);
+      const brightHigh = Math.min(250, avgBrightness * 1.8);
+      
+      for (let y = foreheadY0; y < foreheadY1; y++) {
+        for (let x = foreheadX0; x < foreheadX1; x++) {
+          const i = (y * PROC_W + x) * 4;
           const pr = data[i];
           const pg = data[i + 1];
           const pb = data[i + 2];
           const brightness = (pr + pg + pb) / 3;
-          if (brightness < 45 || brightness > 245) continue;
+          if (brightness < brightLow || brightness > brightHigh) continue;
+          
+          // YCbCr skin detection with slightly wider range for diverse skin tones
           const cb = 128 - 0.168736 * pr - 0.331264 * pg + 0.5 * pb;
           const cr = 128 + 0.5 * pr - 0.418688 * pg - 0.081312 * pb;
-          if (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173) {
+          if (cb >= 70 && cb <= 135 && cr >= 125 && cr <= 180) {
             skinR += pr;
             skinG += pg;
             skinB += pb;
@@ -313,8 +345,12 @@ export default function VitalMonitoringPage() {
           }
         }
       }
-      const hasSkin = skinCount >= 0.05 * 64 * 64;
+      
+      // Require minimum skin pixels (0.5% of forehead ROI area)
+      const roiArea = (foreheadY1 - foreheadY0) * (foreheadX1 - foreheadX0);
+      const hasSkin = skinCount >= Math.max(50, 0.005 * roiArea);
       if (cameraMode === "front" && !demoMode) setSkinDetected(hasSkin);
+      
       if (hasSkin) {
         r = skinR;
         g = skinG;
@@ -322,13 +358,30 @@ export default function VitalMonitoringPage() {
         count = skinCount;
         frameOk = true;
       } else {
-        // No meaningful skin region: fall back to the full frame for the
-        // waveform preview but do not collect analysis samples.
-        for (let i = 0; i < data.length; i += 4) {
-          r += data[i];
-          g += data[i + 1];
-          b += data[i + 2];
-          count++;
+        // Fallback: use full forehead region average (not full frame)
+        let fallbackR = 0, fallbackG = 0, fallbackB = 0, fallbackCount = 0;
+        for (let y = foreheadY0; y < foreheadY1; y++) {
+          for (let x = foreheadX0; x < foreheadX1; x++) {
+            const i = (y * PROC_W + x) * 4;
+            fallbackR += data[i];
+            fallbackG += data[i + 1];
+            fallbackB += data[i + 2];
+            fallbackCount++;
+          }
+        }
+        if (fallbackCount > 0) {
+          r = fallbackR;
+          g = fallbackG;
+          b = fallbackB;
+          count = fallbackCount;
+        } else {
+          // Ultimate fallback: full frame
+          for (let i = 0; i < data.length; i += 4) {
+            r += data[i];
+            g += data[i + 1];
+            b += data[i + 2];
+            count++;
+          }
         }
         frameOk = false;
       }
@@ -340,17 +393,70 @@ export default function VitalMonitoringPage() {
     const now = performance.now();
     if (lastFrameTimeRef.current > 0) {
       const dt = now - lastFrameTimeRef.current;
-      if (dt > 0) {
-        const instFps = 1000 / dt;
-        fpsRef.current = fpsRef.current * 0.9 + instFps * 0.1;
+      if (dt > 0 && dt < 200) { // Ignore outliers >200ms (5fps)
+        // Store recent frame intervals for robust median-based FPS estimation
+        if (!frameIntervalsRef.current) frameIntervalsRef.current = [];
+        frameIntervalsRef.current.push(dt);
+        if (frameIntervalsRef.current.length > 30) frameIntervalsRef.current.shift();
+        
+        // Use median of recent intervals for stable FPS
+        if (frameIntervalsRef.current.length >= 5) {
+          const sorted = [...frameIntervalsRef.current].sort((a, b) => a - b);
+          const medianDt = sorted[Math.floor(sorted.length / 2)];
+          fpsRef.current = 1000 / medianDt;
+        } else {
+          // Fallback to EMA for first few frames
+          const instFps = 1000 / dt;
+          fpsRef.current = fpsRef.current * 0.9 + instFps * 0.1;
+        }
       }
     }
     lastFrameTimeRef.current = now;
 
-    const isFingerFrame = cameraMode === "rear"
-      ? (avgR > 90 && avgR < 245 && avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8)
-      : true;
-    if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
+    // Finger detection for rear camera - uses color signature + temporal stability
+    // Finger PPG signature: Red >> Green ≈ Blue (red penetrates tissue, green/blue absorbed by blood)
+    let isFingerFrame = false;
+    if (cameraMode === "rear") {
+      // Adaptive thresholds based on frame statistics
+      const brightness = (avgR + avgG + avgB) / 3;
+      
+      // Finger criteria:
+      // 1. Red in good range (not too dark, not saturated)
+      // 2. Red significantly higher than green AND blue (ratios > 1.3)
+      // 3. Green and blue similar (both absorbed by blood) - within 40%
+      // 4. Sufficient signal strength
+      // 5. Brightness in reasonable range for finger on camera
+      
+      const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
+      const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
+      const greenBlueDiff = Math.abs(avgG - avgB);
+      const greenBlueMax = Math.max(avgG, avgB);
+      
+      const redInRange = avgR >= 70 && avgR <= 245;
+      const redDominant = redGreenRatio > 1.3 && redBlueRatio > 1.3;
+      const greenBlueSimilar = greenBlueMax > 1 ? (greenBlueDiff / greenBlueMax) < 0.4 : true;
+      const sufficientSignal = avgR > 70;
+      const brightnessOk = brightness > 50 && brightness < 220;
+      const greenBlueReasonable = avgG > 15 && avgB > 15 && avgG < 200 && avgB < 200;
+      
+      isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal && brightnessOk && greenBlueReasonable;
+      
+      // Temporal smoothing: require 3 consecutive consistent frames
+      if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
+      fingerHistoryRef.current.push(isFingerFrame);
+      if (fingerHistoryRef.current.length > 5) fingerHistoryRef.current.shift();
+      
+      // Majority vote over recent frames (need 3 of 5 or 60%)
+      const fingerVotes = fingerHistoryRef.current.filter(v => v).length;
+      const fingerMajority = fingerVotes >= Math.max(3, Math.floor(fingerHistoryRef.current.length * 0.6));
+      
+      if (!demoMode) setFingerDetected(fingerMajority);
+    } else {
+      // Front camera - no finger detection needed
+      if (!demoMode) setFingerDetected(false);
+      // Reset finger history when not in rear mode
+      if (fingerHistoryRef.current) fingerHistoryRef.current = [];
+    }
 
     if (demoMode) {
       const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
@@ -380,10 +486,10 @@ export default function VitalMonitoringPage() {
       setFingerDetected(true);
     } else {
       // Only collect the analysis buffers during the measuring phase and only
-      // when the frame actually contains the signal source (finger on lens in
-      // rear mode, skin ROI in front mode). This keeps warm-up and unusable
-      // frames out of the AC/DC and HR/HRV math.
-      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || isFingerFrame);
+      // when the frame actually contains the signal source. For rear mode, use
+      // finger detection state (with temporal stability) to determine collection.
+      const fingerPresent = fingerDetected;  // Uses temporally-smoothed detection
+      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || fingerPresent);
       if (collecting) {
         ppgBufferRef.current.push(avgG);
         if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
@@ -425,16 +531,16 @@ export default function VitalMonitoringPage() {
         // Front camera: drive the pulse analysis from the POS chrominance
         // pulse, which rejects illumination/motion artifacts that a raw
         // averaged channel keeps. Fall back to the green skin-ROI trace while
-        // the POS window is still filling.
-        const pos = posPulse(redWin, greenWin, blueWin, Math.max(16, Math.round(fs)));
-        analysisSource = pos.length >= Math.floor(fs * 5) ? pos : ppgWin;
+        // the POS window is still filling. With winLen=120 (4s at 30fps) and
+        // 50% overlap, we need ~6s of data for reliable POS output.
+        const pos = posPulse(redWin, greenWin, blueWin, Math.max(120, Math.round(fs * 4)));
+        analysisSource = pos.length >= Math.floor(fs * 6) ? pos : ppgWin;
       } else {
         // Rear camera: pick the single channel (red or green) with the best
-        // spectral SNR in the cardiac band. Green is the default because
-        // hemoglobin absorbs green strongly and flash saturation is rare,
-        // but red can win on thick/dark/cold fingers where green is
-        // attenuated, provided the channel is not clipped by the torch.
-        const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs);
+        // spectral SNR in the cardiac band. For finger PPG, RED is preferred
+        // because it penetrates finger tissue better and gives higher SNR.
+        // Green is fallback if red is saturated or has significantly lower SNR.
+        const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs, true);
         analysisSource = selected.length >= Math.floor(fs * 5) ? selected : ppgWin;
       }
       const analysis: VitalAnalysis = analyzeVitals(
