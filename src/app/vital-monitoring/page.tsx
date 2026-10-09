@@ -18,8 +18,8 @@ import {
 /// FINGER_VOTE_FRAMES is ~1 s, which is long enough to debounce a real
 /// placement or removal (0.5-2 s) instead of chattering frame to frame.
 const FINGER_VOTE_FRAMES = 30;
-const FINGER_ACQUIRE_FRACTION = 0.7;
-const FINGER_RELEASE_FRACTION = 0.4;
+const FINGER_ACQUIRE_FRACTION = 0.6;  // Lowered from 0.7 for faster acquisition
+const FINGER_RELEASE_FRACTION = 0.35;  // Lowered from 0.4 for faster release
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -526,15 +526,15 @@ export default function VitalMonitoringPage() {
         const lumVar = count > 0 ? Math.max(0, lumSqSum / count - lumMean * lumMean) : 1;
         const lumCv = lumMean > 1e-9 ? Math.sqrt(lumVar) / lumMean : 1;
 
-        // Relaxed thresholds for real-world conditions: accept weaker torch and
-        // allow some scene structure. The key invariant is red dominance > 1.65
-        // and green/blue suppression below 140. The occlusion test (lumCv < 0.28)
+        // More relaxed thresholds for real-world conditions: accept weaker torch and
+        // allow some scene structure. The key invariant is red dominance > 1.5
+        // and green/blue suppression below 160. The occlusion test (lumCv < 0.35)
         // provides a secondary check.
-        const redBright = avgR >= 80 && avgR <= 252;
-        const greenBlueAbsorbed = avgG < 140 && avgB < 140;
-        const redDominant = redGreenRatio > 1.65 && redBlueRatio > 1.65;
-        const occluding = lumCv < 0.28;
-        const brightnessOk = brightness > 50 && brightness < 245;
+        const redBright = avgR >= 60 && avgR <= 252;
+        const greenBlueAbsorbed = avgG < 160 && avgB < 160;
+        const redDominant = redGreenRatio > 1.5 && redBlueRatio > 1.5;
+        const occluding = lumCv < 0.35;
+        const brightnessOk = brightness > 40 && brightness < 250;
 
         isFingerFrame = redBright && redDominant && greenBlueAbsorbed && occluding && brightnessOk;
 
@@ -602,10 +602,10 @@ export default function VitalMonitoringPage() {
       // plausible finger (red-bright and red-dominant) so analysis can run
       // before the hysteresis vote fully commits.
       const signalLooksLikeFinger = cameraMode === "rear" &&
-        avgR >= 80 && avgR <= 252 &&
-        (avgG > 1 ? avgR / avgG : 0) > 1.55 &&
-        (avgB > 1 ? avgR / avgB : 0) > 1.55 &&
-        avgG < 150 && avgB < 150;
+        avgR >= 60 && avgR <= 252 &&
+        (avgG > 1 ? avgR / avgG : 0) > 1.4 &&
+        (avgB > 1 ? avgR / avgB : 0) > 1.4 &&
+        avgG < 170 && avgB < 170;
       const fingerPresent = fingerDetectedRef.current;
       const collecting = phaseRef.current === "measuring" && frameOk &&
         (cameraMode !== "rear" || fingerPresent || signalLooksLikeFinger);
@@ -721,7 +721,7 @@ export default function VitalMonitoringPage() {
         // Finger presence check (min coverage). Read the ref: the rAF closure
         // captures the render-scope `fingerDetected` state, which froze it at
         // first render and made this state machine unreachable for real input.
-        const fingerCoverage = fingerDetectedRef.current && dcLevel > 30 && dcLevel < 230;
+        const fingerCoverage = fingerDetectedRef.current && dcLevel > 20 && dcLevel < 240;
         if (!fingerCoverage) {
           pressureStateRef.current = "NO_FINGER";
           adequateDwellRef.current = 0;
@@ -732,8 +732,8 @@ export default function VitalMonitoringPage() {
           const piCollapsed = prevPi !== null && perfusion < prevPi * 0.7 && prevPi > 0.5; // PI dropping sharply
           const dcDriftHigh = prevDc !== null && Math.abs(dcLevel - prevDc) > 15;
           const piTooHigh = perfusion > 8; // PI implausibly high = motion artifact
-          const saturated = dcLevel > 230 || dcLevel < 20; // Sensor clipping
-          const lightLeakEvidence = dcLevel > 180 && perfusion < 1.0 && (blueWin.length > 0 ? blueWin.reduce((a, b) => a + b, 0) / blueWin.length : 0) > dcLevel * 0.6; // Blue ~ Green = ambient light
+          const saturated = dcLevel > 240 || dcLevel < 15; // Sensor clipping
+          const lightLeakEvidence = dcLevel > 190 && perfusion < 1.0 && (blueWin.length > 0 ? blueWin.reduce((a, b) => a + b, 0) / blueWin.length : 0) > dcLevel * 0.5; // Blue ~ Green = ambient light
 
           let newState = pressureStateRef.current;
 
