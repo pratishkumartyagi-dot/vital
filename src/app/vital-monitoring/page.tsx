@@ -420,24 +420,25 @@ export default function VitalMonitoringPage() {
       // Adaptive thresholds based on frame statistics
       const brightness = (avgR + avgG + avgB) / 3;
       
-      // Finger criteria:
-      // 1. Red in good range (not too dark, not saturated)
-      // 2. Red significantly higher than green AND blue (ratios > 1.3)
-      // 3. Green and blue similar (both absorbed by blood) - within 40%
-      // 4. Sufficient signal strength
-      // 5. Brightness in reasonable range for finger on camera
+      // Finger criteria (relaxed for real-world smartphone conditions):
+      // 1. Red in good range (not too dark, not saturated) - relaxed lower bound
+      // 2. Red significantly higher than green AND blue (ratios > 1.15) - relaxed
+      // 3. Green and blue similar (both absorbed by blood) - within 50% - relaxed
+      // 4. Sufficient signal strength - relaxed
+      // 5. Brightness in reasonable range for finger on camera - relaxed
+      // 6. Green/Blue in reasonable range - relaxed
       
       const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
       const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
       const greenBlueDiff = Math.abs(avgG - avgB);
       const greenBlueMax = Math.max(avgG, avgB);
       
-      const redInRange = avgR >= 70 && avgR <= 245;
-      const redDominant = redGreenRatio > 1.3 && redBlueRatio > 1.3;
-      const greenBlueSimilar = greenBlueMax > 1 ? (greenBlueDiff / greenBlueMax) < 0.4 : true;
-      const sufficientSignal = avgR > 70;
-      const brightnessOk = brightness > 50 && brightness < 220;
-      const greenBlueReasonable = avgG > 15 && avgB > 15 && avgG < 200 && avgB < 200;
+      const redInRange = avgR >= 50 && avgR <= 250;  // Relaxed: was 70-245
+      const redDominant = redGreenRatio > 1.15 && redBlueRatio > 1.15;  // Relaxed: was 1.3
+      const greenBlueSimilar = greenBlueMax > 1 ? (greenBlueDiff / greenBlueMax) < 0.5 : true;  // Relaxed: was 0.4
+      const sufficientSignal = avgR > 50;  // Relaxed: was 70
+      const brightnessOk = brightness > 30 && brightness < 235;  // Relaxed: was 50-220
+      const greenBlueReasonable = avgG > 8 && avgB > 8 && avgG < 220 && avgB < 220;  // Relaxed: was 15-200
       
       isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal && brightnessOk && greenBlueReasonable;
       
