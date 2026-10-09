@@ -501,50 +501,18 @@ export default function VitalMonitoringPage() {
     lastFrameTimeRef.current = now;
 
 // Finger detection for rear camera.
-      //
-      // Physical signature of a fingertip occluding the rear lens under torch:
-      //   1. BRIGHT in red — torch light transmitted through the finger tissue.
-      //   2. Strongly ATTENUATED in green and blue — haemoglobin absorbs both, so
-      //      G and B must sit well below R, not merely below it.
-      //   3. Red dominance far above ordinary skin/room lighting.
-      //   4. Spatially UNIFORM — the finger occludes the lens, so the field has no
-      //      edges; any scene (face, room, hand) is full of structure.
-      //
-      // The previous thresholds (R/G > 1.15, G < 220, R > 50) accepted an ordinary
-      // red-dominant scene: skin sits at R/G ~ 1.25 and warm room lighting at ~1.5-1.6,
-      // so an uncovered lens reported "finger detected". Meanwhile a finger that
-      // blocked an unlit or weakly-lit lens went near-black, failed every range
-      // check, and reported "no finger" — the reported inversion. Tightening red
-      // dominance, requiring green/blue absorption and adding the occlusion test
-      // separates the two cases in both torch states.
+      // Physical signature: finger on lens with torch = BRIGHT red, low G/B, uniform
       let isFingerFrame = false;
       if (cameraMode === "rear") {
-        const brightness = (avgR + avgG + avgB) / 3;
+        // Original working thresholds (commit a3a6fd1 - Oct 7): simple and robust
+        // Finger: bright red (>90), not saturated (<245), red >> green/blue (+15), distinct from green
+        const redBright = avgR > 90 && avgR < 245;
+        const redDominant = avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8;
+        const notSaturated = avgR < 250 && avgG < 250 && avgB < 250;
 
-        const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
-        const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
+        isFingerFrame = redBright && redDominant && notSaturated;
 
-        // Coefficient of variation of luminance over the ROI: the occlusion test.
-        const lumMean = count > 0 ? lumSum / count : 0;
-        const lumVar = count > 0 ? Math.max(0, lumSqSum / count - lumMean * lumMean) : 1;
-        const lumCv = lumMean > 1e-9 ? Math.sqrt(lumVar) / lumMean : 1;
-
-        // More relaxed thresholds for real-world conditions: accept weaker torch and
-        // allow some scene structure. The key invariant is red dominance > 1.5
-        // and green/blue suppression below 160. The occlusion test (lumCv < 0.35)
-        // provides a secondary check.
-        const redBright = avgR >= 60 && avgR <= 252;
-        const greenBlueAbsorbed = avgG < 160 && avgB < 160;
-        const redDominant = redGreenRatio > 1.5 && redBlueRatio > 1.5;
-        const occluding = lumCv < 0.35;
-        const brightnessOk = brightness > 40 && brightness < 250;
-
-        isFingerFrame = redBright && redDominant && greenBlueAbsorbed && occluding && brightnessOk;
-
-      // Hysteresis over a ~1 s history. A 5-frame majority vote is only ~167 ms
-      // at 30 fps, far shorter than the 0.5-2 s a real placement or removal
-      // takes, so it chattered. Asymmetric thresholds debounce it: harder to
-      // acquire than to lose.
+      // Hysteresis over ~1s history (FINGER_VOTE_FRAMES = 30 frames at 30fps)
       if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
       const hist = fingerHistoryRef.current;
       hist.push(isFingerFrame);
@@ -605,10 +573,9 @@ export default function VitalMonitoringPage() {
       // plausible finger (red-bright and red-dominant) so analysis can run
       // before the hysteresis vote fully commits.
       const signalLooksLikeFinger = cameraMode === "rear" &&
-        avgR >= 60 && avgR <= 252 &&
-        (avgG > 1 ? avgR / avgG : 0) > 1.4 &&
-        (avgB > 1 ? avgR / avgB : 0) > 1.4 &&
-        avgG < 170 && avgB < 170;
+        avgR > 90 && avgR < 245 &&
+        avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8 &&
+        avgR < 250 && avgG < 250 && avgB < 250;
       const fingerPresent = fingerDetectedRef.current;
       const collecting = phaseRef.current === "measuring" && frameOk &&
         (cameraMode !== "rear" || fingerPresent || signalLooksLikeFinger);
