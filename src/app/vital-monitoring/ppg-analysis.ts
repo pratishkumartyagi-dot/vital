@@ -16,7 +16,7 @@ export interface HeartMetrics {
   peaks: number[];
   rrIntervals: number[];
   hrv: HRVMetrics | null;
-  rhythm: "regular" | "irregular" | "unknown";
+  rhythm: "regular" | "variable" | "irregular" | "unknown";
   signalQuality: number;
   method: "peaks" | "spectral" | "none";
   bpmPeaks: number | null;
@@ -60,21 +60,44 @@ function median(arr: number[]): number {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+/// Remove baseline drift. A first-order (linear) fit left curvature under the
+/// 30 s pressure drift and LED auto-exposure hunting that contact PPG produces,
+/// and that residual curvature leaks into the 0.5-3.5 Hz AC/DC measurement. A
+/// second-order (quadratic) fit removes the drift without touching the cardiac
+/// band, which sits 3-4 octaves above the drift corner.
 function detrend(signal: number[]): number[] {
   const n = signal.length;
-  if (n < 3) return signal.slice();
-  const x = Array.from({ length: n }, (_, i) => i);
-  const xMean = mean(x);
+  if (n < 5) return signal.slice();
+  const xMean = (n - 1) / 2;
   const yMean = mean(signal);
-  let num = 0;
-  let den = 0;
+  // Centred abscissa u = i - mean(i) keeps the normal equations well conditioned.
+  const u = new Array<number>(n);
+  let s2 = 0;
+  let s4 = 0;
   for (let i = 0; i < n; i++) {
-    num += (x[i] - xMean) * (signal[i] - yMean);
-    den += (x[i] - xMean) ** 2;
+    u[i] = i - xMean;
+    s2 += u[i] * u[i];
+    s4 += u[i] * u[i] * u[i] * u[i];
   }
-  const slope = den === 0 ? 0 : num / den;
-  const intercept = yMean - slope * xMean;
-  return signal.map((y, i) => y - (slope * i + intercept));
+  if (s2 <= 0 || s4 <= 0) return signal.slice();
+  // Least squares for y = a + b*u + c*u^2 on the centred abscissa. By symmetry
+  // sum(u) = sum(u^3) = 0, so the normal equations decouple into
+  //   a = mean(y),  b = sum(u*y)/sum(u^2),  c = sum(u^2*y)/sum(u^4).
+  let su = 0;
+  let suu = 0;
+  for (let i = 0; i < n; i++) {
+    const d = signal[i] - yMean;
+    su += d * u[i];
+    suu += d * u[i] * u[i];
+  }
+  const a = yMean;
+  const b = su / s2;
+  const c = suu / s4;
+  const out = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = signal[i] - (a + b * u[i] + c * u[i] * u[i]);
+  }
+  return out;
 }
 
 interface BiquadCoeffs {
@@ -273,6 +296,17 @@ export function posPulse(red: number[], green: number[], blue: number[], winLen 
   // units, so AC/DC against the green DC level is a directly comparable
   // perfusion percentage. Every consumer (respiration extraction, BPNet, the
   // creatinine AC/DC ratios) is scale-invariant, so this is a pure unit fix.
+  //
+  // Note the residual POS_PROJECTION_FACTOR: because h combines two orthogonal
+  // projections, its RMS is sqrt(2)*sigma(S1) while the equivalent raw-channel
+  // expression carries a 1/sqrt(6), so the restored POS perfusion index is
+  // ~0.58x (sqrt(2)/sqrt(6)) the raw-green perfusion index for the same beat.
+  // This is intrinsic to the POS chrominance basis, not a scaling error, so the
+  // POS perfusion index is treated as a *relative* index: the SQI perfusion
+  // term and all gating thresholds are relative, and no absolute perfusion
+  // value is displayed. Rescaling it to unity would place rPPG perfusion in the
+  // 0.3-1.5% band, which is 3-10x above the measured 0.05-0.5% range and would
+  // saturate the SQI perfusion term for every recording.
   let gSum = 0;
   for (let i = 0; i < n; i++) gSum += green[i];
   const unitScale = Math.sqrt(3) * (gSum / n);
@@ -386,10 +420,10 @@ export function estimateSpo2RedGreen(
 ///
 /// Algorithm:
 /// 1. Take log of raw red and green signals: lr = log(red + eps), lg = log(green + eps)
-/// 2. Bandpass filter log signals (0.7-3.5 Hz, 4th-order Butterworth via filtfilt)
+/// 2. Bandpass filter log signals (CARDIAC_LO..CARDIAC_HI, zero-phase filtfilt)
 /// 3. Window-wise R: R_win = std(log_filt_red) / std(log_filt_green) per 10s window
 /// 4. Robust estimate: R = median of all window R values
-/// 5. SpO2 = A - B * R with A=110, B=25
+/// 5. SpO2 = A - B * R with A=104, B=12 (red/green calibration)
 ///
 /// This approach is more physically correct (Beer-Lambert law in log domain)
 /// and more robust to motion artifacts via window-wise median.
@@ -412,10 +446,13 @@ export function estimateSpo2LogDomain(
     lg[i] = Math.log(Math.max(greenRaw[i], 1) + eps);
   }
 
-  // Step 2: 4th-order Butterworth bandpass (0.7-3.5 Hz) with zero-phase (filtfilt)
-  // Current butterworthBandpass is already 4th-order (2nd HP + 2nd LP) with zero-phase
-  const fr = butterworthBandpass(lr, 0.7, 3.5, fs, true);
-  const fg = butterworthBandpass(lg, 0.7, 3.5, fs, true);
+  // Step 2: Butterworth bandpass with zero-phase (filtfilt). The band is the
+  // same CARDIAC_LO..CARDIAC_HI used by the linear AC/DC path, so both SpO2
+  // estimators extract AC over an identical bandwidth and their R values (and
+  // therefore their calibrations) are directly comparable. The paper's 0.7 Hz
+  // corner was a red/IR artefact of its own filter chain.
+  const fr = butterworthBandpass(lr, CARDIAC_LO, CARDIAC_HI, fs, true);
+  const fg = butterworthBandpass(lg, CARDIAC_LO, CARDIAC_HI, fs, true);
 
   // Step 3: Window-wise R computation
   const winLen = Math.round(SPO2_LOG_WINDOW_SEC * fs);
@@ -600,32 +637,44 @@ function computeSignalQuality(
   return Math.round(clamp01(base * pulseGate) * 100);
 }
 
+/// Time-domain HRV (Task Force 1996). Artefact/ectopic rejection is applied
+/// first: a single missed PPG beat produces a 2xRR interval, and because RMSSD
+/// scales with the *square* of successive differences one artefact can triple
+/// it. SDNN/RMSSD/pNN50 are therefore computed on the cleaned NN series.
 function computeHRV(rrMs: number[]): HRVMetrics {
   if (rrMs.length < 2) {
     return { meanRR: 0, sdnn: 0, rmssd: 0, pnn50: 0, lfHfRatio: null };
   }
+  // Reject intervals outside +/-25% of the median (the standard ectopic window).
+  const med = median(rrMs);
+  const clean = med > 0 ? rrMs.filter((v) => Math.abs(v - med) / med <= 0.25) : rrMs.slice();
+  // Keep at least two intervals so the metrics stay defined.
+  const nn = clean.length >= 2 ? clean : rrMs;
+
   const diffs: number[] = [];
   let pnn50 = 0;
-  for (let i = 1; i < rrMs.length; i++) {
-    const d = Math.abs(rrMs[i] - rrMs[i - 1]);
+  for (let i = 1; i < nn.length; i++) {
+    const d = Math.abs(nn[i] - nn[i - 1]);
     diffs.push(d);
     if (d > 50) pnn50++;
   }
-  const meanRR = mean(rrMs);
-  const sdnn = stddev(rrMs);
+  const meanRR = mean(nn);
+  const sdnn = stddev(nn);
   const rmssd = diffs.length ? Math.sqrt(mean(diffs.map((d) => d * d))) : 0;
   const pnn = diffs.length ? (pnn50 / diffs.length) * 100 : 0;
   return { meanRR, sdnn, rmssd, pnn50: pnn, lfHfRatio: null };
 }
 
-function classifyRhythm(rrMs: number[]): "regular" | "irregular" | "unknown" {
+function classifyRhythm(rrMs: number[]): "regular" | "variable" | "irregular" | "unknown" {
   if (rrMs.length < 5) return "unknown";
   const sd = stddev(rrMs);
   const m = mean(rrMs);
   if (m === 0) return "unknown";
   const cv = (sd / m) * 100;
+  // Distinct bands: the old code returned "regular" for both cv<10 and cv<20,
+  // making the second branch unreachable and giving no intermediate class.
   if (cv < 10) return "regular";
-  if (cv < 20) return "regular";
+  if (cv < 20) return "variable";
   return "irregular";
 }
 
@@ -662,12 +711,17 @@ export function powerSpectrum(signal: number[], fs: number): { freqs: number[]; 
 }
 
 
-function spectralHR(f: number[], fs: number): { bpm: number | null; snrDb: number } {
+/// Peak heart-rate estimate by direct-DFT sweep of the band-passed pulse, with
+/// a bandwidth-matched SNR. `rawForSnr` is the *unfiltered* trace: SNR measured
+/// on the already band-passed signal is optimistic because band-limiting has
+/// already removed most of the in-band noise, which let structured artifacts
+/// pass the reliability gate.
+function spectralHR(f: number[], fs: number, rawForSnr?: number[]): { bpm: number | null; snrDb: number } {
   const n = f.length;
   const w = f.map((v, i) => v * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1))));
   const freqs: number[] = [];
   const power: number[] = [];
-  for (let fr = 0.5; fr <= 3.5 + 1e-9; fr += 0.005) {
+  for (let fr = CARDIAC_LO; fr <= CARDIAC_HI + 1e-9; fr += 0.005) {
     let re = 0, im = 0;
     const k = (2 * Math.PI * fr) / fs;
     for (let i = 0; i < n; i++) {
@@ -692,6 +746,20 @@ function spectralHR(f: number[], fs: number): { bpm: number | null; snrDb: numbe
   return { bpm: f0 * 60, snrDb };
 }
 
+/// Percentile-based acceptance threshold for peak detection over an inclusive
+/// sample range [lo, hi): `max(p10 + 0.5*IQR, 0.45*p97)`. Extracted so the
+/// rolling window threshold can be precomputed once per sample instead of
+/// re-sorting a slice at every candidate (O(n*m log m) -> O(n)).
+function thresholdFor(f: number[], lo: number, hi: number): number {
+  const seg = f.slice(lo, hi).sort((a, b) => a - b);
+  const m = seg.length;
+  if (m === 0) return Infinity;
+  const p10 = seg[Math.floor(m * 0.10)];
+  const p75 = seg[Math.floor(m * 0.75)];
+  const p97 = seg[Math.floor(Math.min(m - 1, m * 0.97))];
+  return Math.max(p10 + 0.5 * (p75 - p10), 0.45 * p97);
+}
+
 function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloorMs: number, thrWinSec: number): number[] {
   const n = f.length;
   const half = Math.round((thrWinSec * fs) / 2);
@@ -699,17 +767,37 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
   const peaksAmp: number[] = [];
   const recentRR: number[] = [];
 
-  const thresholdAt = (i: number): number => {
-    const seg = f.slice(Math.max(0, i - half), Math.min(n, i + half + 1)).sort((a, b) => a - b);
-    const p10 = seg[Math.floor(seg.length * 0.10)];
-    const iqr = seg[Math.floor(seg.length * 0.75)] - seg[Math.floor(seg.length * 0.10)];
-    const p97 = seg[Math.floor(seg.length * 0.97)];
-    return Math.max(p10 + 0.5 * iqr, 0.45 * p97);
+  const windowThresholds = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    windowThresholds[i] = thresholdFor(f, Math.max(0, i - half), Math.min(n, i + half + 1));
+  }
+
+  // Prominence gate: a candidate must rise at least this far above the deeper of
+  // the two troughs bracketing it (scipy definition). Expressed as a fraction of
+  // the full range so it scales with signal amplitude. The old code had no
+  // prominence test, so dicrotic notches and residual ripple on a low-amplitude
+  // rPPG trace passed whenever they cleared the fixed percentile.
+  let fMin = Infinity;
+  let fMax = -Infinity;
+  for (const v of f) {
+    if (v < fMin) fMin = v;
+    if (v > fMax) fMax = v;
+  }
+  const minProminence = 0.2 * (fMax - fMin);
+  const span = Math.max(1, Math.round((seedRrMs / 1000) * fs));
+
+  const prominenceAt = (i: number): number => {
+    let leftTrough = f[i];
+    for (let j = Math.max(0, i - span); j < i; j++) if (f[j] < leftTrough) leftTrough = f[j];
+    let rightTrough = f[i];
+    for (let j = i + 1; j <= Math.min(n - 1, i + span); j++) if (f[j] < rightTrough) rightTrough = f[j];
+    return f[i] - Math.max(leftTrough, rightTrough);
   };
 
   for (let i = 1; i < n - 1; i++) {
     if (!(f[i] > f[i - 1] && f[i] >= f[i + 1])) continue;
-    if (f[i] < thresholdAt(i)) continue;
+    if (f[i] < windowThresholds[i]) continue;
+    if (prominenceAt(i) < minProminence) continue;
 
     const medRR = recentRR.length >= 3 ? median(recentRR.slice(-8)) : seedRrMs;
     const minInt = Math.max(minFloorMs, 0.6 * medRR);
@@ -755,13 +843,17 @@ export function analyzeHeartRate(
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0 };
   }
 
-  // Signal quality helper for early returns (uses raw signal)
+  // Signal quality helper for early returns (uses raw signal). `piRef` must
+  // match the modality: facial rPPG runs at 0.05-0.5% AC/DC while contact
+  // fingertip PPG runs at 0.5-5%, so a single 0.5% reference scored every good
+  // rPPG recording at ~55% of its perfusion weight.
+  const piRef = cameraMode === "front" ? 0.1 : 0.5;
   const computeBasicSQI = (signal: number[], fs: number, dcRef?: number): number => {
-    const rawFiltered = butterworthBandpass(detrend(signal), 0.5, 3.5, fs, true);
+    const rawFiltered = butterworthBandpass(detrend(signal), CARDIAC_LO, CARDIAC_HI, fs, true);
     const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(signal);
     const ac = rms(rawFiltered);
     const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
-    const piScore = clamp01(Math.sqrt(pi / 0.5));
+    const piScore = clamp01(Math.sqrt(pi / piRef));
     const { snr } = spectralSnr(signal, fs);
     const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
     const prominence = cardiacSpectralProminence(signal, fs);
@@ -776,10 +868,13 @@ export function analyzeHeartRate(
   x = x.map((v) => -(v - xMean));
 
   // Band-pass using existing butterworthBandpass
-  const f = butterworthBandpass(x, 0.5, 3.5, fs, true);
+  const f = butterworthBandpass(x, CARDIAC_LO, CARDIAC_HI, fs, true);
 
-  // Spectral estimate
-  const spec = spectralHR(f, fs);
+  // Spectral estimate. SNR is measured on the RAW trace, not on the already
+  // band-passed signal: band-limiting first removes most of the in-band noise,
+  // which made the raw-trace figure optimistic and let artifacts pass the
+  // reliability gate.
+  const spec = spectralHR(f, fs, ppg);
   const bpmSpectral = spec.bpm;
   const seedRr = bpmSpectral ? 60000 / bpmSpectral : 800;
 
@@ -826,12 +921,12 @@ export function analyzeHeartRate(
     cameraMode
   );
 
-  // Perfusion index with proper reference
-  // rPPG (front): 0.1% reference; Contact PPG (rear): 0.5% reference
-  const piRef = cameraMode === "front" ? 0.1 : 0.5;
-  const perfusionIndex = dcRef && dcRef > 1e-9 
+  // Perfusion index. `piRef` is already resolved above for the SQI term; the
+  // index itself is a plain AC/DC percentage and is what the pressure state
+  // machine and the creatinine features consume.
+  const perfusionIndex = dcRef && dcRef > 1e-9
     ? perfusionIndexACDC(ppg, fs, dcRef)
-    : (dcRef && dcRef > 1e-9 ? (rms(rawFiltered) / dcRef) * 100 : 0);
+    : 0;
 
   // New reliability gate for SpO2/glucose/creatinine gating
   const bpmForQuality = bpm ?? bpmSpectral ?? 60;
@@ -1223,11 +1318,28 @@ export function combinePpgChannels(red: number[], green: number[], blue: number[
   return result;
 }
 
-/// Select the best single PPG channel for heart-rate
-/// analysis based on per-recording spectral SNR. For rear-camera finger PPG, RED is preferred
-/// because hemoglobin absorbs red less strongly than green, giving better
-/// penetration through finger tissue and higher SNR. For front-camera rPPG,
-/// GREEN is preferred because the POS algorithm uses green as the reference.
+/// Result of channel selection: the winning trace plus enough metadata for the
+/// caller to build a *same-channel* AC/DC denominator. Returning the raw DC of
+/// the winning channel matters because red and green have very different DC
+/// levels under torch (haemoglobin absorbs green far more than red), so
+/// AC_red / DC_green is not a perfusion index.
+export interface PpgChannelSelection {
+  signal: number[];
+  channel: "red" | "green";
+  /** Mean of the winning *raw* channel — the correct AC/DC denominator. */
+  dcRef: number;
+  redSnr: number;
+  greenSnr: number;
+}
+
+/// Select the best single PPG channel for heart-rate analysis by per-recording
+/// spectral SNR, with saturation rejection.
+///
+/// Benchmark practice is argmax(SNR) with saturation rejection. `preferRed`
+/// only breaks ties in favour of red, which is the better contact-PPG channel
+/// because haemoglobin absorbs red less strongly than green and red therefore
+/// penetrates finger tissue further. The previous implementation returned red
+/// whenever green was not >25% better, which overrode SNR on most recordings.
 ///
 /// Saturation rejection: any channel with >10% samples at or above
 /// 250 (out of 255) is treated as unusable and automatically loses.
@@ -1241,9 +1353,16 @@ export function selectBestPpgChannel(
   blue: number[],
   fs: number,
   preferRed = false
-): number[] {
+): PpgChannelSelection {
   const n = Math.min(red.length, green.length);
-  if (n < Math.floor(fs * 2)) return green.slice(-n);
+  const fallbackGreen = (): PpgChannelSelection => ({
+    signal: green.slice(-n),
+    channel: "green",
+    dcRef: n > 0 ? green.slice(-n).reduce((a, b) => a + b, 0) / n : 0,
+    redSnr: 0,
+    greenSnr: 0,
+  });
+  if (n < Math.floor(fs * 2)) return fallbackGreen();
 
   const satThreshold = 250;
   const redSatFrac = red.filter((v) => v >= satThreshold).length / red.length;
@@ -1252,26 +1371,18 @@ export function selectBestPpgChannel(
   const redFiltered = butterworthBandpass(red, 0.5, 8.0, fs, true);
   const greenFiltered = butterworthBandpass(green, 0.5, 8.0, fs, true);
 
-  const redSnr = spectralSnr(redFiltered, fs);
-  const greenSnr = spectralSnr(greenFiltered, fs);
+  const redSnr = spectralSnr(redFiltered, fs).snr;
+  const greenSnr = spectralSnr(greenFiltered, fs).snr;
 
-  const redScore = redSatFrac > 0.1 ? -1 : redSnr.snr;
-  const greenScore = greenSatFrac > 0.1 ? -1 : greenSnr.snr;
+  const redScore = redSatFrac > 0.1 ? -1 : redSnr;
+  const greenScore = greenSatFrac > 0.1 ? -1 : greenSnr;
 
-  // For rear camera (finger PPG): prefer RED unless green is significantly better
-  // For front camera (rPPG): prefer GREEN as reference channel
-  if (preferRed) {
-    if (redScore >= greenScore || redScore >= greenScore * 0.8) {
-      return redFiltered;
-    }
-    return greenFiltered;
-  } else {
-    // Higher SNR wins; stay on green when the two are close (within 20%).
-    if (greenScore >= redScore || greenScore >= redScore * 0.8) {
-      return greenFiltered;
-    }
-    return redFiltered;
-  }
+  const redWin = redScore >= greenScore || (preferRed && redScore >= greenScore * 0.95);
+  const dcRed = red.reduce((a, b) => a + b, 0) / red.length;
+  const dcGreen = green.reduce((a, b) => a + b, 0) / green.length;
+  return redWin
+    ? { signal: redFiltered, channel: "red", dcRef: dcRed, redSnr, greenSnr }
+    : { signal: greenFiltered, channel: "green", dcRef: dcGreen, redSnr, greenSnr };
 }
 
 function clamp01(v: number): number {
@@ -1316,10 +1427,19 @@ const SPO2_RED_GREEN_INTERCEPT = 110;
 const SPO2_RED_GREEN_MIN = 88;
 const SPO2_RED_GREEN_MAX = 100;
 
-/// Log-domain SpO2 calibration (PMC10705321 method).
-/// A=110, B=25 with window-wise median of std(log-filtered) ratios.
-const SPO2_LOG_SLOPE = 25;
-const SPO2_LOG_INTERCEPT = 110;
+/// Log-domain SpO2 calibration (PMC10705321 method, recalibrated for red/green).
+///
+/// The paper's A=110, B=25 are RED/IR values, where RoR is ~0.4-0.8. A camera
+/// has no IR channel, so this app uses the red/green pair, whose RoR is ~0.5-1.3
+/// because green (550 nm) is absorbed far more strongly by haemoglobin than red
+/// (660 nm) is. Applying the red/IR constants to a red/green ratio returned
+/// 77-97% for healthy subjects, i.e. 4-6% below the linear AC/DC path, and the
+/// two estimators of `estimateSpo2Best` disagreed systematically.
+///
+/// These constants are the red/green linearisation, matched to the linear path
+/// (`110 - 20R`): a healthy subject at R ~ 0.5-0.8 maps to 94-98%.
+const SPO2_LOG_SLOPE = 12;
+const SPO2_LOG_INTERCEPT = 104;
 const SPO2_LOG_MIN = 70;
 const SPO2_LOG_MAX = 100;
 
@@ -1756,7 +1876,7 @@ export interface VitalAnalysis {
   sdnn: number | null;
   rmssd: number | null;
   pnn50: number | null;
-  rhythm: "regular" | "irregular" | "unknown";
+  rhythm: "regular" | "variable" | "irregular" | "unknown";
   bp: BloodPressureMetrics;
   bpDeep: BPResult | null;
   glucose: GlucoseMetrics;
@@ -1785,16 +1905,24 @@ export function analyzeVitals(
 ): VitalAnalysis {
   // Green is the highest-SNR camera channel, so it is the reference for the DC
   // level that the pulse's AC amplitude is expressed against.
+  const cameraMode = options.cameraMode ?? "rear";
   const dcRef = options.dcRef ?? dcLevel(greenSignal.length > 0 ? greenSignal : ppg);
-  const heart = analyzeHeartRate(ppg, fs, dcRef);
-  const resp = analyzeRespRateSync(
-    options.respSource ?? ppg,
-    fs,
-    options.cameraMode ?? "rear",
-    redSignal,
-    greenSignal,
-    blueSignal
-  );
+  // cameraMode must be forwarded: it selects the perfusion-index reference
+  // (0.1% for facial rPPG vs 0.5% for contact fingertip PPG) inside
+  // analyzeHeartRate. Without it the rPPG path silently used the contact-PPG
+  // reference and scored ~55% of its perfusion weight, capping SQI near 60-70%
+  // on a perfectly usable signal.
+  const heart = analyzeHeartRate(ppg, fs, dcRef, cameraMode);
+  // Respiratory rate lives in 0.05-0.5 Hz, i.e. BELOW the cardiac band. The
+  // `ppg` argument is normally the 0.5-3.5 Hz band-passed cardiac pulse, which
+  // has had that band removed, so falling back to it can only return garbage.
+  // A caller that cannot supply a raw trace passes respSource: undefined (or a
+  // trace shorter than the 10 s the estimators require) and gets null.
+  const respSource = options.respSource;
+  const resp: RespMetrics =
+    respSource !== undefined && respSource.length >= Math.floor(fs * 10)
+      ? analyzeRespRateSync(respSource, fs, cameraMode, redSignal, greenSignal, blueSignal)
+      : { respRate: null, method: "insufficient-data", confidence: 0, waveform: [] };
   const bp = estimateBloodPressure(ppg, heart.peaks, heart.rrIntervals, heart.hrv, fs);
   const glucose = estimateGlucose(ppg, heart.peaks, redSignal, greenSignal, blueSignal, fs, heart.signalQuality);
   const creatinine = estimateCreatinine(

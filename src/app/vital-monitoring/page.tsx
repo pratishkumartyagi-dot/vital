@@ -14,6 +14,13 @@ import {
   type VitalReading 
 } from '@/lib/vital-storage';
 
+/// Finger-detection hysteresis, in frames of the rolling vote window. At 30 fps
+/// FINGER_VOTE_FRAMES is ~1 s, which is long enough to debounce a real
+/// placement or removal (0.5-2 s) instead of chattering frame to frame.
+const FINGER_VOTE_FRAMES = 30;
+const FINGER_ACQUIRE_FRACTION = 0.7;
+const FINGER_RELEASE_FRACTION = 0.4;
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
     const msg = err.message.toLowerCase();
@@ -87,7 +94,7 @@ export default function VitalMonitoringPage() {
   } | null>(null);
   const [respRate, setRespRate] = useState<number | null>(null);
   const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
-  const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
+  const [rhythm, setRhythm] = useState<"regular" | "variable" | "irregular" | "unknown">("unknown");
   const [fingerDetected, setFingerDetected] = useState(false);
   const [skinDetected, setSkinDetected] = useState(false);
   const [fingerPressure, setFingerPressure] = useState<"low" | "adequate" | "excessive" | null>(null);
@@ -103,6 +110,13 @@ export default function VitalMonitoringPage() {
   const fpsRef = useRef<number>(30);
   const frameIntervalsRef = useRef<number[]>([]);
   const fingerHistoryRef = useRef<boolean[]>([]);
+  /// Mirror of `fingerDetected` for use inside the rAF loop. The loop closure
+  /// captures the render-scope state, so reading the state directly froze the
+  /// value at first render and frame collection never responded to the finger
+  /// actually being placed or removed.
+  const fingerDetectedRef = useRef<boolean>(false);
+  /// Smoothed skin-mask centroid of the front-camera ROI, in frame pixels.
+  const roiCentroidRef = useRef<{ x: number; y: number } | null>(null);
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
@@ -299,42 +313,73 @@ export default function VitalMonitoringPage() {
         }
       }
     } else {
-      // Front camera: Focus on upper face region (forehead + upper cheeks)
-      // This avoids mouth/nose movement artifacts and gets better rPPG signal
-      const foreheadY0 = 0;
-      const foreheadY1 = Math.floor(PROC_H * 0.45);  // Upper 45% = forehead region
-      const foreheadX0 = Math.floor(PROC_W * 0.2);   // Center 60% width
-      const foreheadX1 = Math.floor(PROC_W * 0.8);
-      
+      // Front camera: ROI locked to the skin-mask centroid (forehead + upper
+      // cheeks). A fixed box is the dominant rPPG error source: any head
+      // translation walks the ROI off the forehead and injects baseline wander
+      // plus amplitude modulation that the POS window cannot reject. Tracking
+      // the centroid of the YCbCr skin mask keeps the sampling region on
+      // perfused skin without needing a landmark model.
+      const searchY1 = Math.floor(PROC_H * 0.75); // exclude torso / clothing
       let skinR = 0, skinG = 0, skinB = 0, skinCount = 0;
-      
-      // Adaptive skin detection: compute frame statistics first
+      let sumX = 0, sumY = 0, maskCount = 0;
+
+      // Frame statistics for the adaptive brightness gate.
       let totalBrightness = 0, brightPixels = 0;
-      for (let y = foreheadY0; y < foreheadY1; y++) {
-        for (let x = foreheadX0; x < foreheadX1; x++) {
+      for (let y = 0; y < searchY1; y++) {
+        for (let x = 0; x < PROC_W; x++) {
           const i = (y * PROC_W + x) * 4;
-          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-          const brightness = (pr + pg + pb) / 3;
-          totalBrightness += brightness;
+          totalBrightness += (data[i] + data[i + 1] + data[i + 2]) / 3;
           brightPixels++;
         }
       }
       const avgBrightness = brightPixels > 0 ? totalBrightness / brightPixels : 128;
-      
-      // Adaptive brightness gate: reject very dark/bright relative to frame mean
       const brightLow = Math.max(30, avgBrightness * 0.3);
       const brightHigh = Math.min(250, avgBrightness * 1.8);
-      
-      for (let y = foreheadY0; y < foreheadY1; y++) {
-        for (let x = foreheadX0; x < foreheadX1; x++) {
+
+      // Build the skin mask and its centroid in one pass.
+      for (let y = 0; y < searchY1; y++) {
+        for (let x = 0; x < PROC_W; x++) {
           const i = (y * PROC_W + x) * 4;
-          const pr = data[i];
-          const pg = data[i + 1];
-          const pb = data[i + 2];
+          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
           const brightness = (pr + pg + pb) / 3;
           if (brightness < brightLow || brightness > brightHigh) continue;
-          
-          // YCbCr skin detection with slightly wider range for diverse skin tones
+          const cb = 128 - 0.168736 * pr - 0.331264 * pg + 0.5 * pb;
+          const cr = 128 + 0.5 * pr - 0.418688 * pg - 0.081312 * pb;
+          if (cb >= 70 && cb <= 135 && cr >= 125 && cr <= 180) {
+            maskCount++;
+            sumX += x;
+            sumY += y;
+          }
+        }
+      }
+
+      // Smoothed centroid: slow EMA so a single misclassified frame cannot
+      // throw the ROI, seeded at the upper-centre of the frame.
+      if (!roiCentroidRef.current) roiCentroidRef.current = { x: PROC_W * 0.5, y: PROC_H * 0.22 };
+      const cx = roiCentroidRef.current.x;
+      const cy = roiCentroidRef.current.y;
+      if (maskCount >= 40) {
+        roiCentroidRef.current = {
+          x: cx * 0.85 + (sumX / maskCount) * 0.15,
+          y: cy * 0.85 + (sumY / maskCount) * 0.15,
+        };
+      }
+
+      // Fixed-size ROI centred on the tracked centroid, clamped to the frame.
+      const roiW = Math.floor(PROC_W * 0.34);
+      const roiH = Math.floor(PROC_H * 0.26);
+      const roiX0 = Math.max(0, Math.min(PROC_W - roiW, Math.round(cx - roiW / 2)));
+      const roiY0 = Math.max(0, Math.min(searchY1 - roiH, Math.round(cy - roiH / 2)));
+      const roiX1 = roiX0 + roiW;
+      const roiY1 = roiY0 + roiH;
+
+      // Average only skin pixels inside the tracked ROI.
+      for (let y = roiY0; y < roiY1; y++) {
+        for (let x = roiX0; x < roiX1; x++) {
+          const i = (y * PROC_W + x) * 4;
+          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
+          const brightness = (pr + pg + pb) / 3;
+          if (brightness < brightLow || brightness > brightHigh) continue;
           const cb = 128 - 0.168736 * pr - 0.331264 * pg + 0.5 * pb;
           const cr = 128 + 0.5 * pr - 0.418688 * pg - 0.081312 * pb;
           if (cb >= 70 && cb <= 135 && cr >= 125 && cr <= 180) {
@@ -345,12 +390,11 @@ export default function VitalMonitoringPage() {
           }
         }
       }
-      
-      // Require minimum skin pixels (0.5% of forehead ROI area)
-      const roiArea = (foreheadY1 - foreheadY0) * (foreheadX1 - foreheadX0);
-      const hasSkin = skinCount >= Math.max(50, 0.005 * roiArea);
+
+      const roiArea = roiW * roiH;
+      const hasSkin = skinCount >= Math.max(30, 0.05 * roiArea);
       if (cameraMode === "front" && !demoMode) setSkinDetected(hasSkin);
-      
+
       if (hasSkin) {
         r = skinR;
         g = skinG;
@@ -358,10 +402,11 @@ export default function VitalMonitoringPage() {
         count = skinCount;
         frameOk = true;
       } else {
-        // Fallback: use full forehead region average (not full frame)
+        // Fallback: whole tracked ROI (unfiltered) so the waveform preview keeps
+        // updating, but do not collect analysis samples.
         let fallbackR = 0, fallbackG = 0, fallbackB = 0, fallbackCount = 0;
-        for (let y = foreheadY0; y < foreheadY1; y++) {
-          for (let x = foreheadX0; x < foreheadX1; x++) {
+        for (let y = roiY0; y < roiY1; y++) {
+          for (let x = roiX0; x < roiX1; x++) {
             const i = (y * PROC_W + x) * 4;
             fallbackR += data[i];
             fallbackG += data[i + 1];
@@ -375,7 +420,6 @@ export default function VitalMonitoringPage() {
           b = fallbackB;
           count = fallbackCount;
         } else {
-          // Ultimate fallback: full frame
           for (let i = 0; i < data.length; i += 4) {
             r += data[i];
             g += data[i + 1];
@@ -393,21 +437,31 @@ export default function VitalMonitoringPage() {
     const now = performance.now();
     if (lastFrameTimeRef.current > 0) {
       const dt = now - lastFrameTimeRef.current;
-      if (dt > 0 && dt < 200) { // Ignore outliers >200ms (5fps)
-        // Store recent frame intervals for robust median-based FPS estimation
+      if (dt > 0) {
+        // Outlier rejection: rAF jitter (GC pause, camera warm-up, tab
+        // throttling) produces occasional multi-hundred-ms gaps. A single 500 ms
+        // gap at 30 fps drags the EMA to ~27 Hz, and because every Butterworth
+        // cutoff is normalised by fs that shifts the 0.5-3.5 Hz band and biases
+        // every spectral HR/RR estimate. Reject intervals beyond 3x the running
+        // median, then take the median of the retained history.
         if (!frameIntervalsRef.current) frameIntervalsRef.current = [];
-        frameIntervalsRef.current.push(dt);
-        if (frameIntervalsRef.current.length > 30) frameIntervalsRef.current.shift();
-        
-        // Use median of recent intervals for stable FPS
-        if (frameIntervalsRef.current.length >= 5) {
-          const sorted = [...frameIntervalsRef.current].sort((a, b) => a - b);
-          const medianDt = sorted[Math.floor(sorted.length / 2)];
-          fpsRef.current = 1000 / medianDt;
+        const hist = frameIntervalsRef.current;
+        if (hist.length >= 5) {
+          const sortedHist = [...hist].sort((a, b) => a - b);
+          const med = sortedHist[Math.floor(sortedHist.length / 2)];
+          if (dt <= med * 3) hist.push(dt);
         } else {
-          // Fallback to EMA for first few frames
+          hist.push(dt);
+        }
+        if (hist.length > 30) hist.shift();
+
+        if (hist.length >= 5) {
+          const sorted = [...hist].sort((a, b) => a - b);
+          const medianDt = sorted[Math.floor(sorted.length / 2)];
+          fpsRef.current = Math.max(10, Math.min(60, 1000 / medianDt));
+        } else if (hist.length > 0) {
           const instFps = 1000 / dt;
-          fpsRef.current = fpsRef.current * 0.9 + instFps * 0.1;
+          fpsRef.current = Math.max(10, Math.min(60, fpsRef.current * 0.9 + instFps * 0.1));
         }
       }
     }
@@ -441,22 +495,33 @@ export default function VitalMonitoringPage() {
       const greenBlueReasonable = avgG > 8 && avgB > 8 && avgG < 220 && avgB < 220;  // Relaxed: was 15-200
       
       isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal && brightnessOk && greenBlueReasonable;
-      
-      // Temporal smoothing: require 3 consecutive consistent frames
+
+      // Hysteresis over a ~1 s history. A 5-frame majority vote is only ~167 ms
+      // at 30 fps, far shorter than the 0.5-2 s a real placement or removal
+      // takes, so it chattered. Asymmetric thresholds debounce it: harder to
+      // acquire than to lose.
       if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
-      fingerHistoryRef.current.push(isFingerFrame);
-      if (fingerHistoryRef.current.length > 5) fingerHistoryRef.current.shift();
-      
-      // Majority vote over recent frames (need 3 of 5 or 60%)
-      const fingerVotes = fingerHistoryRef.current.filter(v => v).length;
-      const fingerMajority = fingerVotes >= Math.max(3, Math.floor(fingerHistoryRef.current.length * 0.6));
-      
-      if (!demoMode) setFingerDetected(fingerMajority);
+      const hist = fingerHistoryRef.current;
+      hist.push(isFingerFrame);
+      if (hist.length > FINGER_VOTE_FRAMES) hist.shift();
+
+      const votes = hist.reduce((a, v) => a + (v ? 1 : 0), 0);
+      const frac = hist.length > 0 ? votes / hist.length : 0;
+      // `fingerDetected` state drives the UI; `fingerDetectedRef` is the value
+      // the acquisition and pressure paths read, so the two can never disagree
+      // mid-frame. The ref mirrors the state, so it is also used to decide
+      // whether a setState is needed at all (avoids a re-render every frame).
+      const wasDetected = fingerDetectedRef.current;
+      const nowDetected = wasDetected ? frac >= FINGER_RELEASE_FRACTION : frac >= FINGER_ACQUIRE_FRACTION;
+      if (nowDetected !== wasDetected) setFingerDetected(nowDetected);
+      fingerDetectedRef.current = nowDetected;
     } else {
       // Front camera - no finger detection needed
-      if (!demoMode) setFingerDetected(false);
-      // Reset finger history when not in rear mode
       if (fingerHistoryRef.current) fingerHistoryRef.current = [];
+      if (fingerDetectedRef.current) {
+        fingerDetectedRef.current = false;
+        if (!demoMode) setFingerDetected(false);
+      }
     }
 
     if (demoMode) {
@@ -487,9 +552,11 @@ export default function VitalMonitoringPage() {
       setFingerDetected(true);
     } else {
       // Only collect the analysis buffers during the measuring phase and only
-      // when the frame actually contains the signal source. For rear mode, use
-      // finger detection state (with temporal stability) to determine collection.
-      const fingerPresent = fingerDetected;  // Uses temporally-smoothed detection
+      // when the frame actually contains the signal source. Read the finger
+      // state from the ref, not from React state: the rAF loop closure captures
+      // the render-scope value, so reading the state directly froze it at first
+      // render and collection never responded to the finger being placed.
+      const fingerPresent = fingerDetectedRef.current;
       const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || fingerPresent);
       if (collecting) {
         ppgBufferRef.current.push(avgG);
@@ -526,6 +593,13 @@ export default function VitalMonitoringPage() {
       const greenWin = greenRef.current.slice(-Math.min(greenRef.current.length, windowLen));
       const blueWin = blueRef.current.slice(-Math.min(blueRef.current.length, windowLen));
       let analysisSource: number[];
+      // AC/DC denominator for the perfusion term. For the rear path this must be
+      // the mean of the *winning* channel, not green: red and green have very
+      // different DC levels under torch (haemoglobin absorbs green far more),
+      // so AC_red / DC_green is not a perfusion index. For the front path the
+      // POS pulse is zero-mean by construction, so the green skin-ROI mean is
+      // the only meaningful denominator.
+      let dcRef: number | undefined;
       if (demoMode) {
         analysisSource = syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, windowLen));
       } else if (cameraMode === "front") {
@@ -536,13 +610,14 @@ export default function VitalMonitoringPage() {
         // 50% overlap, we need ~6s of data for reliable POS output.
         const pos = posPulse(redWin, greenWin, blueWin, Math.max(120, Math.round(fs * 4)));
         analysisSource = pos.length >= Math.floor(fs * 6) ? pos : ppgWin;
+        dcRef = greenWin.length > 0 ? greenWin.reduce((a, b) => a + b, 0) / greenWin.length : undefined;
       } else {
-        // Rear camera: pick the single channel (red or green) with the best
-        // spectral SNR in the cardiac band. For finger PPG, RED is preferred
-        // because it penetrates finger tissue better and gives higher SNR.
-        // Green is fallback if red is saturated or has significantly lower SNR.
+        // Rear camera: pick the single channel with the best spectral SNR in the
+        // cardiac band. Red breaks ties because it penetrates finger tissue
+        // further, but SNR is the primary criterion.
         const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs, true);
-        analysisSource = selected.length >= Math.floor(fs * 5) ? selected : ppgWin;
+        analysisSource = selected.signal.length >= Math.floor(fs * 5) ? selected.signal : ppgWin;
+        dcRef = selected.dcRef > 0 ? selected.dcRef : undefined;
       }
       const analysis: VitalAnalysis = analyzeVitals(
         analysisSource,
@@ -554,6 +629,7 @@ export default function VitalMonitoringPage() {
           cameraMode,
           ageYears: patient ? parseInt(patient.age, 10) || null : null,
           sex: patient ? (patient.sex as "male" | "female") : null,
+          dcRef,
           // Respiratory rate is extracted from baseline wander (0.05-0.5 Hz),
           // which is BELOW the cardiac band. For rear/demo mode analysisSource
           // is the 0.5-3.5 Hz bandpassed cardiac pulse, so passing it here
@@ -563,8 +639,13 @@ export default function VitalMonitoringPage() {
           // respiratory modulation and are used instead. For the front camera
           // the raw green trace is used directly too — the POS chroma pulse is
           // detrended but still carries the respiratory amplitude modulation.
+          //
+          // Do NOT fall back to analysisSource when greenWin is short: it is
+          // already high-passed at 0.5 Hz, so the respiratory band is gone and
+          // the estimator can only return null. The rear estimators need 10 s
+          // anyway, so gate on that instead of producing a garbage number.
           respSource:
-            greenWin.length >= Math.floor(fs * 5) ? greenWin : analysisSource,
+            greenWin.length >= Math.floor(fs * 10) ? greenWin : undefined,
         }
       );
       const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
@@ -586,8 +667,10 @@ export default function VitalMonitoringPage() {
         prevDcLevelRef.current = dcLevel;
         prevPerfusionRef.current = perfusion;
 
-        // Finger presence check (min coverage)
-        const fingerCoverage = fingerDetected && dcLevel > 30 && dcLevel < 230;
+        // Finger presence check (min coverage). Read the ref: the rAF closure
+        // captures the render-scope `fingerDetected` state, which froze it at
+        // first render and made this state machine unreachable for real input.
+        const fingerCoverage = fingerDetectedRef.current && dcLevel > 30 && dcLevel < 230;
         if (!fingerCoverage) {
           pressureStateRef.current = "NO_FINGER";
           adequateDwellRef.current = 0;
@@ -791,6 +874,9 @@ export default function VitalMonitoringPage() {
       setSugar(null);
       setCreatinine(null);
       setFingerDetected(false);
+      fingerDetectedRef.current = false;
+      fingerHistoryRef.current = [];
+      roiCentroidRef.current = null;
       setSkinDetected(false);
       setFingerPressure(null);
       setPressureDetail(null);
@@ -1000,6 +1086,9 @@ export default function VitalMonitoringPage() {
     ppgBufferRef.current = [];
     syntheticBufferRef.current = [];
     synthTimeRef.current = 0;
+    frameIntervalsRef.current = [];
+    fingerHistoryRef.current = [];
+    roiCentroidRef.current = null;
     lastBpmUpdate.current = 0;
     setFinalReading(null);
     setPhase("warming");

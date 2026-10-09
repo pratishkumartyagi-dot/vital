@@ -148,14 +148,19 @@ function firFilter(signal: number[], cutoff: number, fs: number, type: 'low' | '
 
 function autocorrelate(signal: number[]): { values: number[]; lags: number[] } {
   const n = signal.length;
+  if (n === 0) return { values: [], lags: [] };
   const mean = signal.reduce((a, b) => a + b, 0) / n;
   const centered = signal.map(v => v - mean);
   const c0 = centered.reduce((a, b) => a + b * b, 0);
-  
+  // A constant or zeroed trace gives c0 = 0 and every normalised lag becomes
+  // NaN, which silently breaks the lag search downstream. Report no correlation
+  // instead of poisoning the estimator with NaN.
+  if (!(c0 > 0)) return { values: new Array(n).fill(0), lags: Array.from({ length: n }, (_, i) => i) };
+
   const maxLag = Math.min(n - 1, n);
   const values: number[] = [];
   const lags: number[] = [];
-  
+
   for (let lag = 0; lag <= maxLag; lag++) {
     let sum = 0;
     for (let i = 0; i < n - lag; i++) {
@@ -164,7 +169,7 @@ function autocorrelate(signal: number[]): { values: number[]; lags: number[] } {
     values.push(sum / c0);
     lags.push(lag);
   }
-  
+
   return { values, lags };
 }
 
