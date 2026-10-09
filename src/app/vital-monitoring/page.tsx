@@ -102,6 +102,7 @@ export default function VitalMonitoringPage() {
   const baseHrvRef = useRef<{ sdnn: number; rmssd: number; pnn50: number }>({ sdnn: 45, rmssd: 38, pnn50: 12 });
   const fpsRef = useRef<number>(30);
   const frameIntervalsRef = useRef<number[]>([]);
+  const fingerHistoryRef = useRef<boolean[]>([]);
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
@@ -389,6 +390,10 @@ export default function VitalMonitoringPage() {
     const avgG = count ? g / count : 128;
     const avgB = count ? b / count : 128;
     
+    // Finger detection state machine for rear camera (temporal stability)
+    // Track recent finger detection results to avoid flickering
+    if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
+    
     const now = performance.now();
     if (lastFrameTimeRef.current > 0) {
       const dt = now - lastFrameTimeRef.current;
@@ -412,10 +417,39 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
-    const isFingerFrame = cameraMode === "rear"
-      ? (avgR > 60 && avgR < 250 && avgR > avgG + 8 && avgR > avgB + 8 && avgG > 30 && avgB > 30)
-      : true;
-    if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
+    // Finger detection for rear camera - uses color signature + temporal stability
+    // Finger PPG signature: Red >> Green ≈ Blue (red penetrates tissue, green/blue absorbed by blood)
+    let isFingerFrame = false;
+    if (cameraMode === "rear") {
+      const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
+      const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
+      const greenBlueDiff = Math.abs(avgG - avgB);
+      
+      // Finger criteria:
+      // 1. Red in good range (not too dark, not saturated)
+      // 2. Red significantly higher than green AND blue (ratios > 1.4)
+      // 3. Green and blue similar (both absorbed by blood)
+      // 4. Sufficient signal strength (red > 80)
+      const redInRange = avgR >= 80 && avgR <= 240;
+      const redDominant = redGreenRatio > 1.4 && redBlueRatio > 1.4;
+      const greenBlueSimilar = greenBlueDiff < Math.max(avgG, avgB) * 0.3;
+      const sufficientSignal = avgR > 80;
+      
+      isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal;
+      
+      // Temporal smoothing: require 3 consecutive consistent frames
+      fingerHistoryRef.current.push(isFingerFrame);
+      if (fingerHistoryRef.current.length > 5) fingerHistoryRef.current.shift();
+      
+      // Majority vote over recent frames
+      const fingerVotes = fingerHistoryRef.current.filter(v => v).length;
+      const fingerMajority = fingerVotes >= Math.max(3, Math.floor(fingerHistoryRef.current.length * 0.6));
+      
+      if (!demoMode) setFingerDetected(fingerMajority);
+    } else {
+      // Front camera - no finger detection needed
+      if (!demoMode) setFingerDetected(false);
+    }
 
     if (demoMode) {
       const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
@@ -746,6 +780,7 @@ export default function VitalMonitoringPage() {
       syntheticBufferRef.current = [];
       synthTimeRef.current = 0;
       frameIntervalsRef.current = [];
+      fingerHistoryRef.current = [];
       setHb(null);
       setBpm(null);
       setRespRate(null);
@@ -966,6 +1001,7 @@ export default function VitalMonitoringPage() {
     syntheticBufferRef.current = [];
     synthTimeRef.current = 0;
     frameIntervalsRef.current = [];
+    fingerHistoryRef.current = [];
     lastBpmUpdate.current = 0;
     setFinalReading(null);
     setPhase("warming");
