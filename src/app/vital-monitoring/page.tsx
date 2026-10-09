@@ -730,12 +730,12 @@ export default function VitalMonitoringPage() {
           // Trend detection
           const dcRising = prevDc !== null && dcLevel > prevDc + 2; // DC increasing (finger pressing down)
           const piCollapsed = prevPi !== null && perfusion < prevPi * 0.7 && prevPi > 0.5; // PI dropping sharply
-          const dcDriftHigh = prevDc !== null && Math.abs(dcLevel - prevDc) > 5; // DC unstable (>5 units/2s)
+          const dcDriftHigh = prevDc !== null && Math.abs(dcLevel - prevDc) > 15;
           const piTooHigh = perfusion > 8; // PI implausibly high = motion artifact
           const saturated = dcLevel > 230 || dcLevel < 20; // Sensor clipping
           const lightLeakEvidence = dcLevel > 180 && perfusion < 1.0 && (blueWin.length > 0 ? blueWin.reduce((a, b) => a + b, 0) / blueWin.length : 0) > dcLevel * 0.6; // Blue ~ Green = ambient light
 
-          let newState: typeof pressureStateRef.current = pressureStateRef.current;
+          let newState = pressureStateRef.current;
 
           // Priority 1: TOO_HEAVY - occlusion evidence
           if (saturated || (dcRising && piCollapsed)) {
@@ -744,7 +744,7 @@ export default function VitalMonitoringPage() {
             unstableDwellRef.current = 0;
           }
           // Priority 2: UNSTABLE - motion/artifact, not pressure
-          else if (piTooHigh || dcDriftHigh) {
+          if (piTooHigh || dcDriftHigh) {
             newState = "UNSTABLE";
             adequateDwellRef.current = 0;
             unstableDwellRef.current = Math.min(5, unstableDwellRef.current + 1);
@@ -773,9 +773,11 @@ export default function VitalMonitoringPage() {
           }
 
           // Hysteresis: don't flip-flop TOO_HEAVY <-> TOO_LIGHT rapidly
-          if (newState === "TOO_HEAVY" && pressureStateRef.current === "TOO_LIGHT") {
+          // Type assertion needed because TS narrows newState type through the if/else chain
+          const ns = newState as "NO_FINGER" | "TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL";
+          if (ns === "TOO_HEAVY" && pressureStateRef.current === "TOO_LIGHT") {
             newState = "TOO_LIGHT"; // Stick with light until clear heavy evidence
-          } else if (newState === "TOO_LIGHT" && pressureStateRef.current === "TOO_HEAVY") {
+          } else if (ns === "TOO_LIGHT" && pressureStateRef.current === "TOO_HEAVY") {
             newState = "TOO_HEAVY";
           }
 
