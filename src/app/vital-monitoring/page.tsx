@@ -284,9 +284,10 @@ export default function VitalMonitoringPage() {
     let r = 0, g = 0, b = 0, count = 0;
     let frameOk = true;
     if (cameraMode === "rear") {
-      // Rear camera: center ROI (finger on lens)
-      const cx0 = Math.floor(PROC_W * 0.35), cy0 = Math.floor(PROC_H * 0.35);
-      const cx1 = Math.floor(PROC_W * 0.65), cy1 = Math.floor(PROC_H * 0.65);
+      // Rear camera: center ROI (finger on lens) - smaller, more focused region
+      // Use 25%-75% to get a tighter center region (48x36 at 160x120 -> 80x60)
+      const cx0 = Math.floor(PROC_W * 0.25), cy0 = Math.floor(PROC_H * 0.25);
+      const cx1 = Math.floor(PROC_W * 0.75), cy1 = Math.floor(PROC_H * 0.75);
       for (let y = cy0; y < cy1; y++) {
         for (let x = cx0; x < cx1; x++) {
           const i = (y * PROC_W + x) * 4;
@@ -412,7 +413,7 @@ export default function VitalMonitoringPage() {
     lastFrameTimeRef.current = now;
 
     const isFingerFrame = cameraMode === "rear"
-      ? (avgR > 90 && avgR < 245 && avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8)
+      ? (avgR > 60 && avgR < 250 && avgR > avgG + 8 && avgR > avgB + 8 && avgG > 30 && avgB > 30)
       : true;
     if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
 
@@ -444,10 +445,11 @@ export default function VitalMonitoringPage() {
       setFingerDetected(true);
     } else {
       // Only collect the analysis buffers during the measuring phase and only
-      // when the frame actually contains the signal source (finger on lens in
-      // rear mode, skin ROI in front mode). This keeps warm-up and unusable
-      // frames out of the AC/DC and HR/HRV math.
-      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || isFingerFrame);
+      // when the frame actually contains the signal source. For rear mode, use
+      // a lenient DC-based check instead of strict finger detection to avoid
+      // dropping frames when finger detection briefly fails.
+      const rearSignalOk = avgR > 40 && avgR < 250 && avgG > 20 && avgB > 20;
+      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || rearSignalOk);
       if (collecting) {
         ppgBufferRef.current.push(avgG);
         if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
@@ -495,11 +497,10 @@ export default function VitalMonitoringPage() {
         analysisSource = pos.length >= Math.floor(fs * 6) ? pos : ppgWin;
       } else {
         // Rear camera: pick the single channel (red or green) with the best
-        // spectral SNR in the cardiac band. Green is the default because
-        // hemoglobin absorbs green strongly and flash saturation is rare,
-        // but red can win on thick/dark/cold fingers where green is
-        // attenuated, provided the channel is not clipped by the torch.
-        const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs);
+        // spectral SNR in the cardiac band. For finger PPG, RED is preferred
+        // because it penetrates finger tissue better and gives higher SNR.
+        // Green is fallback if red is saturated or has significantly lower SNR.
+        const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs, true);
         analysisSource = selected.length >= Math.floor(fs * 5) ? selected : ppgWin;
       }
       const analysis: VitalAnalysis = analyzeVitals(
@@ -544,8 +545,9 @@ export default function VitalMonitoringPage() {
         prevDcLevelRef.current = dcLevel;
         prevPerfusionRef.current = perfusion;
 
-        // Finger presence check (min coverage)
-        const fingerCoverage = fingerDetected && dcLevel > 30 && dcLevel < 230;
+        // Finger presence check (min coverage) - more lenient
+        // Allow some frames where finger detection briefly fails
+        const fingerCoverage = (fingerDetected || dcLevel > 40) && dcLevel > 20 && dcLevel < 240;
         if (!fingerCoverage) {
           pressureStateRef.current = "NO_FINGER";
           adequateDwellRef.current = 0;
