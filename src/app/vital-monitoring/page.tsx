@@ -129,6 +129,14 @@ export default function VitalMonitoringPage() {
   const countdownTimerRef = useRef<number | null>(null);
   const spo2SmoothedRef = useRef<number | null>(null);
   const hbSmoothedRef = useRef<number | null>(null);
+  // Per-frame timestamps for accurate resampling (fixes fs assumption)
+  const frameTimestampsRef = useRef<number[]>([]);
+  const lastResampleTimeRef = useRef<number>(0);
+  // Torch saturation flag for rear camera
+  const torchSaturatedRef = useRef(false);
+  // Front camera safeguards: motion, face ROI, auto-exposure/WB drift
+  const frontCamPrevFrameRef = useRef<Uint8ClampedArray | null>(null);
+  const frontCamExposureDriftRef = useRef<number>(0);
   // Pressure state machine refs
   const pressureStateRef = useRef<"NO_FINGER" | "TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL" | null>(null);
   const prevDcLevelRef = useRef<number | null>(null);
@@ -468,6 +476,10 @@ export default function VitalMonitoringPage() {
     const avgB = count ? b / count : 128;
     
     const now = performance.now();
+    // Store per-frame timestamp for accurate resampling
+    frameTimestampsRef.current.push(now);
+    if (frameTimestampsRef.current.length > 1800) frameTimestampsRef.current.shift();
+    
     if (lastFrameTimeRef.current > 0) {
       const dt = now - lastFrameTimeRef.current;
       if (dt > 0) {
@@ -503,7 +515,11 @@ export default function VitalMonitoringPage() {
 // Finger detection for rear camera.
       // Physical signature: finger on lens with torch = BRIGHT red, low G/B, uniform
       let isFingerFrame = false;
+      let torchSaturated = false;
       if (cameraMode === "rear") {
+        // Torch saturation check: if red channel clips, signal is unreliable
+        torchSaturated = avgR >= 250 || avgG >= 250 || avgB >= 250;
+        
         // Original working thresholds (commit a3a6fd1 - Oct 7): simple and robust
         // Finger: bright red (>90), not saturated (<245), red >> green/blue (+15), distinct from green
         const redBright = avgR > 90 && avgR < 245;
@@ -520,6 +536,10 @@ export default function VitalMonitoringPage() {
 
       const votes = hist.reduce((a, v) => a + (v ? 1 : 0), 0);
       const frac = hist.length > 0 ? votes / hist.length : 0;
+      
+      // Update torch saturation ref for UI/analysis gating
+      torchSaturatedRef.current = torchSaturated;
+      
       // `fingerDetected` state drives the UI; `fingerDetectedRef` is the value
       // the acquisition and pressure paths read, so the two can never disagree
       // mid-frame. The ref mirrors the state, so it is also used to decide
@@ -529,6 +549,33 @@ export default function VitalMonitoringPage() {
       if (nowDetected !== wasDetected) setFingerDetected(nowDetected);
       fingerDetectedRef.current = nowDetected;
     } else {
+      // Front camera safeguards: motion, face ROI, auto-exposure/WB drift
+      if (cameraMode === "front" && !demoMode) {
+        const frameData = new Uint8ClampedArray(data); // copy current frame
+        if (frontCamPrevFrameRef.current) {
+          // Frame difference for motion detection
+          let diffSum = 0;
+          for (let i = 0; i < frameData.length; i += 4) {
+            diffSum += Math.abs(frameData[i] - frontCamPrevFrameRef.current[i]);
+          }
+          const avgDiff = diffSum / (frameData.length / 4);
+          // High frame difference = motion artifact
+          if (avgDiff > 15) {
+            frameOk = false;
+          }
+          
+          // Auto-exposure/WB drift: track mean brightness change
+          const currMean = (avgR + avgG + avgB) / 3;
+          if (frontCamExposureDriftRef.current > 0) {
+            const drift = Math.abs(currMean - frontCamExposureDriftRef.current);
+            if (drift > 20) {
+              frameOk = false; // Sudden exposure/WB change
+            }
+          }
+          frontCamExposureDriftRef.current = currMean;
+        }
+        frontCamPrevFrameRef.current = frameData;
+      }
       // Front camera - no finger detection needed
       if (fingerHistoryRef.current) fingerHistoryRef.current = [];
       if (fingerDetectedRef.current) {
@@ -597,6 +644,49 @@ export default function VitalMonitoringPage() {
       valuesRef.current.push(cameraMode === "rear" ? avgR : avgG);
       if (valuesRef.current.length > 180) valuesRef.current.shift();
     }
+  
+  // Resample non-uniform signal to uniform grid using linear interpolation.
+  function resampleToUniform(
+    signal: number[],
+    timestamps: number[],
+    targetFs = 30,
+    maxDurationSec = 30
+  ): { signal: number[]; fs: number; uniformTimestamps: number[] } {
+    if (signal.length < 3 || timestamps.length !== signal.length) {
+      return { signal, fs: targetFs, uniformTimestamps: [] };
+    }
+    const t0 = timestamps[0];
+    const tEnd = timestamps[timestamps.length - 1];
+    const duration = (tEnd - t0) / 1000; // seconds
+    if (duration < 2) return { signal, fs: targetFs, uniformTimestamps: [] };
+    
+    const nTarget = Math.min(Math.floor(duration * targetFs), Math.floor(maxDurationSec * targetFs));
+    const dt = 1 / targetFs;
+    const out: number[] = new Array(nTarget);
+    const outTimes: number[] = new Array(nTarget);
+    
+    let srcIdx = 0;
+    for (let i = 0; i < nTarget; i++) {
+      const tTarget = t0 + i * dt * 1000;
+      outTimes[i] = tTarget;
+      while (srcIdx + 1 < timestamps.length && timestamps[srcIdx + 1] <= tTarget) {
+        srcIdx++;
+      }
+      if (srcIdx === 0) {
+        out[i] = signal[0];
+      } else if (srcIdx >= timestamps.length - 1) {
+        out[i] = signal[signal.length - 1];
+      } else {
+        const t1 = timestamps[srcIdx];
+        const t2 = timestamps[srcIdx + 1];
+        const v1 = signal[srcIdx];
+        const v2 = signal[srcIdx + 1];
+        const alpha = (tTarget - t1) / (t2 - t1);
+        out[i] = v1 + alpha * (v2 - v1);
+      }
+    }
+    return { signal: out, fs: targetFs, uniformTimestamps: outTimes };
+  }
 
     // Run comprehensive vitals analysis using centralized module
     const sessionStart = sessionStartRef.current;
@@ -608,15 +698,23 @@ export default function VitalMonitoringPage() {
     if (nowMs - lastBpmUpdate.current > 2000) {
       lastBpmUpdate.current = nowMs;
 
-      const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
-      // All buffers are cut to the same most-recent 30 s window so the pulse
-      // analysis, the POS projection and the AC/DC ratios always operate on
-      // exactly the same samples.
-      const windowLen = Math.floor(fs * 30);
-      const ppgWin = ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, windowLen));
-      const redWin = redRef.current.slice(-Math.min(redRef.current.length, windowLen));
-      const greenWin = greenRef.current.slice(-Math.min(greenRef.current.length, windowLen));
-      const blueWin = blueRef.current.slice(-Math.min(blueRef.current.length, windowLen));
+      // Use target fs of 30 Hz for analysis, resample from actual timestamps
+      const targetFs = 30;
+      const windowSec = 30;
+      
+      // Resample all buffers to uniform 30 Hz grid
+      const timestamps = frameTimestampsRef.current;
+      const ppgResampled = resampleToUniform(ppgBufferRef.current, timestamps, targetFs, windowSec);
+      const redResampled = resampleToUniform(redRef.current, timestamps, targetFs, windowSec);
+      const greenResampled = resampleToUniform(greenRef.current, timestamps, targetFs, windowSec);
+      const blueResampled = resampleToUniform(blueRef.current, timestamps, targetFs, windowSec);
+      
+      const ppgWin = ppgResampled.signal;
+      const redWin = redResampled.signal;
+      const greenWin = greenResampled.signal;
+      const blueWin = blueResampled.signal;
+      const fs = targetFs; // Now exactly 30 Hz
+      
       let analysisSource: number[];
       // AC/DC denominator for the perfusion term. For the rear path this must be
       // the mean of the *winning* channel, not green: red and green have very
@@ -626,7 +724,7 @@ export default function VitalMonitoringPage() {
       // the only meaningful denominator.
       let dcRef: number | undefined;
       if (demoMode) {
-        analysisSource = syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, windowLen));
+        analysisSource = syntheticBufferRef.current;
       } else if (cameraMode === "front") {
         // Front camera: drive the pulse analysis from the POS chrominance
         // pulse, which rejects illumination/motion artifacts that a raw

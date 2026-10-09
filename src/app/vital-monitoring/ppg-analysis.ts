@@ -729,7 +729,15 @@ export function powerSpectrum(signal: number[], fs: number): { freqs: number[]; 
 /// on the already band-passed signal is optimistic because band-limiting has
 /// already removed most of the in-band noise, which let structured artifacts
 /// pass the reliability gate.
-function spectralHR(f: number[], fs: number, rawForSnr?: number[]): { bpm: number | null; snrDb: number } {
+///
+/// Returns { bpm, snrDb, isHarmonic, candidates } where candidates includes
+/// the top 3 spectral peaks for harmonic validation.
+function spectralHR(f: number[], fs: number, rawForSnr?: number[]): { 
+  bpm: number | null; 
+  snrDb: number; 
+  isHarmonic: boolean;
+  candidates: { bpm: number; power: number }[];
+} {
   const n = f.length;
   const w = f.map((v, i) => v * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1))));
   const freqs: number[] = [];
@@ -744,8 +752,19 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): { bpm: numbe
     freqs.push(fr);
     power.push(re * re + im * im);
   }
-  let pk = 0;
-  for (let i = 1; i < power.length; i++) if (power[i] > power[pk]) pk = i;
+  // Find top 3 peaks for harmonic validation
+  const peakIndices: number[] = [];
+  for (let i = 1; i < power.length - 1; i++) {
+    if (power[i] > power[i - 1] && power[i] >= power[i + 1]) {
+      peakIndices.push(i);
+    }
+  }
+  peakIndices.sort((a, b) => power[b] - power[a]);
+  const topPeaks = peakIndices.slice(0, 3).sort((a, b) => a - b);
+  
+  const candidates = topPeaks.map(idx => ({ bpm: freqs[idx] * 60, power: power[idx] }));
+  
+  const pk = topPeaks[0];
   const f0 = freqs[pk];
   let sig = 0, tot = 0;
   for (let i = 0; i < freqs.length; i++) {
@@ -756,7 +775,25 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): { bpm: numbe
   }
   const noise = Math.max(tot - sig, 1e-12);
   const snrDb = 10 * Math.log10(Math.max(sig, 1e-12) / noise);
-  return { bpm: f0 * 60, snrDb };
+  
+  const maxPower = power[pk];
+  
+  // Check if the detected peak is likely a harmonic/subharmonic
+  // If there's a stronger peak at 2*f0 or f0/2, flag as potential harmonic error
+  let isHarmonic = false;
+  for (const c of candidates) {
+    if (c.bpm !== f0 * 60) {
+      const ratio = c.bpm / (f0 * 60);
+      if (Math.abs(ratio - 2) < 0.15 || Math.abs(ratio - 0.5) < 0.15) {
+        if (c.power > maxPower * 0.8) {
+          isHarmonic = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return { bpm: f0 * 60, snrDb, isHarmonic, candidates };
 }
 
 /// Percentile-based acceptance threshold for peak detection over an inclusive
@@ -848,9 +885,10 @@ export function analyzeHeartRate(
 ): HeartMetrics {
   const minFloorMs = 300;
   const thresholdWindowSec = 8;
-  const maxPeakSpectralDiffBpm = 12;  // Relaxed from 8 for real-world variation
-  const minValidFraction = 0.5;       // Relaxed from 0.7 for noisy signals
+  const maxPeakSpectralDiffBpm = 5;  // Tightened from 12 to 5 BPM for strict validation
+  const minValidFraction = 0.6;       // Stricter: need 60% of expected beats
   const minSnrDb = -3;                // Allow slightly negative SNR for weak signals
+  const minPeaksForPeakMethod = 10;   // Need 10+ peaks for reliable peak-based HR (30s @ 20 BPM = 10)
 
   if (!ppg || ppg.length < fs * 5) {
     return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0 };
@@ -893,10 +931,14 @@ export function analyzeHeartRate(
 
   // Peak detection with new algorithm
   const peakTimesMs = detectPeaksAdaptive(f, fs, seedRr, minFloorMs, thresholdWindowSec);
-  if (peakTimesMs.length < 3) {  // Relaxed from 4 to 3
+  
+  // Need enough peaks for reliable peak-based method
+  if (peakTimesMs.length < minPeaksForPeakMethod) {
     const basicSQI = computeBasicSQI(ppg, fs, dcRef);
     const basicPi = dcRef && dcRef > 1e-9 ? (rms(butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true)) / dcRef) * 100 : 0;
-    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
+    // Round spectral BPM to resolution (1/T ≈ 2 BPM for 30s window)
+    const roundedSpectral = bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? Math.round(bpmSpectral / 2) * 2 : null;
+    return { bpm: roundedSpectral, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: roundedSpectral, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
   }
 
   // Convert peak times to sample indices for backward compatibility
@@ -908,16 +950,23 @@ export function analyzeHeartRate(
   const med = median(rrAll);
   const ok = rrAll.map((r) => r >= 0.7 * med && r <= 1.3 * med);
   const rrMs = rrAll.filter((_, i) => ok[i]);
-  if (rrMs.length < 3) {
+  if (rrMs.length < minPeaksForPeakMethod - 1) {
     const basicSQI = computeBasicSQI(ppg, fs, dcRef);
     const basicPi = dcRef && dcRef > 1e-9 ? (rms(butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true)) / dcRef) * 100 : 0;
-    return { bpm: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
+    const roundedSpectral = bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? Math.round(bpmSpectral / 2) * 2 : null;
+    return { bpm: roundedSpectral, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: roundedSpectral, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
   }
 
   const bpmVal = 60000 / median(rrMs);
   const bpm = bpmVal > 30 && bpmVal < 220 ? bpmVal : null;
-  const hrv = computeHRV(rrMs);
-  const rhythm = classifyRhythm(rrMs);
+
+  // HRV (Pulse Rate Variability - only meaningful for rear contact PPG)
+  let hrv: HRVMetrics | null = null;
+  let rhythm: "regular" | "variable" | "irregular" | "unknown" = "unknown";
+  if (cameraMode === "rear" && rrMs.length >= 10) {
+    hrv = computeHRV(rrMs);
+    rhythm = classifyRhythm(rrMs);
+  }
 
   // Bandpass for signal quality computation
   const rawFiltered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true);
@@ -946,20 +995,30 @@ export function analyzeHeartRate(
   const durSec = f.length / fs;
   const expectedBeats = Math.max(1, (durSec * bpmForQuality) / 60 - 1);
   const validFraction = Math.min(1, rrMs.length / expectedBeats);
-  const agree = bpm !== null && bpmSpectral !== null && Math.abs(bpm - bpmSpectral) <= maxPeakSpectralDiffBpm;
+  
+  // Check harmonic error: if spectral detected harmonic, don't trust peak-spectral agreement
+  const harmonicError = spec.isHarmonic && spec.candidates && spec.candidates.length > 1;
+  
+  // Peak-spectral agreement: tight 5 BPM tolerance, but only if no harmonic ambiguity
+  const agree = !harmonicError && bpm !== null && bpmSpectral !== null && Math.abs(bpm - bpmSpectral) <= maxPeakSpectralDiffBpm;
+  
   const snrOk = spec.snrDb >= minSnrDb;
   const reliable = validFraction >= minValidFraction && agree && snrOk;
 
+  // Round BPM to resolution-appropriate precision (1/T ≈ 2 BPM for 30s)
+  const bpmRounded = bpm !== null ? Math.round(bpm / 2) * 2 : null;
+  const bpmSpectralRounded = bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? Math.round(bpmSpectral / 2) * 2 : null;
+
   return {
-    bpm,
+    bpm: bpmRounded,
     peaks,
     rrIntervals: rrMs,
     hrv,
     rhythm,
     signalQuality,
     method: reliable ? "peaks" : "spectral",
-    bpmPeaks: bpm,
-    bpmSpectral: bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? bpmSpectral : null,
+    bpmPeaks: bpmRounded,
+    bpmSpectral: bpmSpectralRounded,
     rrMs,
     peakTimesMs,
     validFraction,
@@ -1432,9 +1491,9 @@ export interface PpgChannelSelection {
 /// Saturation rejection: any channel with >10% samples at or above
 /// 250 (out of 255) is treated as unusable and automatically loses.
 ///
-/// Both channels are bandpass-filtered 0.5-8 Hz before SNR estimation
-/// so the metric reflects usable cardiac content, not raw DC or
-/// high-frequency sensor noise.
+/// Both channels are bandpass-filtered 0.5-3.5 Hz (CARDIAC_LO-CARDIAC_HI) before SNR
+/// estimation so the metric matches the analysis band. This avoids harmonic bias
+/// where 0.5-8 Hz admits 2*f0 and 3*f0 energy.
 ///
 /// Returns the RAW winning channel (not bandpassed) so the caller can apply
 /// its own filtering. The dcRef is the mean of the raw winning channel.
@@ -1459,8 +1518,9 @@ export function selectBestPpgChannel(
   const redSatFrac = red.filter((v) => v >= satThreshold).length / red.length;
   const greenSatFrac = green.filter((v) => v >= satThreshold).length / green.length;
 
-  const redFiltered = butterworthBandpass(red, 0.5, 8.0, fs, true);
-  const greenFiltered = butterworthBandpass(green, 0.5, 8.0, fs, true);
+  // Use same cardiac band (0.5-3.5 Hz) as analysis to avoid harmonic bias
+  const redFiltered = butterworthBandpass(red, CARDIAC_LO, CARDIAC_HI, fs, true);
+  const greenFiltered = butterworthBandpass(green, CARDIAC_LO, CARDIAC_HI, fs, true);
 
   const redSnr = spectralSnr(redFiltered, fs).snr;
   const greenSnr = spectralSnr(greenFiltered, fs).snr;
@@ -1579,50 +1639,65 @@ export interface SpectralSnr {
   hasReference: boolean;
 }
 
-/// Bandwidth-matched cardiac-band SNR.
+/// Narrowband cardiac-band SNR.
 ///
-/// The previous SQI compared the summed power of the 0.5-3.5 Hz cardiac band
-/// against the summed power of the whole 3.5 Hz .. fs*0.4 range (~8.5 Hz wide at
-/// 30 fps, ~20 Hz wide at 60 fps). That is not an SNR: the noise side is ~3x
-/// wider than the signal side, so broadband sensor/codec noise is amplified by
-/// that ratio, and the result also drifts with the frame rate. On synthetic
-/// facial rPPG the POS pulse recovered 72.0 bpm against a true 72 bpm while this
-/// metric read 1.36, which the hard `snr < 1 -> clamp to 0` branch then turned
-/// into SQI 7% — a fully usable signal reported as unusable.
+/// Instead of comparing the whole 0.5-3.5 Hz band against an out-of-band reference,
+/// this computes SNR as: (power in narrow band around f0 + harmonic) / 
+/// (power in rest of 0.5-3.5 Hz band). This is robust because:
+/// - The signal energy is concentrated at f0 and 2*f0 (harmonic)
+/// - Noise is spread across the band
+/// - Avoids dependence on out-of-band noise floor which varies with sensor/fs
+/// - Works even for band-limited signals (no out-of-band reference needed)
 ///
-/// Here the reference band is converted to its *equivalent in-band power*
-/// (mean bin density x number of cardiac bins), so the ratio is a true SNR with
-/// matched bandwidths and is therefore stable across frame rates and noise
-/// colours.
+/// Returns linear SNR (not dB). For dB: 10*log10(snr).
 export function spectralSnr(signal: number[], fs: number): SpectralSnr {
   const none: SpectralSnr = { snr: 0, signalPower: 0, noiseDensity: 0, sigBins: 0, noiseBins: 0, hasReference: false };
   const { freqs, psd } = powerSpectrum(signal, fs);
   if (freqs.length === 0) return none;
 
-  const noiseHi = Math.min((fs / 2) * 0.9, CARDIAC_HI + NOISE_BAND_WIDTH);
+  // First find f0 (fundamental) in cardiac band
+  let f0 = -1;
+  let maxPower = -1;
+  for (let i = 0; i < freqs.length; i++) {
+    if (freqs[i] >= CARDIAC_LO && freqs[i] <= CARDIAC_HI && psd[i] > maxPower) {
+      maxPower = psd[i];
+      f0 = freqs[i];
+    }
+  }
+  if (f0 < 0) return none;
+
+  // Narrow band around f0 (±0.15 Hz) and harmonic 2*f0 (±0.15 Hz)
+  const bw = 0.15;
   let signalPower = 0;
   let sigBins = 0;
   let noisePower = 0;
   let noiseBins = 0;
+
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
-    if (f >= CARDIAC_LO && f <= CARDIAC_HI) {
+    if (f < CARDIAC_LO || f > CARDIAC_HI) continue;
+    
+    const nearF0 = Math.abs(f - f0) <= bw;
+    const nearHarmonic = Math.abs(f - 2 * f0) <= bw;
+    
+    if (nearF0 || nearHarmonic) {
       signalPower += psd[i];
       sigBins++;
-    } else if (f > CARDIAC_HI && f <= noiseHi) {
+    } else {
       noisePower += psd[i];
       noiseBins++;
     }
   }
-  if (sigBins === 0) return none;
 
-  const noiseDensity = noiseBins > 0 ? noisePower / noiseBins : 0;
-  const inBandNoise = noiseDensity * sigBins;
-  if (inBandNoise <= 0) {
-    // Band-limited signal: nothing to compare against, so do not penalise it.
-    return { snr: Infinity, signalPower, noiseDensity, sigBins, noiseBins, hasReference: false };
+  if (sigBins === 0) return none;
+  if (noiseBins === 0 || noisePower <= 0) {
+    // Band-limited or pure tone - very high SNR
+    return { snr: Infinity, signalPower, noiseDensity: 0, sigBins, noiseBins, hasReference: true };
   }
-  return { snr: signalPower / inBandNoise, signalPower, noiseDensity, sigBins, noiseBins, hasReference: true };
+
+  const noiseDensity = noisePower / noiseBins;
+  const snr = signalPower / (noiseDensity * sigBins);
+  return { snr, signalPower, noiseDensity, sigBins, noiseBins, hasReference: true };
 }
 
 /// Peak-to-median power ratio inside the cardiac band: how strongly the pulse
