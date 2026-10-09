@@ -548,7 +548,8 @@ function computeSignalQuality(
   raw: number[],
   peaks: Peak[],
   fs: number,
-  dcRef: number
+  dcRef: number,
+  cameraMode: "front" | "rear" = "rear"
 ): number {
   if (peaks.length < 2) return 0;
 
@@ -558,11 +559,10 @@ function computeSignalQuality(
   const dc = dcRef > 1e-9 ? dcRef : dcLevel(raw);
   const ac = rms(filtered);
   const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
-  // Facial rPPG runs at 0.05-0.5% AC/DC and contact fingertip PPG at 0.5-5%, so
-  // full credit at 0.5% with a square-root law keeps the entire remote-PPG range
-  // usable instead of collapsing it to zero, while still discriminating a
-  // strong pulse from a weak one.
-  const piScore = clamp01(Math.sqrt(pi / 0.5));
+  // Facial rPPG runs at 0.05-0.5% AC/DC; contact fingertip PPG at 0.5-5%.
+  // Use 0.1% reference for rPPG (front), 0.5% for contact PPG (rear).
+  const piRef = cameraMode === "front" ? 0.1 : 0.5;
+  const piScore = clamp01(Math.sqrt(pi / piRef));
 
   // 2. Bandwidth-matched spectral SNR on the RAW signal (see spectralSnr).
   //    Log-scaled because the usable range spans orders of magnitude:
@@ -739,7 +739,12 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
 }
 
 
-export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartMetrics {
+export function analyzeHeartRate(
+  ppg: number[],
+  fs = 30,
+  dcRef?: number,
+  cameraMode: "front" | "rear" = "rear"
+): HeartMetrics {
   const minFloorMs = 300;
   const thresholdWindowSec = 8;
   const maxPeakSpectralDiffBpm = 8;
@@ -806,30 +811,27 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
   const hrv = computeHRV(rrMs);
   const rhythm = classifyRhythm(rrMs);
 
-  // Signal quality using refined computation (like old computeSignalQuality)
-  // Use raw signal for perfusion index and SNR (matches old computeSignalQuality)
+  // Bandpass for signal quality computation
   const rawFiltered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true);
-  const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(ppg);
-  const ac = rms(rawFiltered);
-  const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
-  const piScore = clamp01(Math.sqrt(pi / 0.5));
 
-  // 2. Bandwidth-matched spectral SNR on raw signal
-  const { snr } = spectralSnr(ppg, fs);
-  const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
+  // Signal quality using computeSignalQuality with proper dcRef
+  // For rPPG (front), POS pulse is zero-mean so dcRef MUST be provided (green skin-ROI mean)
+  // For contact PPG (rear), raw signal has proper DC
+  const signalQuality = computeSignalQuality(
+    rawFiltered, // filtered = cardiac band 0.5-3.5 Hz
+    ppg,         // raw signal
+    peaks.map((idx, i) => ({ index: idx, value: rawFiltered[idx], timeMs: peakTimesMs[i] })),
+    fs,
+    dcRef && dcRef > 1e-9 ? dcRef : dcLevel(ppg),
+    cameraMode
+  );
 
-  // 3. Pulse regularity (CV of RR intervals)
-  const rrMsClean = rrMs.length >= 2 ? rrMs : [];
-  const cv = rrMsClean.length > 1 ? (stddev(rrMsClean) / mean(rrMsClean)) * 100 : 0;
-  const regScore = cv < 10 ? 1 : Math.max(0, 1 - (cv - 10) / 30);
-
-  // 4. Pulse-presence gate using cardiac spectral prominence
-  const prominence = cardiacSpectralProminence(ppg, fs);
-  const pulseGate = clamp01((prominence - 4) / 12);
-
-  // Weighted average, scaled by pulse gate
-  const baseQuality = 0.4 * snrScore + 0.35 * piScore + 0.25 * regScore;
-  const signalQuality = Math.round(clamp01(baseQuality * pulseGate) * 100);
+  // Perfusion index with proper reference
+  // rPPG (front): 0.1% reference; Contact PPG (rear): 0.5% reference
+  const piRef = cameraMode === "front" ? 0.1 : 0.5;
+  const perfusionIndex = dcRef && dcRef > 1e-9 
+    ? perfusionIndexACDC(ppg, fs, dcRef)
+    : (dcRef && dcRef > 1e-9 ? (rms(rawFiltered) / dcRef) * 100 : 0);
 
   // New reliability gate for SpO2/glucose/creatinine gating
   const bpmForQuality = bpm ?? bpmSpectral ?? 60;
@@ -857,7 +859,7 @@ export function analyzeHeartRate(ppg: number[], fs = 30, dcRef?: number): HeartM
     sdnn: hrv?.sdnn ?? null,
     rmssd: hrv?.rmssd ?? null,
     reliable,
-    perfusionIndex: pi,
+    perfusionIndex,
   };
 }
 
