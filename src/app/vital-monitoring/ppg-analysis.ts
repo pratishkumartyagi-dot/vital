@@ -1031,14 +1031,22 @@ function estimateBloodPressure(
   const features = extractPPGFeatures(ppg, peakIndices, fs);
   const heartRate = rrMs.length > 0 ? 60000 / mean(rrMs) : 70;
 
-  const stiffnessFactor = Math.min(features.stiffnessIndex / 100, 1);
-  const reflectionFactor = Math.min(features.reflectionIndex / 2, 1);
+  // Normalize features to [0,1] range for regression
+  // Typical ranges for contact PPG (finger):
+  // stiffnessIndex: 0.5-5 (upstroke slope/PWV proxy)
+  // reflectionIndex (augmentation): 0.1-0.8
+  const stiffnessFactor = clamp01((features.stiffnessIndex - 0.5) / 4.5);
+  const reflectionFactor = clamp01((features.reflectionIndex - 0.1) / 0.7);
 
-  let baseSystolic = 110 + (heartRate - 70) * 0.3;
-  let baseDiastolic = 70 + (heartRate - 70) * 0.1;
+  // Population base values (mmHg)
+  let baseSystolic = 115 + (heartRate - 70) * 0.4;
+  let baseDiastolic = 75 + (heartRate - 70) * 0.15;
 
-  const sysAdjust = (stiffnessFactor * 15) - (reflectionFactor * 10) + (hrv?.sdnn ?? 0) * 0.1;
-  const diaAdjust = (stiffnessFactor * 5) - (reflectionFactor * 5) + (hrv?.rmssd ?? 0) * 0.05;
+  // Morphology adjustments (mmHg)
+  // Stiffer arteries → higher systolic, lower diastolic
+  // Higher reflection → higher systolic, lower diastolic
+  const sysAdjust = stiffnessFactor * 25 - reflectionFactor * 12 + (hrv?.sdnn ?? 0) * 0.15;
+  const diaAdjust = -stiffnessFactor * 8 - reflectionFactor * 5 + (hrv?.rmssd ?? 0) * 0.08;
 
   baseSystolic += sysAdjust;
   baseDiastolic += diaAdjust;
@@ -1046,13 +1054,14 @@ function estimateBloodPressure(
   const pulsePressure = baseSystolic - baseDiastolic;
   const map = baseDiastolic + pulsePressure / 3;
 
-  const confidence = Math.min(0.7, 0.3 + (stiffnessFactor * 0.2) + (reflectionFactor * 0.2));
+  // Confidence based on feature quality and HRV
+  const confidence = clamp01(0.35 + stiffnessFactor * 0.2 + reflectionFactor * 0.15 + (hrv?.sdnn ?? 0) / 100 * 0.1);
 
   return {
-    systolic: Math.round(Math.max(80, Math.min(200, baseSystolic))),
-    diastolic: Math.round(Math.max(50, Math.min(130, baseDiastolic))),
-    map: Math.round(Math.max(60, Math.min(150, map))),
-    pulsePressure: Math.round(Math.max(20, Math.min(100, pulsePressure))),
+    systolic: Math.round(Math.min(190, Math.max(90, baseSystolic))),
+    diastolic: Math.round(Math.min(120, Math.max(50, baseDiastolic))),
+    map: Math.round(Math.min(150, Math.max(60, map))),
+    pulsePressure: Math.round(Math.min(100, Math.max(25, pulsePressure))),
     confidence,
   };
 }
