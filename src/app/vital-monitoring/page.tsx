@@ -283,7 +283,7 @@ export default function VitalMonitoringPage() {
     const data = ctx.getImageData(0, 0, PROC_W, PROC_H).data;
 
     let r = 0, g = 0, b = 0, count = 0;
-    let frameOk = true;
+    let frameOk = false;  // Explicitly initialize to false
     if (cameraMode === "rear") {
       // Rear camera: center ROI (finger on lens) - smaller, more focused region
       // Use 25%-75% to get a tighter center region (48x36 at 160x120 -> 80x60)
@@ -298,6 +298,7 @@ export default function VitalMonitoringPage() {
           count++;
         }
       }
+      frameOk = count > 0;  // Valid if we got pixels
     } else {
       // Front camera: Focus on upper face region (forehead + upper cheeks)
       // This avoids mouth/nose movement artifacts and gets better rPPG signal
@@ -421,27 +422,36 @@ export default function VitalMonitoringPage() {
     // Finger PPG signature: Red >> Green ≈ Blue (red penetrates tissue, green/blue absorbed by blood)
     let isFingerFrame = false;
     if (cameraMode === "rear") {
-      const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
-      const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
-      const greenBlueDiff = Math.abs(avgG - avgB);
+      // Adaptive thresholds based on frame statistics
+      const brightness = (avgR + avgG + avgB) / 3;
       
       // Finger criteria:
       // 1. Red in good range (not too dark, not saturated)
-      // 2. Red significantly higher than green AND blue (ratios > 1.4)
-      // 3. Green and blue similar (both absorbed by blood)
-      // 4. Sufficient signal strength (red > 80)
-      const redInRange = avgR >= 80 && avgR <= 240;
-      const redDominant = redGreenRatio > 1.4 && redBlueRatio > 1.4;
-      const greenBlueSimilar = greenBlueDiff < Math.max(avgG, avgB) * 0.3;
-      const sufficientSignal = avgR > 80;
+      // 2. Red significantly higher than green AND blue (ratios > 1.3)
+      // 3. Green and blue similar (both absorbed by blood) - within 40%
+      // 4. Sufficient signal strength
+      // 5. Brightness in reasonable range for finger on camera
       
-      isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal;
+      const redGreenRatio = avgG > 1 ? avgR / avgG : 0;
+      const redBlueRatio = avgB > 1 ? avgR / avgB : 0;
+      const greenBlueDiff = Math.abs(avgG - avgB);
+      const greenBlueMax = Math.max(avgG, avgB);
+      
+      const redInRange = avgR >= 70 && avgR <= 245;
+      const redDominant = redGreenRatio > 1.3 && redBlueRatio > 1.3;
+      const greenBlueSimilar = greenBlueMax > 1 ? (greenBlueDiff / greenBlueMax) < 0.4 : true;
+      const sufficientSignal = avgR > 70;
+      const brightnessOk = brightness > 50 && brightness < 220;
+      const greenBlueReasonable = avgG > 15 && avgB > 15 && avgG < 200 && avgB < 200;
+      
+      isFingerFrame = redInRange && redDominant && greenBlueSimilar && sufficientSignal && brightnessOk && greenBlueReasonable;
       
       // Temporal smoothing: require 3 consecutive consistent frames
+      if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
       fingerHistoryRef.current.push(isFingerFrame);
       if (fingerHistoryRef.current.length > 5) fingerHistoryRef.current.shift();
       
-      // Majority vote over recent frames
+      // Majority vote over recent frames (need 3 of 5 or 60%)
       const fingerVotes = fingerHistoryRef.current.filter(v => v).length;
       const fingerMajority = fingerVotes >= Math.max(3, Math.floor(fingerHistoryRef.current.length * 0.6));
       
@@ -449,6 +459,8 @@ export default function VitalMonitoringPage() {
     } else {
       // Front camera - no finger detection needed
       if (!demoMode) setFingerDetected(false);
+      // Reset finger history when not in rear mode
+      if (fingerHistoryRef.current) fingerHistoryRef.current = [];
     }
 
     if (demoMode) {
@@ -480,10 +492,9 @@ export default function VitalMonitoringPage() {
     } else {
       // Only collect the analysis buffers during the measuring phase and only
       // when the frame actually contains the signal source. For rear mode, use
-      // a lenient DC-based check instead of strict finger detection to avoid
-      // dropping frames when finger detection briefly fails.
-      const rearSignalOk = avgR > 40 && avgR < 250 && avgG > 20 && avgB > 20;
-      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || rearSignalOk);
+      // finger detection state (with temporal stability) to determine collection.
+      const fingerPresent = fingerDetected;  // Uses temporally-smoothed detection
+      const collecting = phaseRef.current === "measuring" && frameOk && (cameraMode !== "rear" || fingerPresent);
       if (collecting) {
         ppgBufferRef.current.push(avgG);
         if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
@@ -1114,6 +1125,8 @@ export default function VitalMonitoringPage() {
 
   const switchCameraMode = useCallback(async (mode: "front" | "rear") => {
     const wasOn = cameraOnRef.current;
+    // Reset finger history when switching camera modes
+    if (fingerHistoryRef.current) fingerHistoryRef.current = [];
     setCameraMode(mode);
     if (mode === "rear") {
       setTorchOn(true);
