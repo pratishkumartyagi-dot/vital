@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, selectBestPpgChannel, estimateSpo2RedGreen, estimateHbRedGreen, resolveZlo } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, selectBestPpgChannel, estimateSpo2RedGreen, estimateSpo2Best, estimateHbRedGreen, resolveZlo } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -580,14 +580,10 @@ export default function VitalMonitoringPage() {
         // the default when the device model is unknown.
         const zlo = resolveZlo(null);
 
-        // Red/green ratio-of-ratios. Green is the highest-SNR camera channel
-        // and a red/green absorption ratio is the accepted contact-camera proxy
-        // for the red/IR ratio. The calibration constants in ppg-analysis.ts are
-        // linearised for the red/green RoR (which is ~0.8-2.5, not the ~0.4-0.8
-        // of red/IR), so the old `110 - 25 * R` formula returned SpO2 in the
-        // 60-85% range for every healthy subject. Absolute accuracy is
-        // device-specific — accuracy is device-dependent.
-        spo2Val = estimateSpo2RedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo);
+        // SpO2: try log-domain method (PMC10705321) first for motion robustness,
+        // fall back to linear AC/DC ratio-of-ratios.
+        const { spo2: spo2Log, method } = estimateSpo2Best(redWin, greenWin, redFiltered, greenFiltered, zlo, fs);
+        spo2Val = spo2Log;
         hbVal = estimateHbRedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo);
 
         // Fallback: red/blue ratio-of-ratios (used only when green is

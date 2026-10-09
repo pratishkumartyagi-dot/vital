@@ -382,6 +382,111 @@ export function estimateSpo2RedGreen(
   return Math.min(SPO2_RED_GREEN_MAX, Math.max(SPO2_RED_GREEN_MIN, SPO2_RED_GREEN_INTERCEPT - SPO2_RED_GREEN_SLOPE * R + offset));
 }
 
+/// Log-domain SpO2 estimation (PMC10705321 method).
+///
+/// Algorithm:
+/// 1. Take log of raw red and green signals: lr = log(red + eps), lg = log(green + eps)
+/// 2. Bandpass filter log signals (0.7-3.5 Hz, 4th-order Butterworth via filtfilt)
+/// 3. Window-wise R: R_win = std(log_filt_red) / std(log_filt_green) per 10s window
+/// 4. Robust estimate: R = median of all window R values
+/// 5. SpO2 = A - B * R with A=110, B=25
+///
+/// This approach is more physically correct (Beer-Lambert law in log domain)
+/// and more robust to motion artifacts via window-wise median.
+export function estimateSpo2LogDomain(
+  redRaw: number[],
+  greenRaw: number[],
+  fs: number,
+  A = SPO2_LOG_INTERCEPT,
+  B = SPO2_LOG_SLOPE,
+  eps = 1e-6
+): number | null {
+  const n = Math.min(redRaw.length, greenRaw.length);
+  if (n < fs * 10) return null; // Need at least 10s
+
+  // Step 1: Log-domain signals
+  const lr = new Array<number>(n);
+  const lg = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    lr[i] = Math.log(Math.max(redRaw[i], 1) + eps);
+    lg[i] = Math.log(Math.max(greenRaw[i], 1) + eps);
+  }
+
+  // Step 2: 4th-order Butterworth bandpass (0.7-3.5 Hz) with zero-phase (filtfilt)
+  // Current butterworthBandpass is already 4th-order (2nd HP + 2nd LP) with zero-phase
+  const fr = butterworthBandpass(lr, 0.7, 3.5, fs, true);
+  const fg = butterworthBandpass(lg, 0.7, 3.5, fs, true);
+
+  // Step 3: Window-wise R computation
+  const winLen = Math.round(SPO2_LOG_WINDOW_SEC * fs);
+  const stepLen = Math.round(SPO2_LOG_STEP_SEC * fs);
+  if (n < winLen) return null;
+
+  const Rs: number[] = [];
+  for (let i = 0; i + winLen <= n; i += stepLen) {
+    // Standard deviation of filtered log signals in this window
+    let sr = 0, sg = 0;
+    let mr = 0, mg = 0;
+    for (let j = 0; j < winLen; j++) {
+      mr += fr[i + j];
+      mg += fg[i + j];
+    }
+    mr /= winLen;
+    mg /= winLen;
+    for (let j = 0; j < winLen; j++) {
+      sr += (fr[i + j] - mr) ** 2;
+      sg += (fg[i + j] - mg) ** 2;
+    }
+    sr = Math.sqrt(sr / winLen);
+    sg = Math.sqrt(sg / winLen);
+    if (sg > 1e-12) {
+      Rs.push(sr / sg);
+    }
+  }
+
+  if (Rs.length === 0) return null;
+
+  // Step 4: Median R for motion robustness
+  Rs.sort((a, b) => a - b);
+  const R = Rs[Math.floor(Rs.length / 2)];
+
+  // Step 5: SpO2 = A - B * R
+  const spo2 = A - B * R;
+  return Math.min(SPO2_LOG_MAX, Math.max(SPO2_LOG_MIN, spo2));
+}
+
+/// Wrapper that tries log-domain method first, falls back to linear AC/DC method
+export function estimateSpo2Best(
+  redRaw: number[],
+  greenRaw: number[],
+  redFilt: number[],
+  greenFilt: number[],
+  zlo: number,
+  fs: number,
+  offset = 0
+): { spo2: number | null; method: "log" | "linear" | null } {
+  // Try log-domain method (more robust, physically correct)
+  const spo2Log = estimateSpo2LogDomain(redRaw, greenRaw, fs);
+  if (spo2Log !== null) {
+    return { spo2: spo2Log, method: "log" };
+  }
+
+  // Fallback to linear AC/DC method
+  const { ac: acR, dc: dcR } = channelAcDcWithZlo(redRaw, redFilt, zlo);
+  const { ac: acG, dc: dcG } = channelAcDcWithZlo(greenRaw, greenFilt, zlo);
+  if (dcR <= 1e-9 || dcG <= 1e-9) return { spo2: null, method: null };
+  const redRatio = acR / dcR;
+  const greenRatio = acG / dcG;
+  if (greenRatio <= 1e-9) return { spo2: null, method: null };
+  const R = redRatio / greenRatio;
+
+  const satFrac = greenRaw.filter((v) => v >= 250).length / greenRaw.length;
+  if (satFrac > 0.3) return { spo2: null, method: null };
+
+  const spo2 = Math.min(SPO2_RED_GREEN_MAX, Math.max(SPO2_RED_GREEN_MIN, SPO2_RED_GREEN_INTERCEPT - SPO2_RED_GREEN_SLOPE * R + offset));
+  return { spo2, method: "linear" };
+}
+
 /// Haemoglobin (g/dL) from the red/green ratio-of-ratios, ZLO-corrected.
 export function estimateHbRedGreen(
   redRaw: number[],
@@ -1183,10 +1288,24 @@ const RESP_HI = 0.5;
 /// calibrate a given phone. The slope is tuned for the red/green RoR which is
 /// typically 0.5-1.3 for contact PPG; a healthy subject (SpO2 97-99%) has
 /// R ~ 0.55-0.75, so slope ~ 20 and intercept ~ 110 map this to 97-99%.
+///
+/// **Log-domain method (from PMC10705321)**: Uses A=110, B=25 with window-wise
+/// median of log-domain std ratios for motion robustness.
 const SPO2_RED_GREEN_SLOPE = 20;
 const SPO2_RED_GREEN_INTERCEPT = 110;
 const SPO2_RED_GREEN_MIN = 88;
 const SPO2_RED_GREEN_MAX = 100;
+
+/// Log-domain SpO2 calibration (PMC10705321 method).
+/// A=110, B=25 with window-wise median of std(log-filtered) ratios.
+const SPO2_LOG_SLOPE = 25;
+const SPO2_LOG_INTERCEPT = 110;
+const SPO2_LOG_MIN = 70;
+const SPO2_LOG_MAX = 100;
+
+/// Log-domain window parameters (from paper: 10s window, 5s step @ 30Hz)
+const SPO2_LOG_WINDOW_SEC = 10;
+const SPO2_LOG_STEP_SEC = 5;
 
 /// Haemoglobin calibration for the red/green ratio-of-ratios. The dual-
 /// wavelength Hb literature (Wang et al.) fits Hb = a - b * R with the red/green
