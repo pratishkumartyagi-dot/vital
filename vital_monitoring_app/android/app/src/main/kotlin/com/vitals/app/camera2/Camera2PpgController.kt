@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
+import com.vitals.app.CameraCalibration
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
@@ -90,7 +91,7 @@ class Camera2PpgController(
         }
     }
     
-    private fun initializeCamera(facing: Int, resolutionPreset: String, result: Result) {
+private fun initializeCamera(facing: Int, resolutionPreset: String, result: Result) {
         calibrationScope.launch {
             try {
                 currentFacing = facing
@@ -98,17 +99,20 @@ class Camera2PpgController(
                     val characteristics = cameraManager.getCameraCharacteristics(id)
                     characteristics.get(CameraCharacteristics.LENS_FACING) == facing
                 } ?: throw Exception("No camera found for facing: $facing")
-                
+
                 currentCameraId = cameraId
-                
+
                 // Query capabilities
                 val caps = queryPpgCapabilities(cameraId)
                 settingsCache.putAll(caps)
-                
+
                 // Apply optimized settings
                 val appliedSettings = applyPpgOptimizedSettings(cameraId, facing)
                 settingsCache.putAll(appliedSettings)
-                
+
+                // Store ppgOptimizedSettings as a separate map for Dart consumption
+                settingsCache["ppgOptimizedSettings"] = appliedSettings
+
                 // Get calibration
                 val calibration = CameraCalibration.getCalibrationInfo(
                     Build.MODEL, Build.MANUFACTURER, Build.VERSION.SDK_INT
@@ -116,23 +120,21 @@ class Camera2PpgController(
                 appliedZlo = calibration["zlo"] as Double
                 settingsCache["calibration"] = calibration
                 settingsCache["appliedZlo"] = appliedZlo
-                
-                // Open camera
-                openCamera(cameraId, resolutionPreset)
-                
-                runOnUiThread { result.success(settingsCache) }
+
+                // Open camera and wait for capture session to be created
+                openCamera(cameraId, resolutionPreset, result)
             } catch (e: Exception) {
                 Log.e(TAG, "Camera init failed: ${e.message}", e)
                 runOnUiThread { result.error("CAMERA_ERROR", e.message, null) }
             }
         }
     }
-    
-    private fun openCamera(cameraId: String, resolutionPreset: String) {
+
+    private fun openCamera(cameraId: String, resolutionPreset: String, initResult: Result? = null) {
         val stateCallback = object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 cameraDevice = camera
-                createCaptureSession()
+                createCaptureSession(initResult)
             }
             override fun onDisconnected(camera: CameraDevice) {
                 camera.close()
@@ -142,35 +144,60 @@ class Camera2PpgController(
                 Log.e(TAG, "Camera error: $error")
             }
         }
-        
+
         startBackgroundThread()
+
+        // Initialize ImageReader for frame delivery
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val sizes = streamMap?.getOutputSizes(ImageFormat.YUV_420_888)
+        val previewSize = when (resolutionPreset) {
+            "high" -> sizes?.lastOrNull() ?: Size(1920, 1080)
+            "low" -> sizes?.firstOrNull() ?: Size(640, 480)
+            else -> sizes?.firstOrNull { it.width <= 1280 } ?: Size(1280, 720)
+        } ?: Size(1280, 720)
+
+        imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, ImageFormat.YUV_420_888, 2).apply {
+            setOnImageAvailableListener(null, backgroundHandler)
+        }
+
         cameraManager.openCamera(cameraId, stateCallback, backgroundHandler)
     }
-    
-    private fun createCaptureSession() {
+
+    private fun createCaptureSession(initResult: Result? = null) {
+        val surfaces = mutableListOf<android.view.Surface>()
+        imageReader?.surface?.let { surfaces.add(it) }
+
         cameraDevice?.createCaptureSession(
-            listOf(imageReader?.surface).filterNotNull(),
+            surfaces,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
                     startRepeatingRequest()
+                    // Now signal initialization complete
+                    initResult?.let {
+                        runOnUiThread { it.success(settingsCache) }
+                    }
                 }
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     Log.e(TAG, "Capture session configuration failed")
+                    initResult?.let {
+                        runOnUiThread { it.error("SESSION_ERROR", "Capture session configuration failed", null) }
+                    }
                 }
             },
             backgroundHandler
         )
     }
-    
+
     private fun startRepeatingRequest() {
         cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)?.also { builder ->
             captureRequestBuilder = builder
             builder.addTarget(imageReader?.surface!!)
-            
+
             // Apply PPG-optimized settings
             applySettingsToBuilder(builder)
-            
+
             captureSession?.setRepeatingRequest(builder.build(), null, backgroundHandler)
             isStreaming = true
         }
@@ -239,18 +266,26 @@ class Camera2PpgController(
         }
     }
     
-    private fun startStreaming(withCallback: Boolean, result: Result) {
+private fun startStreaming(withCallback: Boolean, result: Result) {
         if (isStreaming) {
             result.success(true)
             return
         }
-        
+
         if (imageReader == null) {
             result.error("NOT_READY", "ImageReader not initialized", null)
             return
         }
-        
-        if (withCallback && frameCallback != null) {
+
+        // Set up frame callback if requested - this enables frame delivery back to Dart
+        if (withCallback) {
+            frameCallback = { width, height, data ->
+                methodChannel.invokeMethod("onFrame", mapOf(
+                    "width" to width,
+                    "height" to height,
+                    "data" to data
+                ))
+            }
             imageReader?.setOnImageAvailableListener({ reader ->
                 reader.acquireLatestImage()?.use { image ->
                     val yPlane = image.planes[0]
@@ -263,9 +298,15 @@ class Camera2PpgController(
                 }
             }, backgroundHandler)
         }
-        
-        startRepeatingRequest()
-        result.success(true)
+
+        // If capture session already exists, start repeating requests
+        if (captureSession != null && captureRequestBuilder != null) {
+            captureSession?.setRepeatingRequest(captureRequestBuilder!!.build(), null, backgroundHandler)
+            isStreaming = true
+            result.success(true)
+        } else {
+            result.error("NOT_READY", "Capture session not available", null)
+        }
     }
     
     private fun stopStreaming(result: Result) {

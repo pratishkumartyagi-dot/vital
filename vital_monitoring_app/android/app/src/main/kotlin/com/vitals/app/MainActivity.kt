@@ -8,6 +8,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.TonemapCurve
 import android.os.Build
 import android.util.Log
+import com.vitals.app.camera2.Camera2PpgController
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -35,6 +36,9 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
 
         remoteCalibrationManager = RemoteCalibrationManager(this)
+
+        // Register Camera2 PPG controller for rear camera support
+        Camera2PpgController(this, flutterEngine)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CAMERA_CHANNEL).setMethodCallHandler { call, result ->
             if (call.method == "configureSafePPG") {

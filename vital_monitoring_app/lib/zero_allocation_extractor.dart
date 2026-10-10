@@ -5,7 +5,7 @@ class ZeroAllocationExtractor {
   // Static memory storage allocation to prevent runtime heap churn
   static final Float64List _rgbLumaOutputBuffer = Float64List(4); 
 
-  static Float64List processYUV420Frame(CameraImage image) {
+static Float64List processYUV420Frame(CameraImage image) {
     final yPlane = image.planes[0];
     final uPlane = image.planes[1];
     final vPlane = image.planes[2];
@@ -28,11 +28,11 @@ class ZeroAllocationExtractor {
     for (int y = 0; y < height; y += 2) {
       final int yRowStart = y * yRowStride;
       final int uvRow = (y ~/ 2) * uvRowStride;
-      
+
       for (int x = 0; x < width; x += 2) {
         sumY += yBytes[yRowStart + x];
         final int uvIndex = uvRow + (x ~/ 2) * uvPixelStride;
-        
+
         if (uvIndex < uBytes.length) {
           sumU += uBytes[uvIndex];
           sumV += vBytes[uvIndex];
@@ -50,6 +50,47 @@ class ZeroAllocationExtractor {
     _rgbLumaOutputBuffer[1] = (meanY - 0.344136 * meanU - 0.714136 * meanV).clamp(0.0, 255.0); // G
     _rgbLumaOutputBuffer[2] = (meanY + 1.772 * meanU).clamp(0.0, 255.0);                // B
     _rgbLumaOutputBuffer[3] = meanY;                                                    // Y
+
+    return _rgbLumaOutputBuffer;
+  }
+
+  /// Process a Y-plane from native Camera2 (Android) API.
+  /// Estimates RGB from luminance using typical skin-tone channel ratios
+  /// since Camera2 YUV_420_888 only provides the Y plane via ImageReader.
+  static Float64List processYPlane(Uint8List yPlane, int width, int height) {
+    int sumY = 0;
+    int sampleCount = 0;
+
+    // Sample every 4th pixel for performance (matching 2x2 downsample)
+    for (int y = 0; y < height; y += 4) {
+      final int rowStart = y * width;
+      for (int x = 0; x < width; x += 4) {
+        final int idx = rowStart + x;
+        if (idx < yPlane.length) {
+          sumY += yPlane[idx];
+          sampleCount++;
+        }
+      }
+    }
+
+    if (sampleCount == 0) {
+      _rgbLumaOutputBuffer[0] = 0;
+      _rgbLumaOutputBuffer[1] = 0;
+      _rgbLumaOutputBuffer[2] = 0;
+      _rgbLumaOutputBuffer[3] = 0;
+      return _rgbLumaOutputBuffer;
+    }
+
+    final double meanY = sumY / sampleCount;
+
+    // Estimate R, G, B from Y using typical PPG skin-tone ratios
+    // Under red LED illumination: R is dominant, G moderate, B low
+    // Y = 0.299R + 0.587G + 0.114B (BT.601 luma)
+    // For red-dominant PPG: R ≈ 1.3*Y, G ≈ 0.85*Y, B ≈ 0.4*Y
+    _rgbLumaOutputBuffer[0] = (meanY * 1.3).clamp(0.0, 255.0);   // R
+    _rgbLumaOutputBuffer[1] = (meanY * 0.85).clamp(0.0, 255.0);  // G
+    _rgbLumaOutputBuffer[2] = (meanY * 0.4).clamp(0.0, 255.0);   // B
+    _rgbLumaOutputBuffer[3] = meanY;                              // Y
 
     return _rgbLumaOutputBuffer;
   }

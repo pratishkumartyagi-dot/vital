@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'native_hardware_bridge.dart';
-import 'vital_sign_controller.dart'
+import 'vital_sign_controller.dart';
 import 'waveform_chart.dart';
+import 'camera2_ppg_controller.dart';
 import 'package:provider/provider.dart';
 import 'ml_inference.dart';
 import 'feature_extractor.dart';
@@ -70,12 +72,14 @@ class VitalSignPage extends StatefulWidget {
 
 class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserver {
   CameraController? _controller;
+  Camera2PpgController? _camera2Controller;
   bool _isInitialized = false;
   bool _showInfoOverlay = false;
   String? _cameraError;
   CameraMode _cameraMode = CameraMode.rear;
   MeasurementMode _measurementMode = MeasurementMode.live;
   bool _torchEnabled = true;
+  bool _torchActuallyOn = false;
   bool _isRecording = false;
   List<Map<String, dynamic>> _validationData = [];
   Map<String, dynamic>? _groundTruth = {};
@@ -95,16 +99,21 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     _validationTimer?.cancel();
     _disableTorch();
     _controller?.dispose();
+    _camera2Controller?.dispose();
+    _camera2Controller = null;
     super.dispose();
   }
 
-  @override
+@override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_controller == null || !_controller!.value.isInitialized) return;
-    
+
     if (state == AppLifecycleState.inactive) {
       _disableTorch();
       _controller?.dispose();
+      _controller = null;
+      _camera2Controller?.dispose();
+      _camera2Controller = null;
     } else if (state == AppLifecycleState.resumed) {
       _initializeCamera().then((_) {
         if (_controller != null && _controller!.value.isInitialized) {
@@ -142,59 +151,117 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     }
 
     try {
-      _controller = CameraController(
-        selectedCamera,
-        ResolutionPreset.medium,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-
-      await _controller!.initialize().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () {
-          throw Exception('Camera initialization timed out');
-        },
-      );
-
-      if (!mounted) return;
-      
-      try {
-        await NativeHardwareBridge.lockHardwareISP().timeout(
-          const Duration(seconds: 2),
+      if (_cameraMode == CameraMode.rear) {
+        // Use Camera2 PPG controller for rear camera - provides full Camera2 control
+        // with AE/AWB/AF lock, tonemap, color correction, manual exposure/ISO
+        _camera2Controller = Camera2PpgController();
+        final facing = selectedCamera.lensDirection == CameraLensDirection.back ? 1 : 0;
+        final initResult = await _camera2Controller!.initialize(
+          facing: facing,
+          resolutionPreset: 'medium',
+        ).timeout(
+          const Duration(seconds: 10),
           onTimeout: () {
-            debugPrint('Hardware ISP lock timed out - continuing without lock');
+            throw Exception('Camera2 initialization timed out');
           },
         );
-      } catch (e) {
-        debugPrint('Hardware ISP lock failed: $e');
-      }
 
-      try {
-        await _applyAdaptivePpgSettings().timeout(
-          const Duration(seconds: 3),
-          onTimeout: () {
-            debugPrint('Adaptive PPG settings timed out - continuing with defaults');
+        if (initResult == null) {
+          throw Exception('Camera2 initialization failed');
+        }
+
+        debugPrint('Camera2 initialized: ${initResult['cameraId']}');
+
+        // Apply PPG-optimized settings from native capabilities
+        final ppgSettings = initResult['ppgOptimizedSettings'] as Map<dynamic, dynamic>?;
+        if (ppgSettings != null) {
+          await _camera2Controller!.applyPpgSettings(Map<String, dynamic>.from(ppgSettings));
+        }
+
+        // Apply ZLO calibration if available
+        final calibration = initResult['calibration'] as Map<dynamic, dynamic>?;
+        if (calibration != null) {
+          final zlo = (calibration['zlo'] as num?)?.toDouble() ?? 16.0;
+          await _camera2Controller!.setZlo(zlo);
+        }
+
+        if (!mounted) return;
+
+        // Start streaming with frame callback connected to processing pipeline
+        final vitalSignController =
+            Provider.of<VitalSignController>(context, listen: false);
+        vitalSignController.enableLiveMode();
+        vitalSignController.setCameraMode(CameraMode.rear);
+
+        await _camera2Controller!.startStreaming(
+          onFrame: (int width, int height, Uint8List data) {
+            vitalSignController.processCamera2Frame(width, height, data);
           },
         );
-      } catch (e) {
-        debugPrint('Adaptive PPG settings failed: $e');
+
+        // Enable torch for rear camera PPG
+        _torchActuallyOn = false;
+        if (_torchEnabled) {
+          await _enableTorch();
+        }
+
+        setState(() {
+          _isInitialized = true;
+        });
+      } else {
+        // Front camera uses standard CameraController (rPPG)
+        _controller = CameraController(
+          selectedCamera,
+          ResolutionPreset.medium,
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+        );
+
+        await _controller!.initialize().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            throw Exception('Camera initialization timed out');
+          },
+        );
+
+        if (!mounted) return;
+
+        try {
+          await NativeHardwareBridge.lockHardwareISP().timeout(
+            const Duration(seconds: 2),
+            onTimeout: () {
+              debugPrint('Hardware ISP lock timed out - continuing without lock');
+            },
+          );
+        } catch (e) {
+          debugPrint('Hardware ISP lock failed: $e');
+        }
+
+        try {
+          await _applyAdaptivePpgSettings().timeout(
+            const Duration(seconds: 3),
+            onTimeout: () {
+              debugPrint('Adaptive PPG settings timed out - continuing with defaults');
+            },
+          );
+        } catch (e) {
+          debugPrint('Adaptive PPG settings failed: $e');
+        }
+
+        setState(() {
+          _isInitialized = true;
+        });
+
+        if (_cameraMode == CameraMode.front) {
+          await _disableTorch();
+        }
+
+        final vitalSignController =
+            Provider.of<VitalSignController>(context, listen: false);
+        vitalSignController.enableLiveMode();
+        vitalSignController.setCameraMode(CameraMode.front);
+        vitalSignController.attachStreamPipeline(_controller!);
       }
-
-      setState(() {
-        _isInitialized = true;
-      });
-
-      // Enable torch for rear camera PPG
-      if (_cameraMode == CameraMode.rear && _torchEnabled) {
-        await _enableTorch();
-      } else if (_cameraMode == CameraMode.front) {
-        await _disableTorch();
-      }
-
-      final vitalSignController =
-          Provider.of<VitalSignController>(context, listen: false);
-      vitalSignController.enableLiveMode();
-      vitalSignController.attachStreamPipeline(_controller!);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -206,20 +273,34 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     }
   }
 
-  Future<void> _switchCameraMode(CameraMode mode) async {
+Future<void> _switchCameraMode(CameraMode mode) async {
     if (mode == _cameraMode) return;
-    
+
     _cameraMode = mode;
     _disableTorch();
-    await _controller?.dispose();
+    _torchActuallyOn = false;
+    _controller?.dispose();
     _controller = null;
+    _camera2Controller?.dispose();
+    _camera2Controller = null;
     setState(() => _isInitialized = false);
     await _initializeCamera();
   }
 
-  Future<void> _toggleTorch() async {
+Future<void> _toggleTorch() async {
+    if (_cameraMode == CameraMode.rear && _camera2Controller != null) {
+      _torchEnabled = !_torchEnabled;
+      if (_torchEnabled) {
+        await _enableTorch();
+      } else {
+        await _disableTorch();
+      }
+      setState(() {});
+      return;
+    }
+
     if (_controller == null || !_controller!.value.isInitialized) return;
-    
+
     _torchEnabled = !_torchEnabled;
     if (_torchEnabled) {
       await _enableTorch();
@@ -230,12 +311,28 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   }
 
   Future<void> _enableTorch() async {
+    final vitalSignController = Provider.of<VitalSignController>(context, listen: false);
+
+    if (_cameraMode == CameraMode.rear && _camera2Controller != null) {
+      try {
+        await _camera2Controller!.setTorch(true);
+        _torchActuallyOn = true;
+        vitalSignController.setTorchState(true);
+        debugPrint('Torch enabled via Camera2 controller');
+      } catch (e) {
+        debugPrint('Camera2 torch enable failed: $e');
+      }
+      return;
+    }
+
     if (_controller == null || !_controller!.value.isInitialized) return;
-    
+
     try {
       final hasFlash = _controller!.value.flashMode != null;
       if (hasFlash) {
         await _controller!.setFlashMode(FlashMode.torch);
+        _torchActuallyOn = true;
+        vitalSignController.setTorchState(true);
         debugPrint('Torch enabled for PPG measurement');
       }
     } catch (e) {
@@ -244,16 +341,37 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   }
 
   Future<void> _disableTorch() async {
+    final vitalSignController = Provider.of<VitalSignController>(context, listen: false);
+
+    if (_cameraMode == CameraMode.rear && _camera2Controller != null) {
+      try {
+        await _camera2Controller!.setTorch(false);
+        _torchActuallyOn = false;
+        vitalSignController.setTorchState(false);
+      } catch (e) {
+        debugPrint('Camera2 torch disable failed: $e');
+      }
+      return;
+    }
+
     if (_controller == null || !_controller!.value.isInitialized) return;
-    
+
     try {
       await _controller!.setFlashMode(FlashMode.off);
+      _torchActuallyOn = false;
+      vitalSignController.setTorchState(false);
     } catch (e) {
       debugPrint('Could not disable torch: $e');
     }
   }
 
   Future<void> _applyAdaptivePpgSettings() async {
+    // For rear camera, settings are applied via Camera2 controller during init
+    if (_cameraMode == CameraMode.rear && _camera2Controller != null) {
+      debugPrint('Adaptive PPG: rear camera uses Camera2 controller, settings already applied');
+      return;
+    }
+
     if (_controller == null || !_controller!.value.isInitialized) return;
 
     final facing = _cameraMode == CameraMode.front ? 0 : 1;
@@ -305,6 +423,17 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
   }
 
   Future<void> _applyPpgOptimizedSettings(Map<dynamic, dynamic> settings) async {
+    // For rear camera, settings are applied via Camera2 controller
+    if (_cameraMode == CameraMode.rear && _camera2Controller != null) {
+      try {
+        await _camera2Controller!.applyPpgSettings(Map<String, dynamic>.from(settings));
+        debugPrint('Adaptive PPG: applied settings to Camera2 controller');
+      } catch (e) {
+        debugPrint('Adaptive PPG: Camera2 applyPpgSettings failed: $e');
+      }
+      return;
+    }
+
     try {
       final shouldLockAe = settings['shouldLockAe'] as bool? ?? false;
       final shouldLockAwb = settings['shouldLockAwb'] as bool? ?? false;
@@ -571,11 +700,11 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
           children: [
             Column(
               children: [
-                _buildHeader(),
+                _buildHeader(controller),
                 const SizedBox(height: 8),
                 Expanded(
                   child: ClipRect(
-                    child: _buildCameraPreview(),
+                    child: _buildCameraPreview(controller),
                   ),
                 ),
                 _buildWaveformSection(controller),
@@ -592,7 +721,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(VitalSignController controller) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
@@ -608,7 +737,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
             ),
           ),
           const Spacer(),
-          _buildModeBadge(),
+          _buildModeBadge(controller),
           const SizedBox(width: 8),
           _buildCameraModeSelector(),
         ],
@@ -616,7 +745,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     );
   }
 
-  Widget _buildModeBadge() {
+  Widget _buildModeBadge(VitalSignController controller) {
     Color color;
     String text;
     IconData icon;
@@ -691,7 +820,7 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
     );
   }
 
-  Widget _buildCameraPreview() {
+  Widget _buildCameraPreview(VitalSignController controller) {
     if (_controller != null && _controller!.value.isInitialized) {
       return Stack(
         children: [
@@ -735,6 +864,83 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
                 ),
               ),
             ),
+        ],
+      );
+    }
+
+    if (_cameraMode == CameraMode.rear && _camera2Controller != null && _camera2Controller!.isInitialized) {
+      return Stack(
+        children: [
+          Container(
+            color: Colors.black,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.camera_rear, color: Colors.red, size: 48),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Camera2 PPG Mode Active',
+                    style: TextStyle(color: Colors.red, fontSize: 14, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Frames processed via native Camera2 API',
+                    style: TextStyle(color: Colors.grey, fontSize: 10),
+                  ),
+                  const SizedBox(height: 8),
+                  if (controller.fingerDetected)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.green),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check_circle, color: Colors.green, size: 12),
+                          const SizedBox(width: 4),
+                          Text('Finger Detected', style: TextStyle(color: Colors.green, fontSize: 10)),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _torchEnabled ? Icons.flash_on : Icons.flash_off,
+                    color: _torchEnabled ? Colors.amber : Colors.grey,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 4),
+                  onTap: _toggleTorch,
+                  child: Text(
+                    _torchEnabled ? 'Flash ON' : 'Flash OFF',
+                    style: TextStyle(
+                      color: _torchEnabled ? Colors.amber : Colors.grey,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       );
     }

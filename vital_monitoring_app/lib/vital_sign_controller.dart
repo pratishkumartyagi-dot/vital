@@ -50,6 +50,7 @@ class VitalSignController extends ChangeNotifier {
   double get calibrationZlo => _calibrationZlo;
   double get calibrationSlope => _calibrationSlope;
   bool get fingerDetected => _fingerDetected;
+  bool get torchActive => _torchActive;
 
   static const int _waveformDisplaySize = 300;
   static const int _analysisWindowSize = 300;
@@ -61,6 +62,7 @@ class VitalSignController extends ChangeNotifier {
   double _calibrationZlo = _defaultZlo;
   double _calibrationSlope = _defaultSlope;
   bool _fingerDetected = false;
+  bool _torchActive = false;
   final List<double> _ppgHistory = [];
   static const int _ppgHistoryMaxLen = 120; // 4 seconds at 30fps
 
@@ -164,56 +166,79 @@ class VitalSignController extends ChangeNotifier {
     if (_isDemoMode) return;
 
     controller.startImageStream((CameraImage streamedFrame) {
-      if (_currentState == TrackingState.complete) return;
+      _processCameraFrame(streamedFrame);
+    });
+  }
 
-      final Float64List extractedValues = ZeroAllocationExtractor.processYUV420Frame(streamedFrame);
-      final double currentRed = extractedValues[0];
-      final double currentGreen = extractedValues[1];
-      final double currentBlue = extractedValues[2];
+  /// Process a Camera2 frame (Y-plane from native Android Camera2 API).
+  /// Used when the rear camera is managed by Camera2PpgController.
+  void processCamera2Frame(int width, int height, Uint8List yPlane) {
+    if (_isDemoMode) return;
+    if (_currentState == TrackingState.complete) return;
 
-      // Finger detection for rear camera (before adding to buffers)
-      if (_cameraMode == CameraMode.rear) {
-        _updateFingerDetection(currentRed, currentGreen, currentBlue);
-      }
+    // Convert Y-plane to RGB-like values for processing
+    // YUV Y-plane represents luminance; for PPG we use it as green proxy
+    // and estimate R/B from Y with typical skin-tone ratios
+    final Float64List extractedValues = ZeroAllocationExtractor.processYPlane(yPlane, width, height);
+    final double currentRed = extractedValues[0];
+    final double currentGreen = extractedValues[1];
+    final double currentBlue = extractedValues[2];
 
-      if (currentRed > 250.0 || currentGreen > 250.0 || currentBlue > 250.0) {
-        _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
-        return;
-      }
-      if (currentRed < 15.0 && currentGreen < 15.0 && currentBlue < 15.0) {
-        _toastPrompt = "No signal detected. Cover the lens and flash completely.";
-        return;
-      }
+    _processCameraFrameValues(currentRed, currentGreen, currentBlue);
+  }
 
-      _liveRedBuffer.add(currentRed);
-      _liveGreenBuffer.add(currentGreen);
-      _liveBlueBuffer.add(currentBlue);
+  void _processCameraFrame(CameraImage streamedFrame) {
+    final Float64List extractedValues = ZeroAllocationExtractor.processYUV420Frame(streamedFrame);
+    final double currentRed = extractedValues[0];
+    final double currentGreen = extractedValues[1];
+    final double currentBlue = extractedValues[2];
 
-      _waveformBuffer.add(_cameraMode == CameraMode.rear ? currentGreen :
-          (currentRed + currentGreen + currentBlue) / 3);
-      if (_waveformBuffer.length > _waveformDisplaySize) {
-        _waveformBuffer.removeAt(0);
-      }
+    _processCameraFrameValues(currentRed, currentGreen, currentBlue);
+  }
 
-      if (_liveRedBuffer.length > _analysisWindowSize) {
-        _liveRedBuffer.removeAt(0);
-        _liveGreenBuffer.removeAt(0);
-        _liveBlueBuffer.removeAt(0);
-      }
+  void _processCameraFrameValues(double currentRed, double currentGreen, double currentBlue) {
+    // Finger detection for rear camera (before adding to buffers)
+    if (_cameraMode == CameraMode.rear) {
+      _updateFingerDetection(currentRed, currentGreen, currentBlue);
+    }
 
-      NativeHardwareBridge.processPpgSample(currentGreen).then((nativeBpm) {
-        if (nativeBpm != null && nativeBpm > 0) {
-          _heartRate = nativeBpm;
-          notifyListeners();
-        }
-      });
+    if (currentRed > 250.0 || currentGreen > 250.0 || currentBlue > 250.0) {
+      _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
+      return;
+    }
+    if (currentRed < 15.0 && currentGreen < 15.0 && currentBlue < 15.0) {
+      _toastPrompt = "No signal detected. Cover the lens and flash completely.";
+      return;
+    }
 
-      if (_cameraMode == CameraMode.rear) {
-        _processRearCameraPPG();
-      } else {
-        _processFrontCameraRPPG();
+    _liveRedBuffer.add(currentRed);
+    _liveGreenBuffer.add(currentGreen);
+    _liveBlueBuffer.add(currentBlue);
+
+    _waveformBuffer.add(_cameraMode == CameraMode.rear ? currentGreen :
+        (currentRed + currentGreen + currentBlue) / 3);
+    if (_waveformBuffer.length > _waveformDisplaySize) {
+      _waveformBuffer.removeAt(0);
+    }
+
+    if (_liveRedBuffer.length > _analysisWindowSize) {
+      _liveRedBuffer.removeAt(0);
+      _liveGreenBuffer.removeAt(0);
+      _liveBlueBuffer.removeAt(0);
+    }
+
+    NativeHardwareBridge.processPpgSample(currentGreen).then((nativeBpm) {
+      if (nativeBpm != null && nativeBpm > 0) {
+        _heartRate = nativeBpm;
+        notifyListeners();
       }
     });
+
+    if (_cameraMode == CameraMode.rear) {
+      _processRearCameraPPG();
+    } else {
+      _processFrontCameraRPPG();
+    }
   }
 
   /// Update finger detection state with temporal PPG validation
@@ -226,7 +251,7 @@ class VitalSignController extends ChangeNotifier {
     }
 
     // Static checks
-    final torchActive = true; // Assume torch is on for rear camera
+    final torchActive = _torchActive;
     final redBright = r > 80 && r < 245;
     final redDominant = r > g + 15 && r > b + 15 && r / math.max(g, 1) > 1.05;
     final notSaturated = r < 250 && g < 250 && b < 250;
@@ -558,7 +583,12 @@ class VitalSignController extends ChangeNotifier {
   void setCalibrationProfile(CalibrationProfile profile) {
     _calibrationZlo = profile.zlo;
     _calibrationSlope = profile.sensorLinearSlope;
-    debugPrint('Calibration profile set: source=${profile.source}, ZLO=$zlo, Slope=$slope');
+    debugPrint('Calibration profile set: source=${profile.source}, ZLO=${_calibrationZlo}, Slope=${_calibrationSlope}');
+  }
+
+  /// Set torch state from main.dart (synced with actual hardware torch)
+  void setTorchState(bool active) {
+    _torchActive = active;
   }
 
   void reset() {
@@ -577,6 +607,7 @@ class VitalSignController extends ChangeNotifier {
     _kdigoStage = '';
     _signalQuality = 0.0;
     _fingerDetected = false;
+    _torchActive = false;
     _ppgHistory.clear();
     _clearBuffers();
 
