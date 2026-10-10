@@ -2,7 +2,16 @@
 
 ## Current State
 
-**Project Status**: ✅ Fully functional Next.js web app + Flutter app (2026-10-06)
+**Project Status**: ✅ Reverted to stable commit `fa8506a` (2026-10-10)
+
+**Revert to stable (2026-10-10)**: Reverted `src/app/vital-monitoring/page.tsx` and `src/app/vital-monitoring/ppg-analysis.ts` from HEAD (`67033e8` WIP) back to `fa8506a` ("feat(ui): improve signal reliability and spectral analysis accuracy"). The three intervening commits (`97b06f6` windowed Viterbi HR, `038f37a` relaxed thresholds, `67033e8` WIP timestamp refactor) broke vitals detection — only respiratory rate was showing because it uses the raw green buffer, while HR/SpO2/Hb/BP/creatinine all returned zero. Root causes in the regression:
+- `97b06f6` replaced the working `analyzeHeartRate` (peak-detection + spectral fusion with ectopic-RR rejection) with a windowed Viterbi method that required `MIN_BEATS_PER_WINDOW=8` and `MIN_SNR=1.0` — too strict for real rPPG signals, so `goodWindowFraction` fell below 0.6 and the function returned `bpm: null`, zeroing every downstream metric.
+- `038f37a` further relaxed those to `MIN_BEATS_PER_WINDOW=8` / `MIN_SNR=1.0` but the damage was done; it also changed the rear-camera `fingerOn` test from amplitude-based to raw-signal-amplitude-based and collected data during the warming phase.
+- `67033e8` introduced `ppgTimestampsRef` (timestamps for collected frames only) and switched `resampleToUniform` to use it instead of `frameTimestampsRef` (per-frame timestamps). Since `ppgTimestampsRef` was only pushed during the measuring phase, the resampling window was truncated and analysis failed.
+
+The stable `fa8506a` version uses `frameTimestampsRef` for resampling and the original `analyzeHeartRate` with `MIN_BEATS_PER_WINDOW=10`, `MIN_SNR=2.0`, `MIN_GOOD_WINDOW_FRACTION=0.6`. `bun typecheck` clean, `bun lint` clean (1 pre-existing warning), `bun run test:ppg` 42/45 (3 pre-existing failures at `fa8506a` too — SQI noise-slope, low-SQI-implies-unreliable, and matched-bandwidth SNR frame-rate invariance).
+
+**Project Status prior to revert**: Fully functional Next.js web app + Flutter app (2026-10-06)
 
 The project is a research-grade PPG Vital Signs application built with Next.js 16 and a Flutter Android companion app. It includes a web-based vital monitoring page with real-time camera-based PPG signal processing, a complete MCD-rPPG training pipeline, and a Flutter app whose `PPGSignalEngine` has been brought to feature parity with the web `ppg-analysis.ts`.
 
@@ -201,6 +210,7 @@ The application is now a complete research platform for rPPG with:
 
 | Date | Changes |
 |------|---------|
+| 2026-10-10 | **Reverted to stable `fa8506a`**: Restored `page.tsx` and `ppg-analysis.ts` from the broken WIP commits (`97b06f6` windowed Viterbi HR, `038f37a` relaxed thresholds, `67033e8` WIP timestamp refactor) that had zeroed HR/SpO2/Hb/BP/creatinine while leaving respiratory rate (raw green buffer) working. See "Revert to stable" in Current State for root-cause analysis. `bun typecheck` clean, `bun lint` clean, `bun run test:ppg` 42/45 (3 pre-existing failures). |
 | Initial | Next.js 16 starter template |
 | 2026-08-26 | Complete rebuild as Flutter Vital Monitoring App |
 | 2026-08-26 (Final) | Added demo mode, improved error handling, comprehensive instructions overlay |

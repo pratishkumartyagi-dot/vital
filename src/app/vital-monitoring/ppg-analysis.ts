@@ -11,19 +11,6 @@ export interface HRVMetrics {
   lfHfRatio: number | null;
 }
 
-export interface WindowHR {
-  startSec: number;
-  endSec: number;
-  spectralBpm: number | null;
-  beatBpm: number | null;
-  fusedBpm: number | null;
-  snr: number;
-  beatCorrelation: number;
-  beatCount: number;
-  isGood: boolean;
-  isHarmonic: boolean;
-}
-
 export interface HeartMetrics {
   bpm: number | null;
   peaks: number[];
@@ -31,7 +18,7 @@ export interface HeartMetrics {
   hrv: HRVMetrics | null;
   rhythm: "regular" | "variable" | "irregular" | "unknown";
   signalQuality: number;
-  method: "peaks" | "spectral" | "viterbi" | "none";
+  method: "peaks" | "spectral" | "none";
   bpmPeaks: number | null;
   bpmSpectral: number | null;
   rrMs: number[];
@@ -42,11 +29,6 @@ export interface HeartMetrics {
   rmssd: number | null;
   reliable: boolean;
   perfusionIndex: number;
-  // New: windowed analysis results
-  windows: WindowHR[];
-  goodWindowFraction: number;
-  hrRange: { p5: number; p95: number } | null;
-  confidence: number;
 }
 
 export interface RespMetrics {
@@ -893,422 +875,160 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
     return ((i + d) / fs) * 1000;
   });
 }
-  
-  // Viterbi path tracking for spectral HR
-  function viterbiTrack(spectrogram: number[][], minBpm: number, maxBpm: number, maxJumpBpm: number): number[] {
-    const nWindows = spectrogram.length;
-    const nFreqs = spectrogram[0].length;
-    const df = (maxBpm - minBpm) / nFreqs;
-    
-    // DP tables
-    const dp: number[][] = Array(nWindows).fill(0).map(() => Array(nFreqs).fill(-Infinity));
-    const prev: number[][] = Array(nWindows).fill(0).map(() => Array(nFreqs).fill(-1));
-    
-    // Initialize first window
-    for (let j = 0; j < nFreqs; j++) {
-      dp[0][j] = spectrogram[0][j];
-    }
-    
-    // Forward pass
-    for (let i = 1; i < nWindows; i++) {
-      for (let j = 0; j < nFreqs; j++) {
-        const currFreq = minBpm + j * df;
-        let bestPrev = -1;
-        let bestScore = -Infinity;
-        
-        // Look back at allowed transitions (within maxJumpBpm)
-        const maxJumpIdx = Math.round(maxJumpBpm / df);
-        for (let k = Math.max(0, j - maxJumpIdx); k <= Math.min(nFreqs - 1, j + maxJumpIdx); k++) {
-          const penalty = Math.abs(j - k) * 0.5; // Smoothness penalty
-          const score = dp[i - 1][k] + spectrogram[i][j] - penalty;
-          if (score > bestScore) {
-            bestScore = score;
-            bestPrev = k;
-          }
-        }
-        dp[i][j] = bestScore;
-        prev[i][j] = bestPrev;
-      }
-    }
-    
-    // Backtrack
-    const path: number[] = Array(nWindows).fill(-1);
-    let bestEnd = 0;
-    let bestEndScore = -Infinity;
-    for (let j = 0; j < nFreqs; j++) {
-      if (dp[nWindows - 1][j] > bestEndScore) {
-        bestEndScore = dp[nWindows - 1][j];
-        bestEnd = j;
-      }
-    }
-    path[nWindows - 1] = bestEnd;
-    for (let i = nWindows - 2; i >= 0; i--) {
-      path[i] = prev[i + 1][path[i + 1]];
-    }
-    
-    // Convert indices to BPM with parabolic interpolation
-    return path.map(idx => {
-      const f0 = minBpm + idx * df;
-      // Parabolic interpolation using neighbors
-      if (idx > 0 && idx < nFreqs - 1) {
-        const y1 = spectrogram[0][idx - 1]; // Use first window for shape
-        const y2 = spectrogram[0][idx];
-        const y3 = spectrogram[0][idx + 1];
-        const den = y1 - 2 * y2 + y3;
-        if (Math.abs(den) > 1e-12) {
-          const delta = 0.5 * (y1 - y3) / den;
-          return Math.max(minBpm, Math.min(maxBpm, f0 + delta * df));
-        }
-      }
-      return f0;
-    });
+
+
+export function analyzeHeartRate(
+  ppg: number[],
+  fs = 30,
+  dcRef?: number,
+  cameraMode: "front" | "rear" = "rear"
+): HeartMetrics {
+  const minFloorMs = 300;
+  const thresholdWindowSec = 8;
+  const maxPeakSpectralDiffBpm = 5;  // Tightened from 12 to 5 BPM for strict validation
+  const minValidFraction = 0.6;       // Stricter: need 60% of expected beats
+  const minSnrDb = -3;                // Allow slightly negative SNR for weak signals
+  const minPeaksForPeakMethod = 10;   // Need 10+ peaks for reliable peak-based HR (30s @ 20 BPM = 10)
+
+  if (!ppg || ppg.length < fs * 5) {
+    return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0 };
   }
+
+  // Signal quality helper for early returns (uses raw signal). `piRef` must
+  // match the modality: facial rPPG runs at 0.05-0.5% AC/DC while contact
+  // fingertip PPG runs at 0.5-5%, so a single 0.5% reference scored every good
+  // rPPG recording at ~55% of its perfusion weight.
+  const piRef = cameraMode === "front" ? 0.1 : 0.5;
+  const computeBasicSQI = (signal: number[], fs: number, dcRef?: number): number => {
+    const rawFiltered = butterworthBandpass(detrend(signal), CARDIAC_LO, CARDIAC_HI, fs, true);
+    const dc = dcRef && dcRef > 1e-9 ? dcRef : dcLevel(signal);
+    const ac = rms(rawFiltered);
+    const pi = dc > 1e-9 ? (ac / dc) * 100 : 0;
+    const piScore = clamp01(Math.sqrt(pi / piRef));
+    const { snr } = spectralSnr(signal, fs);
+    const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
+    const prominence = cardiacSpectralProminence(signal, fs);
+    const pulseGate = clamp01((prominence - 4) / 12);
+    const baseQuality = 0.4 * snrScore + 0.35 * piScore + 0.25 * 0; // no regularity without peaks
+    return Math.round(clamp01(baseQuality * pulseGate) * 100);
+  };
+
+  // Normalise
+  let x = dcRef && dcRef > 0 ? ppg.map((v) => v / dcRef - 1) : ppg.slice();
+  const xMean = x.reduce((a, b) => a + b, 0) / x.length;
+  x = x.map((v) => -(v - xMean));
+
+  // Band-pass using existing butterworthBandpass
+  const f = butterworthBandpass(x, CARDIAC_LO, CARDIAC_HI, fs, true);
+
+  // Spectral estimate. SNR is measured on the RAW trace, not on the already
+  // band-passed signal: band-limiting first removes most of the in-band noise,
+  // which made the raw-trace figure optimistic and let artifacts pass the
+  // reliability gate.
+  const spec = spectralHR(f, fs, ppg);
+  const bpmSpectral = spec.bpm;
+  const seedRr = bpmSpectral ? 60000 / bpmSpectral : 800;
+
+  // Peak detection with new algorithm
+  const peakTimesMs = detectPeaksAdaptive(f, fs, seedRr, minFloorMs, thresholdWindowSec);
   
-  // Sliding window spectrogram with 8-16x zero-padding
-  function computeSpectrogram(signal: number[], fs: number, windowSec: number, stepSec: number, minBpm: number, maxBpm: number): { spectrogram: number[][]; times: number[] } {
-    const windowSamples = Math.round(windowSec * fs);
-    const stepSamples = Math.round(stepSec * fs);
-    const nWindows = Math.floor((signal.length - windowSamples) / stepSamples) + 1;
-    
-    // 16x zero-padding for frequency resolution
-    const padFactor = 16;
-    const nfft = Math.pow(2, Math.ceil(Math.log2(windowSamples)) + 4); // 16x
-    
-    const spectrogram: number[][] = [];
-    const times: number[] = [];
-    
-    for (let w = 0; w < nWindows; w++) {
-      const start = w * stepSamples;
-      const segment = signal.slice(start, start + windowSamples);
-      if (segment.length < windowSamples) break;
-      
-      // Hann window
-      const win = segment.map((v, i) => v * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (windowSamples - 1))));
-      
-      // Zero-padded FFT
-      const real = new Array(nfft).fill(0);
-      const imag = new Array(nfft).fill(0);
-      for (let i = 0; i < windowSamples; i++) real[i] = win[i];
-      
-      // Simple DFT at target frequencies (more efficient than full FFT)
-      const freqs: number[] = [];
-      const powers: number[] = [];
-      for (let bpm = minBpm; bpm <= maxBpm; bpm += 0.5) {
-        const f = bpm / 60;
-        let re = 0, im = 0;
-        const k = 2 * Math.PI * f / fs;
-        for (let i = 0; i < windowSamples; i++) {
-          re += win[i] * Math.cos(k * i);
-          im -= win[i] * Math.sin(k * i);
-        }
-        freqs.push(f);
-        powers.push(re * re + im * im);
-      }
-      
-      // Normalize power
-      const maxP = Math.max(...powers);
-      if (maxP > 0) {
-        for (let i = 0; i < powers.length; i++) powers[i] /= maxP;
-      }
-      
-      spectrogram.push(powers);
-      times.push((start + windowSamples / 2) / fs);
-    }
-    
-    return { spectrogram, times };
+  // Need enough peaks for reliable peak-based method
+  if (peakTimesMs.length < minPeaksForPeakMethod) {
+    const basicSQI = computeBasicSQI(ppg, fs, dcRef);
+    const basicPi = dcRef && dcRef > 1e-9 ? (rms(butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true)) / dcRef) * 100 : 0;
+    // Round spectral BPM to resolution (1/T ≈ 2 BPM for 30s window)
+    const roundedSpectral = bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? Math.round(bpmSpectral / 2) * 2 : null;
+    return { bpm: roundedSpectral, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: roundedSpectral, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
   }
+
+  // Convert peak times to sample indices for backward compatibility
+  const peaks = peakTimesMs.map((t) => Math.round((t / 1000) * fs));
+
+  // RR intervals
+  const rrAll: number[] = [];
+  for (let i = 1; i < peakTimesMs.length; i++) rrAll.push(peakTimesMs[i] - peakTimesMs[i - 1]);
+  const med = median(rrAll);
+  const ok = rrAll.map((r) => r >= 0.7 * med && r <= 1.3 * med);
+  const rrMs = rrAll.filter((_, i) => ok[i]);
+  if (rrMs.length < minPeaksForPeakMethod - 1) {
+    const basicSQI = computeBasicSQI(ppg, fs, dcRef);
+    const basicPi = dcRef && dcRef > 1e-9 ? (rms(butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true)) / dcRef) * 100 : 0;
+    const roundedSpectral = bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? Math.round(bpmSpectral / 2) * 2 : null;
+    return { bpm: roundedSpectral, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: basicSQI, method: "spectral", bpmPeaks: null, bpmSpectral: roundedSpectral, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: spec.snrDb, sdnn: null, rmssd: null, reliable: false, perfusionIndex: basicPi };
+  }
+
+  const bpmVal = 60000 / median(rrMs);
+  const bpm = bpmVal > 30 && bpmVal < 220 ? bpmVal : null;
+
+  // HRV (Pulse Rate Variability - only meaningful for rear contact PPG)
+  let hrv: HRVMetrics | null = null;
+  let rhythm: "regular" | "variable" | "irregular" | "unknown" = "unknown";
+  if (cameraMode === "rear" && rrMs.length >= 10) {
+    hrv = computeHRV(rrMs);
+    rhythm = classifyRhythm(rrMs);
+  }
+
+  // Bandpass for signal quality computation
+  const rawFiltered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs, true);
+
+  // Signal quality using computeSignalQuality with proper dcRef
+  // For rPPG (front), POS pulse is zero-mean so dcRef MUST be provided (green skin-ROI mean)
+  // For contact PPG (rear), raw signal has proper DC
+  const signalQuality = computeSignalQuality(
+    rawFiltered, // filtered = cardiac band 0.5-3.5 Hz
+    ppg,         // raw signal
+    peaks.map((idx, i) => ({ index: idx, value: rawFiltered[idx], timeMs: peakTimesMs[i] })),
+    fs,
+    dcRef && dcRef > 1e-9 ? dcRef : dcLevel(ppg),
+    cameraMode
+  );
+
+  // Perfusion index. `piRef` is already resolved above for the SQI term; the
+  // index itself is a plain AC/DC percentage and is what the pressure state
+  // machine and the creatinine features consume.
+  const perfusionIndex = dcRef && dcRef > 1e-9
+    ? perfusionIndexACDC(ppg, fs, dcRef)
+    : 0;
+
+  // New reliability gate for SpO2/glucose/creatinine gating
+  const bpmForQuality = bpm ?? bpmSpectral ?? 60;
+  const durSec = f.length / fs;
+  const expectedBeats = Math.max(1, (durSec * bpmForQuality) / 60 - 1);
+  const validFraction = Math.min(1, rrMs.length / expectedBeats);
   
-  // Beat detection via derivative upstrokes with 300ms refractory
-  function detectBeats(signal: number[], fs: number, localBpm: number): { peakTimesMs: number[]; correlations: number[] } {
-    const n = signal.length;
-    const deriv = new Array(n - 1);
-    for (let i = 0; i < n - 1; i++) deriv[i] = signal[i + 1] - signal[i];
-    
-    // Smooth derivative
-    const smoothDeriv = deriv.slice();
-    for (let pass = 0; pass < 2; pass++) {
-      for (let i = 1; i < smoothDeriv.length - 1; i++) {
-        smoothDeriv[i] = (smoothDeriv[i - 1] + smoothDeriv[i] + smoothDeriv[i + 1]) / 3;
-      }
-    }
-    
-    // Adaptive threshold: MAD-based
-    const sorted = [...smoothDeriv].sort((a, b) => a - b);
-    const medianDeriv = sorted[Math.floor(sorted.length / 2)];
-    const mad = sorted.map(v => Math.abs(v - medianDeriv)).sort((a, b) => a - b)[Math.floor(sorted.length / 2)];
-    const threshold = medianDeriv + 3 * 1.4826 * mad; // ~3 sigma
-    
-    const refractorySamples = Math.round(0.3 * fs);
-    const peakTimesMs: number[] = [];
-    const correlations: number[] = [];
-    
-    for (let i = 1; i < smoothDeriv.length - 1; i++) {
-      if (smoothDeriv[i] > smoothDeriv[i - 1] && smoothDeriv[i] >= smoothDeriv[i + 1] && smoothDeriv[i] > threshold) {
-        if (peakTimesMs.length === 0 || i - Math.round(peakTimesMs[peakTimesMs.length - 1] * fs / 1000) >= refractorySamples) {
-          // Template correlation for this beat
-          const expectedRr = 60000 / localBpm;
-          const windowSamples = Math.round(expectedRr * fs / 1000);
-          const winStart = Math.max(0, i - windowSamples);
-          const winEnd = Math.min(n, i + windowSamples);
-          if (winEnd - winStart > 10) {
-            const beatTemplate = signal.slice(winStart, winEnd);
-            // Cross-correlation with ideal pulse template (simple: compare to mean beat)
-            let corr = 0;
-            let meanT = 0;
-            for (const v of beatTemplate) meanT += v;
-            meanT /= beatTemplate.length;
-            let num = 0, den1 = 0, den2 = 0;
-            for (const v of beatTemplate) {
-              const dv = v - meanT;
-              num += dv * dv;
-              den1 += dv * dv;
-              den2 += dv * dv;
-            }
-            corr = den1 > 0 && den2 > 0 ? num / Math.sqrt(den1 * den2) : 0;
-            correlations.push(corr);
-          } else {
-            correlations.push(0);
-          }
-          
-          // Parabolic interpolation for sub-sample timing
-          const y0 = smoothDeriv[i - 1], y1 = smoothDeriv[i], y2 = smoothDeriv[i + 1];
-          const den = y0 - 2 * y1 + y2;
-          const d = Math.abs(den) > 1e-12 ? Math.max(-0.5, Math.min(0.5, 0.5 * (y0 - y2) / den)) : 0;
-          peakTimesMs.push(((i + d) / fs) * 1000);
-        }
-      }
-    }
-    
-    return { peakTimesMs, correlations };
-  }
+  // Check harmonic error: if spectral detected harmonic, don't trust peak-spectral agreement
+  const harmonicError = spec.isHarmonic && spec.candidates && spec.candidates.length > 1;
   
-  // Compute window quality metrics
-  function computeWindowSQI(
-    segment: number[],
-    spectralBpm: number | null,
-    beatResult: { peakTimesMs: number[]; correlations: number[] },
-    fs: number,
-    cameraMode: "front" | "rear",
-    rawSignal: number[],
-    windowStart: number,
-    windowEnd: number
-  ): { snr: number; beatCorrelation: number; beatCount: number; saturated: boolean; fingerOn: boolean } {
-    // 1. In-band SNR
-    const { snr } = spectralSnr(segment, fs);
-    
-    // 2. Beat template correlation (mean of correlations in this window)
-    const beatCorrelation = beatResult.correlations.length > 0
-      ? beatResult.correlations.reduce((a, b) => a + b, 0) / beatResult.correlations.length
-      : 0;
-    
-    // 3. Beat count
-    const beatCount = beatResult.peakTimesMs.length;
-    
-    // 4. Saturation check
-    const satThreshold = 250;
-    const saturated = segment.filter(v => v >= satThreshold).length / segment.length > 0.05;
-    
-    // 5. Finger-on (for rear camera): use raw signal amplitude
-    let fingerOn = true;
-    if (cameraMode === "rear") {
-      const rawSegment = rawSignal.slice(windowStart, windowEnd);
-      const amplitude = rawSegment.length > 0 ? Math.max(...rawSegment) - Math.min(...rawSegment) : 0;
-      fingerOn = amplitude > 2; // Low threshold for raw signal
-    }
-    
-    return { snr, beatCorrelation, beatCount, saturated, fingerOn };
-  }
+  // Peak-spectral agreement: tight 5 BPM tolerance, but only if no harmonic ambiguity
+  const agree = !harmonicError && bpm !== null && bpmSpectral !== null && Math.abs(bpm - bpmSpectral) <= maxPeakSpectralDiffBpm;
   
-  export function analyzeHeartRate(
-    ppg: number[],
-    fs = 30,
-    dcRef?: number,
-    cameraMode: "front" | "rear" = "rear"
-  ): HeartMetrics {
-    // Window parameters - reduced for faster initial analysis
-    const WINDOW_SEC = 10;   // Reduced from 15s
-    const STEP_SEC = 1;      // Reduced from 2s
-    const MIN_BPM = 42;
-    const MAX_BPM = 180;
-    const MAX_JUMP_BPM = 8;
-    const MIN_GOOD_WINDOW_FRACTION = 0.5;  // Relaxed from 0.6
-    const MIN_BEATS_PER_WINDOW = 8;        // Relaxed from 10
-    const MIN_BEAT_CORRELATION = 0.6;      // Relaxed from 0.8
-    const MIN_SNR = 1.0;                   // Relaxed from 2.0 (linear)
-    const MAX_SATURATION = 0.05;
-    
-    // Reduce minimum data requirement to 10s for initial analysis
-    const MIN_SIGNAL_SEC = 10;
-    
-    if (!ppg || ppg.length < fs * MIN_SIGNAL_SEC) {
-      return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0, windows: [], goodWindowFraction: 0, hrRange: null, confidence: 0 };
-    }
-    
-    // Drop first 3s (torch heating, auto-exposure drift)
-    const dropSamples = Math.round(3 * fs);
-    const signal = ppg.slice(dropSamples);
-    
-    // Normalise & detrend with smoothness priors (0.7-3.0 Hz bandpass)
-    let x = dcRef && dcRef > 0 ? signal.map((v) => v / dcRef - 1) : signal.slice();
-    const xMean = x.reduce((a, b) => a + b, 0) / x.length;
-    x = x.map((v) => -(v - xMean));
-    
-    // 2nd-order Butterworth 0.7-3.0 Hz (narrower than 0.5-3.5 for better SNR)
-    const CARDIAC_LO = 0.7;
-    const CARDIAC_HI = 3.0;
-    const f = butterworthBandpass(x, CARDIAC_LO, CARDIAC_HI, fs, true);
-    
-    // 1. Compute spectrogram
-    const { spectrogram, times } = computeSpectrogram(f, fs, WINDOW_SEC, STEP_SEC, MIN_BPM, MAX_BPM);
-    if (spectrogram.length === 0) {
-      return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0, windows: [], goodWindowFraction: 0, hrRange: null, confidence: 0 };
-    }
-    
-    // 2. Viterbi tracking
-    const trackedBpm = viterbiTrack(spectrogram, MIN_BPM, MAX_BPM, MAX_JUMP_BPM);
-    
-    // 3. Beat detection per window + cross-check
-    const windows: WindowHR[] = [];
-    let allPeakTimesMs: number[] = [];
-    let allCorrelations: number[] = [];
-    
-    for (let w = 0; w < spectrogram.length; w++) {
-      const windowStart = Math.round(times[w] * fs - (WINDOW_SEC / 2) * fs);
-      const windowEnd = windowStart + Math.round(WINDOW_SEC * fs);
-      const segment = f.slice(Math.max(0, windowStart), Math.min(f.length, windowEnd));
-      
-      if (segment.length < fs * 5) continue;
-      
-      const spectralBpm = trackedBpm[w];
-      
-      // Beat detection in this window
-      const beatResult = detectBeats(segment, fs, spectralBpm);
-      const beatBpm = beatResult.peakTimesMs.length >= 2
-        ? 60000 / median(beatResult.peakTimesMs.slice(1).map((t, i) => t - beatResult.peakTimesMs[i]))
-        : null;
-      
-      // Fused: use spectral if beat count too low, else median of both
-      let fusedBpm: number | null = null;
-      if (beatBpm !== null && spectralBpm !== null) {
-        fusedBpm = (beatBpm + spectralBpm) / 2;
-      } else if (spectralBpm !== null) {
-        fusedBpm = spectralBpm;
-      } else if (beatBpm !== null) {
-        fusedBpm = beatBpm;
-      }
-      
-      // Window SQI
-      const sqi = computeWindowSQI(segment, spectralBpm, beatResult, fs, cameraMode, signal, windowStart, windowEnd);
-      
-      // Window is good if all criteria met
-      const isGood = sqi.snr >= MIN_SNR &&
-        sqi.beatCorrelation >= MIN_BEAT_CORRELATION &&
-        sqi.beatCount >= MIN_BEATS_PER_WINDOW &&
-        !sqi.saturated &&
-        sqi.fingerOn &&
-        beatBpm !== null && spectralBpm !== null &&
-        Math.abs(beatBpm - spectralBpm) <= 5;
-      
-      windows.push({
-        startSec: times[w] - WINDOW_SEC / 2,
-        endSec: times[w] + WINDOW_SEC / 2,
-        spectralBpm,
-        beatBpm,
-        fusedBpm,
-        snr: sqi.snr,
-        beatCorrelation: sqi.beatCorrelation,
-        beatCount: sqi.beatCount,
-        isGood,
-        isHarmonic: false // Could add harmonic check
-      });
-      
-      // Accumulate all peaks for global HRV
-      const windowOffset = windowStart / fs * 1000;
-      allPeakTimesMs.push(...beatResult.peakTimesMs.map(t => t + windowOffset));
-      allCorrelations.push(...beatResult.correlations);
-    }
-    
-    // 4. Final HR from good windows only
-    const goodWindows = windows.filter(w => w.isGood);
-    const goodWindowFraction = goodWindows.length / Math.max(1, windows.length);
-    
-    if (goodWindowFraction < MIN_GOOD_WINDOW_FRACTION) {
-      return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "viterbi", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: goodWindowFraction, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0, windows, goodWindowFraction, hrRange: null, confidence: 0 };
-    }
-    
-    // Fused BPM from good windows (trimmed mean)
-    const goodFused = goodWindows.map(w => w.fusedBpm!).filter(v => v !== null) as number[];
-    goodFused.sort((a, b) => a - b);
-    const trim = Math.floor(goodFused.length * 0.1);
-    const trimmed = goodFused.slice(trim, goodFused.length - trim);
-    const finalBpm = trimmed.length > 0 ? Math.round(trimmed.reduce((a, b) => a + b, 0) / trimmed.length / 2) * 2 : null;
-    
-    // HR range (5th-95th percentile)
-    const hrRange = goodFused.length > 4 ? {
-      p5: goodFused[Math.floor(goodFused.length * 0.05)],
-      p95: goodFused[Math.floor(goodFused.length * 0.95)]
-    } : null;
-    
-    // 5. Global beat detection for PRV (use all good window beats)
-    // Re-detect beats on full signal using final HR as guide
-    const fullBeatResult = detectBeats(f, fs, finalBpm ?? 70);
-    const allPeaks = fullBeatResult.peakTimesMs;
-    
-    // RR intervals with ectopic correction
-    const rrAll: number[] = [];
-    for (let i = 1; i < allPeaks.length; i++) rrAll.push(allPeaks[i] - allPeaks[i - 1]);
-    const medRr = median(rrAll);
-    const cleanRr = rrAll.filter(r => r >= 0.7 * medRr && r <= 1.3 * medRr);
-    
-    // PRV only for rear camera with sufficient good data
-    let hrv: HRVMetrics | null = null;
-    let rhythm: "regular" | "variable" | "irregular" | "unknown" = "unknown";
-    let perfusionIndex = 0;
-    
-    if (cameraMode === "rear" && cleanRr.length >= 30) { // 60s of good beats
-      hrv = computeHRV(cleanRr);
-      rhythm = classifyRhythm(cleanRr);
-      perfusionIndex = dcRef && dcRef > 1e-9
-        ? perfusionIndexACDC(signal, fs, dcRef)
-        : 0;
-    }
-    
-    // Overall signal quality = fraction of good windows * mean SNR
-    const meanSnr = goodWindows.length > 0
-      ? goodWindows.reduce((a, b) => a + b.snr, 0) / goodWindows.length
-      : 0;
-    const signalQuality = Math.round(clamp01(goodWindowFraction * (meanSnr / 5)) * 100);
-    
-    const snrDb = 10 * Math.log10(Math.max(meanSnr, 1e-12));
-    const confidence = goodWindowFraction;
-    
-    // Convert all peaks to sample indices
-    const peaks = allPeaks.map(t => Math.round(t / 1000 * fs));
-    
-    return {
-      bpm: finalBpm,
-      peaks,
-      rrIntervals: cleanRr,
-      hrv,
-      rhythm,
-      signalQuality,
-      method: "viterbi",
-      bpmPeaks: null,
-      bpmSpectral: null,
-      rrMs: cleanRr,
-      peakTimesMs: allPeaks,
-validFraction: goodWindowFraction,
-      snrDb,
-      sdnn: hrv?.sdnn ?? null,
-      rmssd: hrv?.rmssd ?? null,
-      reliable: true,
-      perfusionIndex,
-      windows,
-      goodWindowFraction,
-      hrRange,
-      confidence,
-    };
-  }
+  const snrOk = spec.snrDb >= minSnrDb;
+  const reliable = validFraction >= minValidFraction && agree && snrOk;
+
+  // Round BPM to resolution-appropriate precision (1/T ≈ 2 BPM for 30s)
+  const bpmRounded = bpm !== null ? Math.round(bpm / 2) * 2 : null;
+  const bpmSpectralRounded = bpmSpectral && bpmSpectral > 30 && bpmSpectral < 220 ? Math.round(bpmSpectral / 2) * 2 : null;
+
+  return {
+    bpm: bpmRounded,
+    peaks,
+    rrIntervals: rrMs,
+    hrv,
+    rhythm,
+    signalQuality,
+    method: reliable ? "peaks" : "spectral",
+    bpmPeaks: bpmRounded,
+    bpmSpectral: bpmSpectralRounded,
+    rrMs,
+    peakTimesMs,
+    validFraction,
+    snrDb: spec.snrDb,
+    sdnn: hrv?.sdnn ?? null,
+    rmssd: hrv?.rmssd ?? null,
+    reliable,
+    perfusionIndex,
+  };
+}
 
 function autocorrelate(signal: number[]): number[] {
   const n = signal.length;
