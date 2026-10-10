@@ -49,6 +49,7 @@ class VitalSignController extends ChangeNotifier {
   CameraMode get cameraMode => _cameraMode;
   double get calibrationZlo => _calibrationZlo;
   double get calibrationSlope => _calibrationSlope;
+  bool get fingerDetected => _fingerDetected;
 
   static const int _waveformDisplaySize = 300;
   static const int _analysisWindowSize = 300;
@@ -59,6 +60,9 @@ class VitalSignController extends ChangeNotifier {
 
   double _calibrationZlo = _defaultZlo;
   double _calibrationSlope = _defaultSlope;
+  bool _fingerDetected = false;
+  final List<double> _ppgHistory = [];
+  static const int _ppgHistoryMaxLen = 120; // 4 seconds at 30fps
 
   final List<double> _liveRedBuffer = [];
   final List<double> _liveGreenBuffer = [];
@@ -167,6 +171,11 @@ class VitalSignController extends ChangeNotifier {
       final double currentGreen = extractedValues[1];
       final double currentBlue = extractedValues[2];
 
+      // Finger detection for rear camera (before adding to buffers)
+      if (_cameraMode == CameraMode.rear) {
+        _updateFingerDetection(currentRed, currentGreen, currentBlue);
+      }
+
       if (currentRed > 250.0 || currentGreen > 250.0 || currentBlue > 250.0) {
         _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
         return;
@@ -207,10 +216,62 @@ class VitalSignController extends ChangeNotifier {
     });
   }
 
+  /// Update finger detection state with temporal PPG validation
+  void _updateFingerDetection(double r, double g, double b) {
+    // Update PPG history for temporal validation
+    final lum = (r + g + b) / 3;
+    _ppgHistory.add(lum);
+    if (_ppgHistory.length > _ppgHistoryMaxLen) {
+      _ppgHistory.removeAt(0);
+    }
+
+    // Static checks
+    final torchActive = true; // Assume torch is on for rear camera
+    final redBright = r > 80 && r < 245;
+    final redDominant = r > g + 15 && r > b + 15 && r / math.max(g, 1) > 1.05;
+    final notSaturated = r < 250 && g < 250 && b < 250;
+    final dcLevel = (r + g + b) / 3;
+    final dcInRange = dcLevel > 50 && dcLevel < 220;
+
+    // Uniformity check (simplified - would need full frame for true variance)
+    // For now, use perfusion index as proxy for signal quality
+    bool hasPpgPulsation = false;
+    if (_ppgHistory.length >= 60) {
+      final recent = _ppgHistory.sublist(_ppgHistory.length - 60);
+      final mean = recent.reduce((a, b) => a + b) / recent.length;
+      double autocorr = 0;
+      double variance = 0;
+      for (int i = 0; i < recent.length; i++) {
+        final diff = recent[i] - mean;
+        variance += diff * diff;
+        if (i >= 30) {
+          autocorr += diff * (recent[i - 30] - mean);
+        }
+      }
+      variance /= recent.length;
+      autocorr /= recent.length;
+      hasPpgPulsation = variance > 0.5 && autocorr / variance > 0.3;
+    }
+
+    // Finger detected only if ALL conditions met
+    _fingerDetected = torchActive && redBright && redDominant && notSaturated && dcInRange && hasPpgPulsation;
+  }
+
   /// Runs the full analysis pipeline for the rear (contact fingertip) path.
   /// The analysis signal is the SNR-best channel (green by default, red on
   /// thick/dark/cold fingers) selected by the engine's spectral-SNR rule.
   void _processRearCameraPPG() {
+    // Early reject if finger not detected (prevents false analysis on non-finger)
+    if (!_fingerDetected) {
+      if (_currentState != TrackingState.baseline) {
+        _currentState = TrackingState.baseline;
+        _gatheringProgress = 0.0;
+        _toastPrompt = "Place fingertip over camera lens with flash on.";
+        notifyListeners();
+      }
+      return;
+    }
+
     if (_liveGreenBuffer.length >= 30) {
       final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
       if (pi < 0.2) {
@@ -515,6 +576,8 @@ class VitalSignController extends ChangeNotifier {
     _creatinineClass = '';
     _kdigoStage = '';
     _signalQuality = 0.0;
+    _fingerDetected = false;
+    _ppgHistory.clear();
     _clearBuffers();
 
     if (_cameraMode == CameraMode.front) {

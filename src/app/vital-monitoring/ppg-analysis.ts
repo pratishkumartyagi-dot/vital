@@ -641,8 +641,10 @@ function computeSignalQuality(
   //    gate's own zero crossing of 10, so a perfectly clean pulse scored
   //    pulseGate 0 and SQI 0. Narrowband prominence is the physically
   //    meaningful test and has no such degenerate branch.
+  //    Lower threshold: prominence >= 2 gives 0, >= 14 gives 1 (was 4->16).
+  //    This allows clean signals with moderate prominence to reach full score.
   const prominence = cardiacSpectralProminence(raw, fs);
-  const pulseGate = clamp01((prominence - 4) / 12);
+  const pulseGate = clamp01((prominence - 2) / 12);
 
   // Weighted average, still scaled down multiplicatively when no credible pulse
   // is present so that structured artifacts cannot report a healthy score.
@@ -1749,19 +1751,12 @@ export function spectralSnr(signal: number[], fs: number): SpectralSnr {
   const { freqs, psd } = powerSpectrum(signal, fs);
   if (freqs.length === 0) return none;
 
-  // First find f0 (fundamental) in cardiac band
-  let f0 = -1;
-  let maxPower = -1;
-  for (let i = 0; i < freqs.length; i++) {
-    if (freqs[i] >= CARDIAC_LO && freqs[i] <= CARDIAC_HI && psd[i] > maxPower) {
-      maxPower = psd[i];
-      f0 = freqs[i];
-    }
-  }
-  if (f0 < 0) return none;
+  // Use noise band OUTSIDE cardiac range (4-10 Hz) for true noise floor
+  // This avoids cardiac harmonics contaminating noise estimate
+  const noiseLo = 4.0;
+  const noiseHi = Math.min(10.0, fs / 2 - 0.5);
 
-  // Narrow band around f0 (±0.15 Hz) and harmonic 2*f0 (±0.15 Hz)
-  const bw = 0.15;
+  // Find signal power in cardiac band (0.5-3.5 Hz)
   let signalPower = 0;
   let sigBins = 0;
   let noisePower = 0;
@@ -1769,15 +1764,10 @@ export function spectralSnr(signal: number[], fs: number): SpectralSnr {
 
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
-    if (f < CARDIAC_LO || f > CARDIAC_HI) continue;
-    
-    const nearF0 = Math.abs(f - f0) <= bw;
-    const nearHarmonic = Math.abs(f - 2 * f0) <= bw;
-    
-    if (nearF0 || nearHarmonic) {
+    if (f >= CARDIAC_LO && f <= CARDIAC_HI) {
       signalPower += psd[i];
       sigBins++;
-    } else {
+    } else if (f >= noiseLo && f <= noiseHi) {
       noisePower += psd[i];
       noiseBins++;
     }
@@ -1785,12 +1775,17 @@ export function spectralSnr(signal: number[], fs: number): SpectralSnr {
 
   if (sigBins === 0) return none;
   if (noiseBins === 0 || noisePower <= 0) {
-    // Band-limited or pure tone - very high SNR
     return { snr: Infinity, signalPower, noiseDensity: 0, sigBins, noiseBins, hasReference: true };
   }
 
   const noiseDensity = noisePower / noiseBins;
-  const snr = signalPower / (noiseDensity * sigBins);
+  // In-band noise estimate: noise density * signal bandwidth
+  const signalBw = CARDIAC_HI - CARDIAC_LO; // 3 Hz
+  const inBandNoise = noiseDensity * signalBw * (freqs.length / (fs / 2)); // scale by bin density
+  if (inBandNoise <= 0) {
+    return { snr: Infinity, signalPower, noiseDensity, sigBins, noiseBins, hasReference: true };
+  }
+  const snr = signalPower / inBandNoise;
   return { snr, signalPower, noiseDensity, sigBins, noiseBins, hasReference: true };
 }
 

@@ -214,6 +214,8 @@ export default function VitalMonitoringPage() {
   const torchSaturatedRef = useRef(false);
   // Finger detection confidence (0-1) for adaptive behavior
   const fingerConfidenceRef = useRef<number>(0);
+  // PPG signal history for temporal finger validation (cardiac pulsation check)
+  const ppgHistoryRef = useRef<number[]>([]);
   // Device calibration profile for adaptive thresholds
   const calibrationRef = useRef<{ zlo: number; slope: number; source: string } | null>(null);
   // Front camera safeguards: motion, face ROI, auto-exposure/WB drift
@@ -596,6 +598,7 @@ export default function VitalMonitoringPage() {
 
 // Finger detection for rear camera.
       // Physical signature: finger on lens with torch = BRIGHT red, low G/B, uniform
+      // ALSO requires: actual cardiac pulsations in the signal (temporal validation)
       let isFingerFrame = false;
       let torchSaturated = false;
       if (cameraMode === "rear") {
@@ -637,28 +640,60 @@ export default function VitalMonitoringPage() {
         const lumVar = lumCount > 0 ? (lumSqSum / lumCount) - (lumMean * lumMean) : 0;
         const isUniform = lumVar < thresholds.lumVarMax;
         
+        // TEMPORAL VALIDATION: Check for actual cardiac pulsations in the signal history
+        // A real finger produces ~1Hz cardiac oscillations; static red surfaces do not
+        let hasPpgPulsation = false;
+        if (ppgHistoryRef.current && ppgHistoryRef.current.length >= 60) {
+          // Check last 2 seconds for ~1Hz oscillation (cardiac)
+          const recent = ppgHistoryRef.current.slice(-60); // 2 seconds at 30fps
+          // Compute autocorrelation at ~30 sample lag (1Hz @ 30fps)
+          const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+          let autocorr = 0;
+          let variance = 0;
+          for (let i = 0; i < recent.length; i++) {
+            const diff = recent[i] - mean;
+            variance += diff * diff;
+            if (i >= 30) {
+              autocorr += diff * (recent[i - 30] - mean);
+            }
+          }
+          variance /= recent.length;
+          autocorr /= recent.length;
+          // Require significant autocorrelation at cardiac lag
+          hasPpgPulsation = variance > 0.5 && autocorr / variance > 0.3;
+        }
+        
+        // DC level check: finger on lens with torch should have specific DC range
+        // Too dark = no finger, too bright = saturation/reflection
+        const dcLevel = (avgR + avgG + avgB) / 3;
+        const dcInRange = dcLevel > 50 && dcLevel < 220;
+        
         // Confidence scoring for finger detection
         let confidence = 0;
-        if (torchActive) confidence += 0.3;
-        if (redBright) confidence += 0.25;
-        if (redDominant) confidence += 0.25;
+        if (torchActive) confidence += 0.2;
+        if (redBright) confidence += 0.15;
+        if (redDominant) confidence += 0.15;
         if (notSaturated) confidence += 0.1;
         if (isUniform) confidence += 0.1;
+        if (hasPpgPulsation) confidence += 0.2;  // Critical: requires actual PPG signal
+        if (dcInRange) confidence += 0.1;
         
         // DEBUG: Log finger detection values every 30 frames
         if (Math.random() < 0.033) {
           console.log('[FingerDetect]', {
             torchActive, redBright, redDominant, notSaturated, isUniform,
+            hasPpgPulsation, dcInRange, dcLevel: dcLevel.toFixed(1),
             confidence: confidence.toFixed(2),
             thresholds,
             avgR: avgR.toFixed(1), avgG: avgG.toFixed(1), avgB: avgB.toFixed(1),
             lumMean: lumMean.toFixed(1), lumVar: lumVar.toFixed(1),
-            isFingerFrame: torchActive && redBright && redDominant && notSaturated && isUniform
+            isFingerFrame: torchActive && redBright && redDominant && notSaturated && isUniform && hasPpgPulsation && dcInRange
           });
         }
         
         // Finger detected only if ALL conditions met AND torch is active
-        isFingerFrame = torchActive && redBright && redDominant && notSaturated && isUniform;
+        // CRITICAL: Require temporal PPG pulsation to prevent false positives
+        isFingerFrame = torchActive && redBright && redDominant && notSaturated && isUniform && hasPpgPulsation && dcInRange;
         
         // Update confidence ref for adaptive behavior
         fingerConfidenceRef.current = confidence;
@@ -787,6 +822,11 @@ export default function VitalMonitoringPage() {
         if (redRef.current.length > 1800) redRef.current.shift();
         if (greenRef.current.length > 1800) greenRef.current.shift();
         if (blueRef.current.length > 1800) blueRef.current.shift();
+        
+        // Update PPG history for temporal finger validation (use green/luminance)
+        const lumValue = (avgR + avgG + avgB) / 3;
+        ppgHistoryRef.current.push(lumValue);
+        if (ppgHistoryRef.current.length > 120) ppgHistoryRef.current.shift(); // Keep 4 seconds
       }
 
       valuesRef.current.push(cameraMode === "rear" ? avgR : avgG);

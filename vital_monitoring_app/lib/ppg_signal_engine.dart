@@ -403,7 +403,8 @@ class PPGSignalEngine {
     final regScore = cv < 10 ? 1.0 : math.max(0.0, 1.0 - (cv - 10) / 30).toDouble();
 
     final prominence = cardiacSpectralProminence(raw, fs);
-    final pulseGate = clamp01((prominence - 4) / 12);
+    // Lower threshold: prominence >= 2 gives 0, >= 14 gives 1 (was 4->16)
+    final pulseGate = clamp01((prominence - 2) / 12);
 
     final base = 0.4 * snrScore + 0.35 * piScore + 0.25 * regScore;
     return (clamp01(base * pulseGate) * 100).roundToDouble();
@@ -414,7 +415,11 @@ class PPGSignalEngine {
     final ps = powerSpectrum(signal, fs);
     if (ps.freqs.isEmpty) return none;
 
-    final noiseHi = math.min((fs / 2) * 0.9, cardiacHi + noiseBandWidth).toDouble();
+    // Use noise band OUTSIDE cardiac range (4-10 Hz) for true noise floor
+    // This avoids cardiac harmonics contaminating noise estimate
+    const noiseLo = 4.0;
+    const noiseHi = 10.0;
+    
     double signalPower = 0.0;
     int sigBins = 0;
     double noisePower = 0.0;
@@ -425,7 +430,7 @@ class PPGSignalEngine {
       if (f >= cardiacLo && f <= cardiacHi) {
         signalPower += ps.psd[i];
         sigBins++;
-      } else if (f > cardiacHi && f <= noiseHi) {
+      } else if (f >= noiseLo && f <= noiseHi && f < fs / 2) {
         noisePower += ps.psd[i];
         noiseBins++;
       }
@@ -433,9 +438,12 @@ class PPGSignalEngine {
     if (sigBins == 0) return none;
 
     final noiseDensity = noiseBins > 0 ? noisePower / noiseBins : 0.0;
-    final inBandNoise = noiseDensity * sigBins;
+    // In-band noise estimate: noise density * signal bandwidth (3 Hz for 0.5-3.5 Hz)
+    const signalBw = cardiacHi - cardiacLo;
+    final binWidth = fs / ps.freqs.length / 2;
+    final inBandNoise = noiseDensity * (signalBw / binWidth);
     if (inBandNoise <= 0) {
-      return SpectralSnr(snr: double.infinity, signalPower: signalPower, noiseDensity: noiseDensity, sigBins: sigBins, noiseBins: noiseBins, hasReference: false);
+      return SpectralSnr(snr: double.infinity, signalPower: signalPower, noiseDensity: noiseDensity, sigBins: sigBins, noiseBins: noiseBins, hasReference: true);
     }
     return SpectralSnr(snr: signalPower / inBandNoise, signalPower: signalPower, noiseDensity: noiseDensity, sigBins: sigBins, noiseBins: noiseBins, hasReference: true);
   }
