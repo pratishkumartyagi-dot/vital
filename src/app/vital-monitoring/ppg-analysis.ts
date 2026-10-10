@@ -737,6 +737,7 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): {
   snrDb: number; 
   isHarmonic: boolean;
   candidates: { bpm: number; power: number }[];
+  shr: number;
 } {
   const n = f.length;
   const w = f.map((v, i) => v * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1))));
@@ -760,31 +761,77 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): {
     }
   }
   peakIndices.sort((a, b) => power[b] - power[a]);
-  const topPeaks = peakIndices.slice(0, 3).sort((a, b) => a - b);
+  const topPeaks = peakIndices.slice(0, 3); // Keep sorted by power, NOT by index
   
   const candidates = topPeaks.map(idx => ({ bpm: freqs[idx] * 60, power: power[idx] }));
+  
+  // --- Subharmonic correction using Subharmonic-to-Harmonic Ratio (SHR) ---
+  // For weak rPPG signals the DFT can lock onto a subharmonic at f0/2
+  // (e.g. 0.67 Hz instead of 1.33 Hz for 80 BPM), producing a spuriously
+  // low BPM that propagates through the peak detector's seed interval.
+  //
+  // Two-tier approach:
+  // 1. Simple 2× check: if any candidate has ~2× the top peak's bpm with
+  //    >50% power, the top peak is a subharmonic. Works for all BPMs.
+  // 2. SHR refinement: when both 2*f0 and f0/2 are in the cardiac band,
+  //    compute SHR = power(2*f0) / power(f0/2). More precise than the
+  //    simple check because it measures actual harmonic/subharmonic power.
+  const SHR_THRESHOLD = 2.0;
+  const SHR_INVERSE = 1 / SHR_THRESHOLD;
   
   const pk = topPeaks[0];
   let f0 = freqs[pk];
   let maxPower = power[pk];
+  let bestShr = 1.0; // neutral SHR for diagnostics
   
-  // Subharmonic correction: for weak rPPG signals the DFT can lock onto a
-  // subharmonic at f0/2 (e.g. 0.67 Hz instead of 1.33 Hz for 80 BPM). This
-  // produces a spuriously low BPM that then propagates through the peak
-  // detector's seed interval and causes the whole pipeline to collapse.
-  //
-  // Fix: if a candidate at ~2*f0 has >50% of the power of the top peak,
-  // the top peak is a subharmonic and 2*f0 is the true fundamental.
-  for (const c of candidates) {
-    if (c.bpm !== f0 * 60) {
-      const ratio = c.bpm / (f0 * 60);
-      if (Math.abs(ratio - 2) < 0.15 && c.power > maxPower * 0.5) {
-        f0 = c.bpm / 60;
-        maxPower = c.power;
-        break;
+  // Tier 1: Simple 2× check - search the FULL power spectrum for a peak
+  // at ~2*f0, not just the top 3 candidates. For high BPMs the true
+  // fundamental may not be a top candidate, so limiting to top 3 misses
+  // the correction.
+  const targetF = 2 * f0;
+  let best2xFreq = -1;
+  let best2xPower = 0;
+  for (let i = 0; i < freqs.length; i++) {
+    if (Math.abs(freqs[i] - targetF) <= 0.15) {
+      if (power[i] > best2xPower) {
+        best2xPower = power[i];
+        best2xFreq = freqs[i];
       }
     }
   }
+  if (best2xFreq > 0 && best2xPower > maxPower * 0.5) {
+    f0 = best2xFreq;
+    maxPower = best2xPower;
+  }
+  
+  // Tier 2: SHR refinement (only when both harmonic and subharmonic are
+  // in the cardiac band, providing a more precise correction)
+  const fHarm = 2 * f0;
+  const fSub = f0 / 2;
+  const canMeasureHarmonic = fHarm >= CARDIAC_LO && fHarm <= CARDIAC_HI;
+  const canMeasureSubharmonic = fSub >= CARDIAC_LO && fSub <= CARDIAC_HI;
+  
+  if (canMeasureHarmonic && canMeasureSubharmonic) {
+    let pHarm = 0;
+    let pSub = 0;
+    for (let i = 0; i < freqs.length; i++) {
+      if (Math.abs(freqs[i] - fHarm) <= 0.15) pHarm = Math.max(pHarm, power[i]);
+      if (Math.abs(freqs[i] - fSub) <= 0.15) pSub = Math.max(pSub, power[i]);
+    }
+    const shr = pSub > 1e-12 ? pHarm / pSub : Infinity;
+    if (shr > SHR_THRESHOLD) {
+      // Detected peak is a subharmonic; true fundamental is at 2*f0
+      f0 = fHarm;
+      maxPower = pHarm;
+      bestShr = shr;
+    } else if (shr < SHR_INVERSE) {
+      // Detected peak is a harmonic; true fundamental is at f0/2
+      f0 = fSub;
+      maxPower = pSub;
+      bestShr = shr;
+    }
+  }
+  
   let sig = 0, tot = 0;
   for (let i = 0; i < freqs.length; i++) {
     tot += power[i];
@@ -810,7 +857,7 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): {
     }
   }
 
-  return { bpm: f0 * 60, snrDb, isHarmonic, candidates };
+  return { bpm: f0 * 60, snrDb, isHarmonic, candidates, shr: bestShr };
 }
 
 /// Percentile-based acceptance threshold for peak detection over an inclusive
