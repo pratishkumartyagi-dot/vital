@@ -18,8 +18,8 @@ import {
 /// FINGER_VOTE_FRAMES is ~1 s, which is long enough to debounce a real
 /// placement or removal (0.5-2 s) instead of chattering frame to frame.
 const FINGER_VOTE_FRAMES = 30;
-const FINGER_ACQUIRE_FRACTION = 0.6;  // Lowered from 0.7 for faster acquisition
-const FINGER_RELEASE_FRACTION = 0.35;  // Lowered from 0.4 for faster release
+const FINGER_ACQUIRE_FRACTION = 0.75;  // Need strong consensus to acquire
+const FINGER_RELEASE_FRACTION = 0.25;  // Release quickly when finger removed
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -519,16 +519,41 @@ export default function VitalMonitoringPage() {
       let isFingerFrame = false;
       let torchSaturated = false;
       if (cameraMode === "rear") {
+        // Torch must be ON for contact PPG - if no torch, finger detection is unreliable
+        const torchActive = torchOnRef.current;
+        
         // Torch saturation check: if red channel clips, signal is unreliable
         torchSaturated = avgR >= 250 || avgG >= 250 || avgB >= 250;
         
-        // Original working thresholds (commit a3a6fd1 - Oct 7): simple and robust
-        // Finger: bright red (>90), not saturated (<245), red >> green/blue (+15), distinct from green
-        const redBright = avgR > 90 && avgR < 245;
-        const redDominant = avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8;
+        // Stricter thresholds for finger on lens with torch:
+        // - Finger on lens with torch: VERY bright red (>150), not saturated (<240)
+        // - Red must DOMINATE strongly: red > green + 40, red > blue + 40
+        // - Uniform illumination (low variance across ROI)
+        const redBright = avgR > 150 && avgR < 240;
+        const redDominant = avgR > avgG + 40 && avgR > avgB + 40 && Math.abs(avgR - avgG) > 30;
         const notSaturated = avgR < 250 && avgG < 250 && avgB < 250;
-
-        isFingerFrame = redBright && redDominant && notSaturated;
+        
+        // Uniformity check: finger on lens produces very uniform illumination
+        // Compute luminance variance in the ROI
+        let lumSum = 0, lumSqSum = 0, lumCount = 0;
+        const cx0 = Math.floor(PROC_W * 0.25), cy0 = Math.floor(PROC_H * 0.25);
+        const cx1 = Math.floor(PROC_W * 0.75), cy1 = Math.floor(PROC_H * 0.75);
+        for (let y = cy0; y < cy1; y++) {
+          for (let x = cx0; x < cx1; x++) {
+            const i = (y * PROC_W + x) * 4;
+            const pr = data[i], pg = data[i + 1], pb = data[i + 2];
+            const lum = (pr + pg + pb) / 3;
+            lumSum += lum;
+            lumSqSum += lum * lum;
+            lumCount++;
+          }
+        }
+        const lumMean = lumCount > 0 ? lumSum / lumCount : 0;
+        const lumVar = lumCount > 0 ? (lumSqSum / lumCount) - (lumMean * lumMean) : 0;
+        const isUniform = lumVar < 400; // Low variance = uniform illumination
+        
+        // Finger detected only if ALL conditions met AND torch is active
+        isFingerFrame = torchActive && redBright && redDominant && notSaturated && isUniform;
 
       // Hysteresis over ~1s history (FINGER_VOTE_FRAMES = 30 frames at 30fps)
       if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
@@ -630,9 +655,11 @@ export default function VitalMonitoringPage() {
       // For rear camera, also collect if the raw signal already looks like a
       // plausible finger (red-bright and red-dominant) so analysis can run
       // before the hysteresis vote fully commits.
-      const signalLooksLikeFinger = cameraMode === "rear" &&
-        avgR > 90 && avgR < 245 &&
-        avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8 &&
+      // IMPORTANT: Rear camera requires torch to be active for contact PPG
+      const torchActive = torchOnRef.current;
+      const signalLooksLikeFinger = cameraMode === "rear" && torchActive &&
+        avgR > 150 && avgR < 240 &&
+        avgR > avgG + 40 && avgR > avgB + 40 && Math.abs(avgR - avgG) > 30 &&
         avgR < 250 && avgG < 250 && avgB < 250;
       const fingerPresent = fingerDetectedRef.current;
       const collecting = phaseRef.current === "measuring" && frameOk &&
