@@ -765,7 +765,26 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): {
   const candidates = topPeaks.map(idx => ({ bpm: freqs[idx] * 60, power: power[idx] }));
   
   const pk = topPeaks[0];
-  const f0 = freqs[pk];
+  let f0 = freqs[pk];
+  let maxPower = power[pk];
+  
+  // Subharmonic correction: for weak rPPG signals the DFT can lock onto a
+  // subharmonic at f0/2 (e.g. 0.67 Hz instead of 1.33 Hz for 80 BPM). This
+  // produces a spuriously low BPM that then propagates through the peak
+  // detector's seed interval and causes the whole pipeline to collapse.
+  //
+  // Fix: if a candidate at ~2*f0 has >50% of the power of the top peak,
+  // the top peak is a subharmonic and 2*f0 is the true fundamental.
+  for (const c of candidates) {
+    if (c.bpm !== f0 * 60) {
+      const ratio = c.bpm / (f0 * 60);
+      if (Math.abs(ratio - 2) < 0.15 && c.power > maxPower * 0.5) {
+        f0 = c.bpm / 60;
+        maxPower = c.power;
+        break;
+      }
+    }
+  }
   let sig = 0, tot = 0;
   for (let i = 0; i < freqs.length; i++) {
     tot += power[i];
@@ -775,8 +794,6 @@ function spectralHR(f: number[], fs: number, rawForSnr?: number[]): {
   }
   const noise = Math.max(tot - sig, 1e-12);
   const snrDb = 10 * Math.log10(Math.max(sig, 1e-12) / noise);
-  
-  const maxPower = power[pk];
   
   // Check if the detected peak is likely a harmonic/subharmonic
   // If there's a stronger peak at 2*f0 or f0/2, flag as potential harmonic error
