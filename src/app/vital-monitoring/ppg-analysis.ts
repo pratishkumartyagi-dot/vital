@@ -1125,9 +1125,9 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
     dcRef?: number,
     cameraMode: "front" | "rear" = "rear"
   ): HeartMetrics {
-    // Window parameters
-    const WINDOW_SEC = 15;
-    const STEP_SEC = 2;
+    // Window parameters - reduced for faster initial analysis
+    const WINDOW_SEC = 10;   // Reduced from 15s
+    const STEP_SEC = 1;      // Reduced from 2s
     const MIN_BPM = 42;
     const MAX_BPM = 180;
     const MAX_JUMP_BPM = 8;
@@ -1137,7 +1137,10 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
     const MIN_SNR = 1.0;                   // Relaxed from 2.0 (linear)
     const MAX_SATURATION = 0.05;
     
-    if (!ppg || ppg.length < fs * 15) {
+    // Reduce minimum data requirement to 10s for initial analysis
+    const MIN_SIGNAL_SEC = 10;
+    
+    if (!ppg || ppg.length < fs * MIN_SIGNAL_SEC) {
       return { bpm: null, peaks: [], rrIntervals: [], hrv: null, rhythm: "unknown", signalQuality: 0, method: "none", bpmPeaks: null, bpmSpectral: null, rrMs: [], peakTimesMs: [], validFraction: 0, snrDb: 0, sdnn: null, rmssd: null, reliable: false, perfusionIndex: 0, windows: [], goodWindowFraction: 0, hrRange: null, confidence: 0 };
     }
     
