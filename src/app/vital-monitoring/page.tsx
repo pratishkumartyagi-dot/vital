@@ -131,6 +131,8 @@ export default function VitalMonitoringPage() {
   const hbSmoothedRef = useRef<number | null>(null);
   // Per-frame timestamps for accurate resampling (fixes fs assumption)
   const frameTimestampsRef = useRef<number[]>([]);
+  // Timestamps for COLLECTED frames only (matching ppgBufferRef length)
+  const ppgTimestampsRef = useRef<number[]>([]);
   const lastResampleTimeRef = useRef<number>(0);
   // Torch saturation flag for rear camera
   const torchSaturatedRef = useRef(false);
@@ -597,6 +599,7 @@ export default function VitalMonitoringPage() {
         syntheticBufferRef.current.splice(0, syntheticBufferRef.current.length - 1800);
       }
       const collecting = phaseRef.current === "measuring";
+      const now = performance.now();
       for (const v of sample) {
         valuesRef.current.push(128 + (v - 128) * 1.2);
         if (valuesRef.current.length > 180) valuesRef.current.shift();
@@ -604,9 +607,13 @@ export default function VitalMonitoringPage() {
           redRef.current.push(128 + (v - 128) * 1.2);
           greenRef.current.push(v);
           blueRef.current.push(128 + (v - 128) * 0.4);
+          ppgBufferRef.current.push(128 + (v - 128) * 1.2);
+          ppgTimestampsRef.current.push(now);
           if (redRef.current.length > 1800) redRef.current.shift();
           if (greenRef.current.length > 1800) greenRef.current.shift();
           if (blueRef.current.length > 1800) blueRef.current.shift();
+          if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
+          if (ppgTimestampsRef.current.length > 1800) ppgTimestampsRef.current.shift();
         }
       }
       setFingerDetected(true);
@@ -632,7 +639,9 @@ export default function VitalMonitoringPage() {
         // Store the best-guess channel in ppgBufferRef for fallback use.
         const ppgValue = cameraMode === "rear" ? avgR : avgG;
         ppgBufferRef.current.push(ppgValue);
+        ppgTimestampsRef.current.push(now);
         if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
+        if (ppgTimestampsRef.current.length > 1800) ppgTimestampsRef.current.shift();
         redRef.current.push(avgR);
         greenRef.current.push(avgG);
         blueRef.current.push(avgB);
@@ -652,13 +661,19 @@ export default function VitalMonitoringPage() {
     targetFs = 30,
     maxDurationSec = 30
   ): { signal: number[]; fs: number; uniformTimestamps: number[] } {
-    if (signal.length < 3 || timestamps.length !== signal.length) {
+    // Handle length mismatch: truncate to shorter length
+    const minLen = Math.min(signal.length, timestamps.length);
+    if (minLen < 3) {
       return { signal, fs: targetFs, uniformTimestamps: [] };
     }
-    const t0 = timestamps[0];
-    const tEnd = timestamps[timestamps.length - 1];
+    // Truncate both to same length
+    const sig = signal.slice(-minLen);
+    const ts = timestamps.slice(-minLen);
+    
+    const t0 = ts[0];
+    const tEnd = ts[ts.length - 1];
     const duration = (tEnd - t0) / 1000; // seconds
-    if (duration < 2) return { signal, fs: targetFs, uniformTimestamps: [] };
+    if (duration < 2) return { signal: sig, fs: targetFs, uniformTimestamps: [] };
     
     const nTarget = Math.min(Math.floor(duration * targetFs), Math.floor(maxDurationSec * targetFs));
     const dt = 1 / targetFs;
@@ -669,18 +684,18 @@ export default function VitalMonitoringPage() {
     for (let i = 0; i < nTarget; i++) {
       const tTarget = t0 + i * dt * 1000;
       outTimes[i] = tTarget;
-      while (srcIdx + 1 < timestamps.length && timestamps[srcIdx + 1] <= tTarget) {
+      while (srcIdx + 1 < ts.length && ts[srcIdx + 1] <= tTarget) {
         srcIdx++;
       }
       if (srcIdx === 0) {
-        out[i] = signal[0];
-      } else if (srcIdx >= timestamps.length - 1) {
-        out[i] = signal[signal.length - 1];
+        out[i] = sig[0];
+      } else if (srcIdx >= ts.length - 1) {
+        out[i] = sig[sig.length - 1];
       } else {
-        const t1 = timestamps[srcIdx];
-        const t2 = timestamps[srcIdx + 1];
-        const v1 = signal[srcIdx];
-        const v2 = signal[srcIdx + 1];
+        const t1 = ts[srcIdx];
+        const t2 = ts[srcIdx + 1];
+        const v1 = sig[srcIdx];
+        const v2 = sig[srcIdx + 1];
         const alpha = (tTarget - t1) / (t2 - t1);
         out[i] = v1 + alpha * (v2 - v1);
       }
@@ -702,8 +717,8 @@ export default function VitalMonitoringPage() {
       const targetFs = 30;
       const windowSec = 30;
       
-      // Resample all buffers to uniform 30 Hz grid
-      const timestamps = frameTimestampsRef.current;
+      // Resample all buffers to uniform 30 Hz grid using collected-frame timestamps
+      const timestamps = ppgTimestampsRef.current;
       const ppgResampled = resampleToUniform(ppgBufferRef.current, timestamps, targetFs, windowSec);
       const redResampled = resampleToUniform(redRef.current, timestamps, targetFs, windowSec);
       const greenResampled = resampleToUniform(greenRef.current, timestamps, targetFs, windowSec);
@@ -1002,6 +1017,7 @@ export default function VitalMonitoringPage() {
       ppgBufferRef.current = [];
       syntheticBufferRef.current = [];
       synthTimeRef.current = 0;
+      ppgTimestampsRef.current = [];
       setHb(null);
       setBpm(null);
       setRespRate(null);
@@ -1235,6 +1251,7 @@ export default function VitalMonitoringPage() {
     fingerHistoryRef.current = [];
     roiCentroidRef.current = null;
     lastBpmUpdate.current = 0;
+    ppgTimestampsRef.current = [];
     setFinalReading(null);
     setPhase("warming");
     setCountdown(130);
