@@ -150,9 +150,11 @@ class PPGSignalEngine {
   static double computePerfusionIndex(List<double> rawSignal, [double zlo = 0.0]) {
     if (rawSignal.length < 10) return 0.0;
 
-    final filtered = applyBandpassFilter(rawSignal);
+    // Apply ZLO correction first, then filter
+    final correctedSignal = zlo > 0 ? applyZloCorrectionToSignal(rawSignal, zlo) : rawSignal;
+    final filtered = applyBandpassFilter(correctedSignal);
     
-    final dc = computeZloCorrectedDc(rawSignal, zlo);
+    final dc = computeZloCorrectedDc(correctedSignal, zlo);
     if (dc <= 1e-9) return 0.0;
 
     double sq = 0.0;

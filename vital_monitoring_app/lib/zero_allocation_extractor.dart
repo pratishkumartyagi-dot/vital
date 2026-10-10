@@ -23,12 +23,13 @@ class ZeroAllocationExtractor {
     int sumY = 0, sumU = 0, sumV = 0;
     int sampleCount = 0;
 
-    // Coarse spatial downsampling matrix (Every 4th grid row/col pixel)
-    for (int y = 0; y < height; y += 4) {
+    // Improved spatial downsampling: Every 2nd grid row/col pixel (4x more samples)
+    // This provides better spatial detail for finger detection while maintaining performance
+    for (int y = 0; y < height; y += 2) {
       final int yRowStart = y * yRowStride;
       final int uvRow = (y ~/ 2) * uvRowStride;
       
-      for (int x = 0; x < width; x += 4) {
+      for (int x = 0; x < width; x += 2) {
         sumY += yBytes[yRowStart + x];
         final int uvIndex = uvRow + (x ~/ 2) * uvPixelStride;
         

@@ -14,12 +14,64 @@ import {
   type VitalReading 
 } from '@/lib/vital-storage';
 
-/// Finger-detection hysteresis, in frames of the rolling vote window. At 30 fps
-/// FINGER_VOTE_FRAMES is ~1 s, which is long enough to debounce a real
-/// placement or removal (0.5-2 s) instead of chattering frame to frame.
+// Finger-detection hysteresis, in frames of the rolling vote window. At 30 fps
+// FINGER_VOTE_FRAMES is ~1 s, which is long enough to debounce a real
+// placement or removal (0.5-2 s) instead of chattering frame to frame.
 const FINGER_VOTE_FRAMES = 30;
 const FINGER_ACQUIRE_FRACTION = 0.75;  // Need strong consensus to acquire
 const FINGER_RELEASE_FRACTION = 0.25;  // Release quickly when finger removed
+
+// Adaptive finger detection thresholds based on device calibration
+const FINGER_THRESHOLDS = {
+  // Base thresholds (used when no calibration available)
+  base: {
+    redBrightMin: 80,     // Was 100 - lowered for cold fingers
+    redBrightMax: 250,    // Saturation limit
+    redDominanceMin: 15,  // Was 25 - lowered for partial lens coverage
+    redDominanceRatio: 1.05, // red/green ratio must exceed this
+    lumVarMax: 1200,      // Was 800 - relaxed for slight movement
+    notSaturated: 250,    // Channel saturation limit
+  },
+  // Tight thresholds for known-good calibration
+  tight: {
+    redBrightMin: 100,
+    redBrightMax: 245,
+    redDominanceMin: 20,
+    redDominanceRatio: 1.1,
+    lumVarMax: 800,
+    notSaturated: 245,
+  },
+  // Relaxed thresholds for unknown/low-quality devices
+  relaxed: {
+    redBrightMin: 60,
+    redBrightMax: 255,
+    redDominanceMin: 10,
+    redDominanceRatio: 1.02,
+    lumVarMax: 2000,
+    notSaturated: 255,
+  },
+};
+
+// Get adaptive thresholds based on device calibration
+function getAdaptiveFingerThresholds(calibration?: { zlo: number; slope: number; source: string }): {
+  redBrightMin: number;
+  redBrightMax: number;
+  redDominanceMin: number;
+  redDominanceRatio: number;
+  lumVarMax: number;
+  notSaturated: number;
+} {
+  if (!calibration || calibration.source === 'FALLBACK') {
+    return FINGER_THRESHOLDS.relaxed;
+  }
+  
+  // Use tight thresholds for calibrated devices with known ZLO
+  if (calibration.source === 'REMOTE' || calibration.source === 'LOCAL_CACHE') {
+    return FINGER_THRESHOLDS.tight;
+  }
+  
+  return FINGER_THRESHOLDS.base;
+}
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -51,6 +103,30 @@ function generateSyntheticPPG(seconds: number, fs: number, bpm: number, t0 = 0):
     out[i] = 128 + 30 * pulse * baseline + noise * 6;
   }
   return out;
+}
+
+// Load device calibration from the calibration server
+async function loadDeviceCalibration(): Promise<{ zlo: number; slope: number; source: string }> {
+  try {
+    // Try to get device info
+    const response = await fetch('/api/calibration', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        zlo: data.zlo || 16.0,
+        slope: data.sensorLinearSlope || 1.0,
+        source: data.source || 'REMOTE'
+      };
+    }
+  } catch {
+    // Server not available, use default
+  }
+  
+  return { zlo: 16.0, slope: 1.0, source: 'FALLBACK' };
 }
 
 export default function VitalMonitoringPage() {
@@ -136,6 +212,10 @@ export default function VitalMonitoringPage() {
   const lastResampleTimeRef = useRef<number>(0);
   // Torch saturation flag for rear camera
   const torchSaturatedRef = useRef(false);
+  // Finger detection confidence (0-1) for adaptive behavior
+  const fingerConfidenceRef = useRef<number>(0);
+  // Device calibration profile for adaptive thresholds
+  const calibrationRef = useRef<{ zlo: number; slope: number; source: string } | null>(null);
   // Front camera safeguards: motion, face ROI, auto-exposure/WB drift
   const frontCamPrevFrameRef = useRef<Uint8ClampedArray | null>(null);
   const frontCamExposureDriftRef = useRef<number>(0);
@@ -522,16 +602,21 @@ export default function VitalMonitoringPage() {
         // Torch must be ON for contact PPG - if no torch, finger detection is unreliable
         const torchActive = torchOnRef.current;
         
-        // Torch saturation check: if red channel clips, signal is unreliable
-        torchSaturated = avgR >= 250 || avgG >= 250 || avgB >= 250;
+        // Get adaptive thresholds based on device calibration
+        const thresholds = getAdaptiveFingerThresholds(calibrationRef.current);
         
-        // Relaxed thresholds for finger on lens with torch:
-        // - Finger on lens with torch: bright red (>100), not saturated (<245)
-        // - Red must DOMINATE: red > green + 25, red > blue + 25
+        // Torch saturation check: if red channel clips, signal is unreliable
+        torchSaturated = avgR >= thresholds.notSaturated || avgG >= thresholds.notSaturated || avgB >= thresholds.notSaturated;
+        
+        // Adaptive thresholds for finger on lens with torch:
+        // - Finger on lens with torch: bright red, not saturated
+        // - Red must DOMINATE: red > green + delta, red > blue + delta
         // - Uniform illumination (low variance across ROI)
-        const redBright = avgR > 100 && avgR < 245;
-        const redDominant = avgR > avgG + 25 && avgR > avgB + 25 && Math.abs(avgR - avgG) > 20;
-        const notSaturated = avgR < 250 && avgG < 250 && avgB < 250;
+        const redBright = avgR > thresholds.redBrightMin && avgR < thresholds.redBrightMax;
+        const redDominant = avgR > avgG + thresholds.redDominanceMin && 
+                           avgR > avgB + thresholds.redDominanceMin && 
+                           avgR / Math.max(avgG, 1) > thresholds.redDominanceRatio;
+        const notSaturated = avgR < thresholds.notSaturated && avgG < thresholds.notSaturated && avgB < thresholds.notSaturated;
         
         // Uniformity check: finger on lens produces very uniform illumination
         // Compute luminance variance in the ROI
@@ -550,12 +635,22 @@ export default function VitalMonitoringPage() {
         }
         const lumMean = lumCount > 0 ? lumSum / lumCount : 0;
         const lumVar = lumCount > 0 ? (lumSqSum / lumCount) - (lumMean * lumMean) : 0;
-        const isUniform = lumVar < 800; // Relaxed: was 400
+        const isUniform = lumVar < thresholds.lumVarMax;
+        
+        // Confidence scoring for finger detection
+        let confidence = 0;
+        if (torchActive) confidence += 0.3;
+        if (redBright) confidence += 0.25;
+        if (redDominant) confidence += 0.25;
+        if (notSaturated) confidence += 0.1;
+        if (isUniform) confidence += 0.1;
         
         // DEBUG: Log finger detection values every 30 frames
         if (Math.random() < 0.033) {
           console.log('[FingerDetect]', {
             torchActive, redBright, redDominant, notSaturated, isUniform,
+            confidence: confidence.toFixed(2),
+            thresholds,
             avgR: avgR.toFixed(1), avgG: avgG.toFixed(1), avgB: avgB.toFixed(1),
             lumMean: lumMean.toFixed(1), lumVar: lumVar.toFixed(1),
             isFingerFrame: torchActive && redBright && redDominant && notSaturated && isUniform
@@ -564,6 +659,9 @@ export default function VitalMonitoringPage() {
         
         // Finger detected only if ALL conditions met AND torch is active
         isFingerFrame = torchActive && redBright && redDominant && notSaturated && isUniform;
+        
+        // Update confidence ref for adaptive behavior
+        fingerConfidenceRef.current = confidence;
 
       // Hysteresis over ~1s history (FINGER_VOTE_FRAMES = 30 frames at 30fps)
       if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
@@ -1422,6 +1520,16 @@ export default function VitalMonitoringPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+      }
+      
+      // Load device calibration for adaptive thresholds
+      try {
+        const calibration = await loadDeviceCalibration();
+        calibrationRef.current = calibration;
+        console.log('[Calibration] Loaded:', calibration);
+      } catch (e) {
+        console.warn('[Calibration] Failed to load, using fallback:', e);
+        calibrationRef.current = { zlo: 16.0, slope: 1.0, source: 'FALLBACK' };
       }
       
       startVideoRecording(stream);

@@ -47,11 +47,18 @@ class VitalSignController extends ChangeNotifier {
   double get signalQuality => _signalQuality;
   bool get isDemoMode => _isDemoMode;
   CameraMode get cameraMode => _cameraMode;
+  double get calibrationZlo => _calibrationZlo;
+  double get calibrationSlope => _calibrationSlope;
 
   static const int _waveformDisplaySize = 300;
   static const int _analysisWindowSize = 300;
   static const int _minSamplesForHR = 90;
   static const double _fs = 30.0;
+  static const double _defaultZlo = 16.0;
+  static const double _defaultSlope = 1.0;
+
+  double _calibrationZlo = _defaultZlo;
+  double _calibrationSlope = _defaultSlope;
 
   final List<double> _liveRedBuffer = [];
   final List<double> _liveGreenBuffer = [];
@@ -205,7 +212,7 @@ class VitalSignController extends ChangeNotifier {
   /// thick/dark/cold fingers) selected by the engine's spectral-SNR rule.
   void _processRearCameraPPG() {
     if (_liveGreenBuffer.length >= 30) {
-      final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
+      final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
       if (pi < 0.2) {
         _currentState = TrackingState.rejected;
         _toastPrompt = "Low pulse signal detected. Warm hands and reduce finger pressure.";
@@ -222,14 +229,14 @@ class VitalSignController extends ChangeNotifier {
       final analysis = PPGSignalEngine.analyzeVitals(
         analysisSignal, _fs,
         _liveRedBuffer, _liveGreenBuffer, _liveBlueBuffer,
-        const AnalyzeOptions(cameraMode: 'rear'),
+        AnalyzeOptions(cameraMode: 'rear', zlo: _calibrationZlo),
       );
 
       _applyAnalysis(analysis);
 
-      final redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer);
-      final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-      final bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer);
+      final redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer, _calibrationZlo);
+      final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
+      final bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer, _calibrationZlo);
       final avgGreenDC = _liveGreenBuffer.reduce((a, b) => a + b) / _liveGreenBuffer.length;
       if (avgGreenDC > 240) {
         _toastPrompt = "Ambient lighting too bright. Shade the lens with your finger.";
@@ -316,9 +323,9 @@ class VitalSignController extends ChangeNotifier {
     }
     _signalQuality = analysis.heart.signalQuality;
 
-    final redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer);
-    final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-    final bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer);
+    final redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer, _calibrationZlo);
+    final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
+    final bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer, _calibrationZlo);
 
     if (redPI > 0 && bluePI > 0) {
       _spo2Level = (110.0 - 25.0 * (redPI / bluePI)).clamp(70.0, 100.0).toDouble();
@@ -477,6 +484,20 @@ class VitalSignController extends ChangeNotifier {
   void dispose() {
     _stopDemoTimer();
     super.dispose();
+  }
+
+  /// Set the ZLO calibration value from native Android/iOS
+  void setCalibrationZlo(double zlo, {double slope = 1.0}) {
+    _calibrationZlo = zlo;
+    _calibrationSlope = slope;
+    debugPrint('Calibration set: ZLO=$zlo, Slope=$slope');
+  }
+
+  /// Set calibration from a CalibrationProfile
+  void setCalibrationProfile(CalibrationProfile profile) {
+    _calibrationZlo = profile.zlo;
+    _calibrationSlope = profile.sensorLinearSlope;
+    debugPrint('Calibration profile set: source=${profile.source}, ZLO=$zlo, Slope=$slope');
   }
 
   void reset() {
