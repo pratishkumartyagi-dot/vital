@@ -53,7 +53,7 @@ const FINGER_THRESHOLDS = {
 };
 
 // Get adaptive thresholds based on device calibration
-function getAdaptiveFingerThresholds(calibration?: { zlo: number; slope: number; source: string }): {
+function getAdaptiveFingerThresholds(calibration?: { zlo: number; slope: number; source: string } | null): {
   redBrightMin: number;
   redBrightMax: number;
   redDominanceMin: number;
