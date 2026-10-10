@@ -599,8 +599,12 @@ export default function VitalMonitoringPage() {
         syntheticBufferRef.current.splice(0, syntheticBufferRef.current.length - 1800);
       }
       const collecting = phaseRef.current === "measuring";
-      const now = performance.now();
-      for (const v of sample) {
+      const frameNow = performance.now();
+      // Generate per-sample timestamps matching the synthetic signal's continuous time
+      const sampleIntervalMs = (1000 / fs);
+      for (let i = 0; i < sample.length; i++) {
+        const v = sample[i];
+        const sampleTime = frameNow - (sample.length - 1 - i) * sampleIntervalMs;
         valuesRef.current.push(128 + (v - 128) * 1.2);
         if (valuesRef.current.length > 180) valuesRef.current.shift();
         if (collecting) {
@@ -608,7 +612,7 @@ export default function VitalMonitoringPage() {
           greenRef.current.push(v);
           blueRef.current.push(128 + (v - 128) * 0.4);
           ppgBufferRef.current.push(128 + (v - 128) * 1.2);
-          ppgTimestampsRef.current.push(now);
+          ppgTimestampsRef.current.push(sampleTime);
           if (redRef.current.length > 1800) redRef.current.shift();
           if (greenRef.current.length > 1800) greenRef.current.shift();
           if (blueRef.current.length > 1800) blueRef.current.shift();
@@ -664,7 +668,7 @@ export default function VitalMonitoringPage() {
     // Handle length mismatch: truncate to shorter length
     const minLen = Math.min(signal.length, timestamps.length);
     if (minLen < 3) {
-      return { signal, fs: targetFs, uniformTimestamps: [] };
+      return { signal: [], fs: targetFs, uniformTimestamps: [] };
     }
     // Truncate both to same length
     const sig = signal.slice(-minLen);
@@ -673,9 +677,10 @@ export default function VitalMonitoringPage() {
     const t0 = ts[0];
     const tEnd = ts[ts.length - 1];
     const duration = (tEnd - t0) / 1000; // seconds
-    if (duration < 2) return { signal: sig, fs: targetFs, uniformTimestamps: [] };
     
     const nTarget = Math.min(Math.floor(duration * targetFs), Math.floor(maxDurationSec * targetFs));
+    if (nTarget < 1) return { signal: [], fs: targetFs, uniformTimestamps: [] };
+    
     const dt = 1 / targetFs;
     const out: number[] = new Array(nTarget);
     const outTimes: number[] = new Array(nTarget);
@@ -1232,7 +1237,7 @@ export default function VitalMonitoringPage() {
       }, videoBlob);
       await loadReadings();
     }
-  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, loadReadings]);
+  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stress, stopStream, stopVideoRecording, patient, cameraMode, demoMode, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
