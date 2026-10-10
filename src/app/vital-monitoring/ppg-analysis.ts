@@ -1088,7 +1088,10 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
     spectralBpm: number | null,
     beatResult: { peakTimesMs: number[]; correlations: number[] },
     fs: number,
-    cameraMode: "front" | "rear"
+    cameraMode: "front" | "rear",
+    rawSignal: number[],
+    windowStart: number,
+    windowEnd: number
   ): { snr: number; beatCorrelation: number; beatCount: number; saturated: boolean; fingerOn: boolean } {
     // 1. In-band SNR
     const { snr } = spectralSnr(segment, fs);
@@ -1105,12 +1108,12 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
     const satThreshold = 250;
     const saturated = segment.filter(v => v >= satThreshold).length / segment.length > 0.05;
     
-    // 5. Finger-on (for rear camera): bright red, low G/B
+    // 5. Finger-on (for rear camera): use raw signal amplitude
     let fingerOn = true;
     if (cameraMode === "rear") {
-      const avgR = segment.reduce((a, b) => a + b, 0) / segment.length;
-      // Would need RGB channels - simplified check using signal amplitude
-      fingerOn = segment.length > 0 && Math.max(...segment) - Math.min(...segment) > 5;
+      const rawSegment = rawSignal.slice(windowStart, windowEnd);
+      const amplitude = rawSegment.length > 0 ? Math.max(...rawSegment) - Math.min(...rawSegment) : 0;
+      fingerOn = amplitude > 2; // Low threshold for raw signal
     }
     
     return { snr, beatCorrelation, beatCount, saturated, fingerOn };
@@ -1128,10 +1131,10 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
     const MIN_BPM = 42;
     const MAX_BPM = 180;
     const MAX_JUMP_BPM = 8;
-    const MIN_GOOD_WINDOW_FRACTION = 0.6;
-    const MIN_BEATS_PER_WINDOW = 10;
-    const MIN_BEAT_CORRELATION = 0.8;
-    const MIN_SNR = 2.0; // linear SNR (not dB)
+    const MIN_GOOD_WINDOW_FRACTION = 0.5;  // Relaxed from 0.6
+    const MIN_BEATS_PER_WINDOW = 8;        // Relaxed from 10
+    const MIN_BEAT_CORRELATION = 0.6;      // Relaxed from 0.8
+    const MIN_SNR = 1.0;                   // Relaxed from 2.0 (linear)
     const MAX_SATURATION = 0.05;
     
     if (!ppg || ppg.length < fs * 15) {
@@ -1192,7 +1195,7 @@ function detectPeaksAdaptive(f: number[], fs: number, seedRrMs: number, minFloor
       }
       
       // Window SQI
-      const sqi = computeWindowSQI(segment, spectralBpm, beatResult, fs, cameraMode);
+      const sqi = computeWindowSQI(segment, spectralBpm, beatResult, fs, cameraMode, signal, windowStart, windowEnd);
       
       // Window is good if all criteria met
       const isGood = sqi.snr >= MIN_SNR &&

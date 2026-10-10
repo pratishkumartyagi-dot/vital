@@ -520,10 +520,10 @@ export default function VitalMonitoringPage() {
         // Torch saturation check: if red channel clips, signal is unreliable
         torchSaturated = avgR >= 250 || avgG >= 250 || avgB >= 250;
         
-        // Original working thresholds (commit a3a6fd1 - Oct 7): simple and robust
-        // Finger: bright red (>90), not saturated (<245), red >> green/blue (+15), distinct from green
-        const redBright = avgR > 90 && avgR < 245;
-        const redDominant = avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8;
+        // More permissive thresholds for real-world conditions
+        // Finger: bright red (>70), not saturated (<250), red >> green/blue (+10), distinct from green
+        const redBright = avgR > 70 && avgR < 245;
+        const redDominant = avgR > avgG + 10 && avgR > avgB + 10 && Math.abs(avgR - avgG) > 5;
         const notSaturated = avgR < 250 && avgG < 250 && avgB < 250;
 
         isFingerFrame = redBright && redDominant && notSaturated;
@@ -620,11 +620,13 @@ export default function VitalMonitoringPage() {
       // plausible finger (red-bright and red-dominant) so analysis can run
       // before the hysteresis vote fully commits.
       const signalLooksLikeFinger = cameraMode === "rear" &&
-        avgR > 90 && avgR < 245 &&
-        avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8 &&
+        avgR > 70 && avgR < 245 &&
+        avgR > avgG + 10 && avgR > avgB + 10 && Math.abs(avgR - avgG) > 5 &&
         avgR < 250 && avgG < 250 && avgB < 250;
       const fingerPresent = fingerDetectedRef.current;
-      const collecting = phaseRef.current === "measuring" && frameOk &&
+      // Collect during warm-up AND measuring phases for more data
+      const inCollectionPhase = phaseRef.current === "warming" || phaseRef.current === "measuring";
+      const collecting = inCollectionPhase && frameOk &&
         (cameraMode !== "rear" || fingerPresent || signalLooksLikeFinger);
       if (collecting) {
         // For rear camera, red is typically the best contact PPG channel
