@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 
 class CalibrationProfile {
   final String source;
@@ -55,6 +57,47 @@ class CalibrationProfile {
       calibrationVersion: 1,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'source': source,
+    'isStale': isStale,
+    'model': model,
+    'marketingName': marketingName,
+    'manufacturer': manufacturer,
+    'zlo': zlo,
+    'sensorLinearSlope': sensorLinearSlope,
+    'apiLevelMin': apiLevelMin,
+    'apiLevelMax': apiLevelMax,
+    'calibrationVersion': calibrationVersion,
+  };
+}
+
+class RemoteCalibrationResponse {
+  final List<CalibrationProfile> profiles;
+  final int version;
+  final int minAppVersion;
+  final double fallbackZlo;
+  final double fallbackSlope;
+
+  RemoteCalibrationResponse({
+    required this.profiles,
+    required this.version,
+    required this.minAppVersion,
+    required this.fallbackZlo,
+    required this.fallbackSlope,
+  });
+
+  factory RemoteCalibrationResponse.fromJson(Map<String, dynamic> json) {
+    return RemoteCalibrationResponse(
+      profiles: (json['profiles'] as List<dynamic>?)
+          ?.map((e) => CalibrationProfile.fromMap(e as Map<dynamic, dynamic>))
+          .toList() ?? [],
+      version: json['version'] as int? ?? 1,
+      minAppVersion: json['min_app_version'] as int? ?? 1,
+      fallbackZlo: (json['fallback_zlo'] as num?)?.toDouble() ?? 16.0,
+      fallbackSlope: (json['fallback_slope'] as num?)?.toDouble() ?? 1.0,
+    );
+  }
 }
 
 class NativeHardwareBridge {
@@ -62,6 +105,12 @@ class NativeHardwareBridge {
   static const _cameraChannel = MethodChannel('com.vitals.app/camera_control');
   static const _ppgChannel = MethodChannel('com.vitals.app/ppg_processor');
   static const _calibrationChannel = MethodChannel('com.vitals.app/calibration');
+
+  // Remote calibration endpoint
+  static const String _calibrationApiUrl = 'https://api.yourdomain.com/v1/calibration';
+  
+  static CalibrationProfile? _cachedProfile;
+  static Timer? _refreshTimer;
 
   static Future<void> lockHardwareISP() async {
     try {
@@ -107,7 +156,8 @@ class NativeHardwareBridge {
     try {
       final result = await _calibrationChannel.invokeMethod<Map<dynamic, dynamic>>('fetchCalibration');
       if (result != null) {
-        return CalibrationProfile.fromMap(result);
+        _cachedProfile = CalibrationProfile.fromMap(result);
+        return _cachedProfile;
       }
       return null;
     } on PlatformException catch (e) {
@@ -117,16 +167,123 @@ class NativeHardwareBridge {
   }
 
   static Future<CalibrationProfile?> getCurrentCalibration() async {
+    if (_cachedProfile != null) return _cachedProfile;
+    
     try {
       final result = await _calibrationChannel.invokeMethod<Map<dynamic, dynamic>>('getCurrentCalibration');
       if (result != null) {
-        return CalibrationProfile.fromMap(result);
+        _cachedProfile = CalibrationProfile.fromMap(result);
+        return _cachedProfile;
       }
       return null;
     } on PlatformException catch (e) {
       print("Get current calibration failure: ${e.message}");
       return null;
     }
+  }
+
+  /// Fetches calibration from remote server with device model matching
+  static Future<CalibrationProfile?> fetchRemoteCalibration({
+    required String model,
+    required String manufacturer,
+    required int apiLevel,
+  }) async {
+    try {
+      final uri = Uri.parse('$_calibrationApiUrl/$model');
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        final json = jsonDecode(response.body);
+        final profile = CalibrationProfile.fromMap(json);
+        
+        // Verify device match
+        if (profile.model.equals(model, ignoreCase: true) &&
+            profile.manufacturer.equals(manufacturer, ignoreCase: true) &&
+            apiLevel >= profile.apiLevelMin &&
+            apiLevel <= profile.apiLevelMax) {
+          _cachedProfile = profile;
+          return profile;
+        }
+      }
+      
+      // Try fallback list
+      final listResponse = await http.get(Uri.parse(_calibrationApiUrl));
+      if (listResponse.statusCode == 200) {
+        final listJson = jsonDecode(listResponse.body);
+        final response = RemoteCalibrationResponse.fromJson(listJson);
+        
+        for (final profile in response.profiles) {
+          if (profile.model.equals(model, ignoreCase: true) &&
+              profile.manufacturer.equals(manufacturer, ignoreCase: true) &&
+              apiLevel >= profile.apiLevelMin &&
+              apiLevel <= profile.apiLevelMax) {
+            _cachedProfile = profile;
+            return profile;
+          }
+        }
+        
+        // Use fallback from server
+        _cachedProfile = CalibrationProfile(
+          source: 'REMOTE_FALLBACK',
+          isStale: false,
+          model: model,
+          marketingName: '${manufacturer} $model',
+          manufacturer: manufacturer,
+          zlo: response.fallbackZlo,
+          sensorLinearSlope: response.fallbackSlope,
+          apiLevelMin: 0,
+          apiLevelMax: 999,
+          calibrationVersion: response.version,
+        );
+        return _cachedProfile;
+      }
+      
+      return null;
+    } catch (e) {
+      print("Remote calibration fetch failed: $e");
+      return null;
+    }
+  }
+
+  /// Initialize calibration at app startup - fetches remote, caches locally
+  static Future<CalibrationProfile> initializeCalibration({
+    required String model,
+    required String manufacturer,
+    required int apiLevel,
+  }) async {
+    // Try remote first
+    final remote = await fetchRemoteCalibration(
+      model: model,
+      manufacturer: manufacturer,
+      apiLevel: apiLevel,
+    );
+    
+    if (remote != null) {
+      // Start periodic refresh (every 7 days)
+      _startPeriodicRefresh(model: model, manufacturer: manufacturer, apiLevel: apiLevel);
+      return remote;
+    }
+    
+    // Try local native cache
+    final local = await getCurrentCalibration();
+    if (local != null) {
+      _startPeriodicRefresh(model: model, manufacturer: manufacturer, apiLevel: apiLevel);
+      return local;
+    }
+    
+    // Ultimate fallback
+    return CalibrationProfile.fallback();
+  }
+
+  static void _startPeriodicRefresh({
+    required String model,
+    required String manufacturer,
+    required int apiLevel,
+  }) {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(const Duration(days: 7), (_) {
+      fetchRemoteCalibration(model: model, manufacturer: manufacturer, apiLevel: apiLevel);
+    });
   }
 
   static Future<double?> applyZloCorrection(double value) async {
@@ -143,7 +300,8 @@ class NativeHardwareBridge {
     try {
       final result = await _calibrationChannel.invokeMethod<Map<dynamic, dynamic>>('forceRefreshCalibration');
       if (result != null) {
-        return CalibrationProfile.fromMap(result);
+        _cachedProfile = CalibrationProfile.fromMap(result);
+        return _cachedProfile;
       }
       return null;
     } on PlatformException catch (e) {
@@ -162,5 +320,13 @@ class NativeHardwareBridge {
   static List<double> applyZloCorrectionToSignal(List<double> signal, CalibrationProfile profile) {
     if (profile.zlo <= 0.0) return List<double>.from(signal);
     return signal.map((v) => applyZloCorrectionLocal(v, profile)).toList();
+  }
+
+  static CalibrationProfile? get cachedProfile => _cachedProfile;
+
+  static void dispose() {
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    _cachedProfile = null;
   }
 }
