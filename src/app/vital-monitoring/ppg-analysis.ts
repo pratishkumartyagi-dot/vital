@@ -1152,37 +1152,67 @@ export interface PPGFeatures {
 
 function extractPPGFeatures(ppg: number[], peakIndices: number[], fs: number): PPGFeatures {
   const n = ppg.length;
-  if (n < 30) {
+  if (n < 30 || peakIndices.length < 2) {
     return { pulseWidth: 0, peakTime: 0, decayTime: 0, inflectionDiff: 0, systolicArea: 0, diastolicArea: 0, stiffnessIndex: 0, reflectionIndex: 0 };
   }
 
-  const filtered = butterworthBandpass(detrend(ppg), 0.5, 3.5, fs);
-  const min = Math.min(...filtered);
-  const max = Math.max(...filtered);
-  const range = max - min || 1;
-  const norm = filtered.map(v => (v - min) / range);
+  // For contact PPG (rear camera), use the RAW signal with DC component
+  // to preserve absolute pressure information. The bandpassed signal is
+  // zero-mean and loses the DC baseline needed for BP feature extraction.
+  // Use a lightly detrended version to remove very slow drift only.
+  const lightlyDetrended = detrend(ppg);
+  const signal = lightlyDetrended;
 
-  let peakIdx = peakIndices.length > 0 ? peakIndices[0] : Math.floor(n / 2);
+  // Use the first peak as reference beat for feature extraction
+  let peakIdx = peakIndices[0];
   if (peakIdx >= n) peakIdx = n - 1;
+  if (peakIdx < 0) peakIdx = 0;
 
-  const systolicArea = filtered.slice(0, peakIdx + 1).reduce((a, b) => a + Math.abs(b - min), 0);
-  const diastolicArea = filtered.slice(peakIdx + 1).reduce((a, b) => a + Math.abs(b - min), 0);
-
-  let troughIdx = peakIdx;
-  for (let i = peakIdx + 1; i < Math.min(n, peakIdx + Math.floor(fs / 2)); i++) {
-    if (filtered[i] < filtered[troughIdx]) troughIdx = i;
+  // Find the foot (onset) of the pulse wave - the minimum before the peak
+  // Search backward from peak up to half the RR interval
+  const avgRR = peakIndices.length > 1 ? mean(peakIndices.slice(1).map((p, i) => p - peakIndices[i])) : n / 2;
+  const searchBack = Math.min(peakIdx, Math.floor(avgRR / 2));
+  let footIdx = peakIdx;
+  for (let i = peakIdx; i >= Math.max(0, peakIdx - searchBack); i--) {
+    if (signal[i] < signal[footIdx]) footIdx = i;
   }
 
-  const systolicTime = (peakIdx / fs) * 1000;
-  const diastolicTime = ((n - peakIdx) / fs) * 1000;
-  const stiffnessIndex = systolicTime > 0 ? (max - min) / (systolicTime / 1000) : 0;
-  const reflectionIndex = diastolicTime > 0 && systolicTime > 0 ? diastolicTime / systolicTime : 1;
+  // Find the dicrotic notch / inflection point after the peak
+  // Search forward from peak up to half the RR interval
+  const searchForward = Math.min(n - 1, peakIdx + Math.floor(avgRR / 2));
+  let notchIdx = peakIdx;
+  for (let i = peakIdx + 1; i <= searchForward; i++) {
+    if (signal[i] < signal[notchIdx]) notchIdx = i;
+    // Stop if we start rising again (dicrotic notch passed)
+    if (i > peakIdx + 5 && signal[i] > signal[i - 1] && signal[i - 1] < signal[i - 2]) {
+      notchIdx = i - 1;
+      break;
+    }
+  }
+
+  // Systolic and diastolic areas using DC baseline (foot) as reference
+  const dcBaseline = signal[footIdx];
+  const systolicArea = signal.slice(footIdx, peakIdx + 1).reduce((a, b) => a + (b - dcBaseline), 0);
+  const diastolicArea = signal.slice(peakIdx + 1, Math.min(n, notchIdx + 1)).reduce((a, b) => a + Math.max(0, b - dcBaseline), 0);
+
+  const systolicTime = ((peakIdx - footIdx) / fs) * 1000;  // ms
+  const diastolicTime = ((notchIdx - peakIdx) / fs) * 1000;  // ms
+  const pulseWidth = ((notchIdx - footIdx) / fs) * 1000;  // ms
+
+  // Stiffness index: upstroke slope (max - min) / systolic time
+  // For contact PPG, max-min approximates pulse pressure (systolic - diastolic)
+  const pulseAmplitude = signal[peakIdx] - signal[footIdx];
+  const stiffnessIndex = systolicTime > 0 ? pulseAmplitude / (systolicTime / 1000) : 0;
+
+  // Reflection index: ratio of diastolic to systolic duration
+  // Higher reflection = faster return of reflected wave = shorter diastolic time relative to systolic
+  const reflectionIndex = systolicTime > 0 ? diastolicTime / systolicTime : 1;
 
   return {
-    pulseWidth: n / fs,
-    peakTime: peakIdx / n,
-    decayTime: (n - peakIdx) / n,
-    inflectionDiff: norm[peakIdx] - norm[0],
+    pulseWidth: pulseWidth / 1000,  // seconds
+    peakTime: (peakIdx - footIdx) / n,
+    decayTime: (notchIdx - peakIdx) / n,
+    inflectionDiff: signal[notchIdx] - signal[footIdx],
     systolicArea,
     diastolicArea,
     stiffnessIndex,
