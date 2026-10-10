@@ -46,7 +46,9 @@ class Camera2PpgController(
     private var torchEnabled = true
     private var appliedZlo = 16.0
     
-    private var frameCallback: ((Int, Int, ByteArray) -> Unit)? = null
+    private var tonemapCurveRed: TonemapCurve? = null
+    private var tonemapCurveGreen: TonemapCurve? = null
+    private var tonemapCurveBlue: TonemapCurve? = null
     
     init {
         setupMethodChannel()
@@ -236,13 +238,12 @@ private fun initializeCamera(facing: Int, resolutionPreset: String, result: Resu
             builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, aeCompMin)
         }
         
-        // Tonemap curve (linear)
-        val tonemapCurve = caps["tonemapCurveRed"] as? TonemapCurve
-        if (tonemapCurve != null) {
+        // Tonemap curve (linear) - use stored curves (not in settingsCache for serialization)
+        if (tonemapCurveRed != null && supportsTonemapCurve) {
             builder.set(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE)
-            builder.set(CaptureRequest.TONEMAP_CURVE_RED, tonemapCurve)
-            builder.set(CaptureRequest.TONEMAP_CURVE_GREEN, caps["tonemapCurveGreen"] as TonemapCurve)
-            builder.set(CaptureRequest.TONEMAP_CURVE_BLUE, caps["tonemapCurveBlue"] as TonemapCurve)
+            builder.set(CaptureRequest.TONEMAP_CURVE_RED, tonemapCurveRed!!)
+            builder.set(CaptureRequest.TONEMAP_CURVE_GREEN, tonemapCurveGreen!!)
+            builder.set(CaptureRequest.TONEMAP_CURVE_BLUE, tonemapCurveBlue!!)
         }
         
         // Color correction
@@ -436,6 +437,11 @@ private fun startStreaming(withCallback: Boolean, result: Result) {
         val tonemapCurve = createLinearTonemapCurve()
         val supportsTonemapCurve = characteristics.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) != null
         
+        // Store tonemap curves for internal use (not serialized to Dart)
+        tonemapCurveRed = tonemapCurve
+        tonemapCurveGreen = tonemapCurve
+        tonemapCurveBlue = tonemapCurve
+        
         return mapOf(
             "targetExposureNs" to targetExposureNs,
             "targetIso" to targetIsoVal,
@@ -450,16 +456,13 @@ private fun startStreaming(withCallback: Boolean, result: Result) {
             "aeCompMin" to aeCompMin,
             "aeCompMax" to aeCompMax,
             "tonemapMode" to CaptureRequest.TONEMAP_MODE_CONTRAST_CURVE,
-            "tonemapCurveRed" to tonemapCurve,
-            "tonemapCurveGreen" to tonemapCurve,
-            "tonemapCurveBlue" to tonemapCurve,
             "supportsTonemapCurve" to supportsTonemapCurve,
             "colorCorrectionMode" to CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX,
             "colorCorrectionGainsRed" to 2.0f,
             "colorCorrectionGainsGreenEven" to 1.0f,
             "colorCorrectionGainsGreenOdd" to 1.0f,
             "colorCorrectionGainsBlue" to 2.0f,
-            "colorCorrectionTransform" to intArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 1)
+            "colorCorrectionTransform" to intArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 1).toList()
         )
     }
     

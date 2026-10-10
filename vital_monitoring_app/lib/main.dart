@@ -928,13 +928,15 @@ Future<void> _toggleTorch() async {
                     size: 16,
                   ),
                   const SizedBox(width: 4),
-                  onTap: _toggleTorch,
-                  child: Text(
-                    _torchEnabled ? 'Flash ON' : 'Flash OFF',
-                    style: TextStyle(
-                      color: _torchEnabled ? Colors.amber : Colors.grey,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
+                  GestureDetector(
+                    onTap: _toggleTorch,
+                    child: Text(
+                      _torchEnabled ? 'Flash ON' : 'Flash OFF',
+                      style: TextStyle(
+                        color: _torchEnabled ? Colors.amber : Colors.grey,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
