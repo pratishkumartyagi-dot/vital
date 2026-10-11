@@ -43,7 +43,7 @@ class Camera2PpgController(
     private var currentFacing: Int = CameraCharacteristics.LENS_FACING_BACK
     private var isInitialized = false
     private var isStreaming = false
-    private var torchEnabled = false  // Default off; Dart enables explicitly
+    private var torchEnabled = true  // Default ON for rear PPG - first frames need torch
     private var appliedZlo = 16.0
     
     private var tonemapCurveRed: TonemapCurve? = null

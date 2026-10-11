@@ -59,6 +59,7 @@ static Float64List processYUV420Frame(CameraImage image) {
   /// Under red LED (660nm): R channel dominant, G/B minimal.
   /// Y = 0.299R + 0.587G + 0.114B (BT.601 luma)
   /// With red LED: G ≈ 0.1R, B ≈ 0.05R → Y ≈ 0.364R → R ≈ 2.75Y
+  /// Use 2.2x to avoid saturation at 255 for typical Y=80-150
   static Float64List processYPlane(Uint8List yPlane, int width, int height) {
     int sumY = 0;
     int sampleCount = 0;
@@ -90,11 +91,11 @@ static Float64List processYUV420Frame(CameraImage image) {
     // Under 660nm LED: G ~ 0.1R, B ~ 0.05R (hemoglobin absorption)
     // Y = 0.299R + 0.587(0.1R) + 0.114(0.05R) = 0.36365R
     // R ≈ Y / 0.36365 ≈ 2.75Y
-    // G ≈ 0.1R ≈ 0.275Y
-    // B ≈ 0.05R ≈ 0.1375Y
-    _rgbLumaOutputBuffer[0] = (meanY * 2.75).clamp(0.0, 255.0);   // R
-    _rgbLumaOutputBuffer[1] = (meanY * 0.275).clamp(0.0, 255.0);  // G
-    _rgbLumaOutputBuffer[2] = (meanY * 0.1375).clamp(0.0, 255.0); // B
+    // Using 2.2x to keep R < 250 for typical Y=50-150 range
+    // G ≈ 0.1R ≈ 0.22Y, B ≈ 0.05R ≈ 0.11Y
+    _rgbLumaOutputBuffer[0] = (meanY * 2.2).clamp(0.0, 250.0);   // R (capped at 250)
+    _rgbLumaOutputBuffer[1] = (meanY * 0.22).clamp(0.0, 255.0);  // G
+    _rgbLumaOutputBuffer[2] = (meanY * 0.11).clamp(0.0, 255.0);  // B
     _rgbLumaOutputBuffer[3] = meanY;                              // Y
 
     return _rgbLumaOutputBuffer;

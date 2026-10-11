@@ -199,12 +199,13 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
           },
         );
 
-        // Native Camera2 controller defaults to torch OFF; enable if user setting is on
-        _torchActuallyOn = false;
-        if (_torchEnabled) {
-          await _enableTorch();
-        } else {
-          vitalSignController.setTorchState(false);
+        // Native Camera2 controller now defaults to torch ON for rear camera
+        // Sync our state to match
+        _torchActuallyOn = true;
+        vitalSignController.setTorchState(true);
+        if (!_torchEnabled) {
+          // User had torch disabled - turn it off
+          await _disableTorch();
         }
 
         setState(() {

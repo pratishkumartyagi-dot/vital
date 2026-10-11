@@ -202,11 +202,14 @@ class VitalSignController extends ChangeNotifier {
       _updateFingerDetection(currentRed, currentGreen, currentBlue);
     }
 
-    if (currentRed > 250.0 || currentGreen > 250.0 || currentBlue > 250.0) {
+    // For Camera2 estimated values, R is capped at 250, so use slightly higher threshold
+    final saturationThreshold = 252.0;
+    if (currentRed > saturationThreshold || currentGreen > saturationThreshold || currentBlue > saturationThreshold) {
       _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
       return;
     }
-    if (currentRed < 15.0 && currentGreen < 15.0 && currentBlue < 15.0) {
+    // For Camera2, estimated G can be low (~20-50), so check only R and B for "no signal"
+    if (currentRed < 10.0 && currentBlue < 10.0) {
       _toastPrompt = "No signal detected. Cover the lens and flash completely.";
       return;
     }
@@ -227,12 +230,16 @@ class VitalSignController extends ChangeNotifier {
       _liveBlueBuffer.removeAt(0);
     }
 
-    NativeHardwareBridge.processPpgSample(currentGreen).then((nativeBpm) {
-      if (nativeBpm != null && nativeBpm > 0) {
-        _heartRate = nativeBpm;
-        notifyListeners();
-      }
-    });
+    // Only use native processor for front camera (CameraController path)
+    // For rear Camera2, we do full analysis in Dart
+    if (_cameraMode == CameraMode.front) {
+      NativeHardwareBridge.processPpgSample(currentGreen).then((nativeBpm) {
+        if (nativeBpm != null && nativeBpm > 0) {
+          _heartRate = nativeBpm;
+          notifyListeners();
+        }
+      });
+    }
 
     if (_cameraMode == CameraMode.rear) {
       _processRearCameraPPG();
