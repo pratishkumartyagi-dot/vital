@@ -66,7 +66,7 @@ export default function VitalMonitoringPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const [permission, setPermission] = useState<string>("unknown");
   const [cameraMode, setCameraMode] = useState<"front" | "rear">("front");
-  const [torchOn, setTorchOn] = useState(false);
+  const [torchOn, setTorchOn] = useState(cameraMode === "rear");
   const [demoMode, setDemoMode] = useState(false);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
@@ -461,8 +461,13 @@ export default function VitalMonitoringPage() {
     }
     lastFrameTimeRef.current = now;
 
+    // Finger detection for rear camera:
+    // A finger on the lens attenuates torch light (moderate brightness, avgR < 200)
+    // and is red-dominant (hemoglobin absorbs green/blue more than red).
+    // Without a finger: torch light is at max brightness (avgR > 200) → not a finger.
+    // With a finger: light is attenuated (avgR in [30, 200]) and red-dominant.
     const isFingerFrame = cameraMode === "rear"
-      ? (avgR > 90 && avgR < 245 && avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8)
+      ? (avgR > 30 && avgR < 200 && avgR > avgG + 5 && avgR > avgB + 5)
       : true;
     if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
 
