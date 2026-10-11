@@ -55,8 +55,10 @@ static Float64List processYUV420Frame(CameraImage image) {
   }
 
   /// Process a Y-plane from native Camera2 (Android) API.
-  /// Estimates RGB from luminance using typical skin-tone channel ratios
-  /// since Camera2 YUV_420_888 only provides the Y plane via ImageReader.
+  /// Estimates RGB from luminance using physics-based ratios for red LED illumination.
+  /// Under red LED (660nm): R channel dominant, G/B minimal.
+  /// Y = 0.299R + 0.587G + 0.114B (BT.601 luma)
+  /// With red LED: G ≈ 0.1R, B ≈ 0.05R → Y ≈ 0.364R → R ≈ 2.75Y
   static Float64List processYPlane(Uint8List yPlane, int width, int height) {
     int sumY = 0;
     int sampleCount = 0;
@@ -83,13 +85,16 @@ static Float64List processYUV420Frame(CameraImage image) {
 
     final double meanY = sumY / sampleCount;
 
-    // Estimate R, G, B from Y using typical PPG skin-tone ratios
-    // Under red LED illumination: R is dominant, G moderate, B low
-    // Y = 0.299R + 0.587G + 0.114B (BT.601 luma)
-    // For red-dominant PPG: R ≈ 1.3*Y, G ≈ 0.85*Y, B ≈ 0.4*Y
-    _rgbLumaOutputBuffer[0] = (meanY * 1.3).clamp(0.0, 255.0);   // R
-    _rgbLumaOutputBuffer[1] = (meanY * 0.85).clamp(0.0, 255.0);  // G
-    _rgbLumaOutputBuffer[2] = (meanY * 0.4).clamp(0.0, 255.0);   // B
+    // Physics-based estimation for red LED transillumination PPG:
+    // Y = 0.299R + 0.587G + 0.114B
+    // Under 660nm LED: G ~ 0.1R, B ~ 0.05R (hemoglobin absorption)
+    // Y = 0.299R + 0.587(0.1R) + 0.114(0.05R) = 0.36365R
+    // R ≈ Y / 0.36365 ≈ 2.75Y
+    // G ≈ 0.1R ≈ 0.275Y
+    // B ≈ 0.05R ≈ 0.1375Y
+    _rgbLumaOutputBuffer[0] = (meanY * 2.75).clamp(0.0, 255.0);   // R
+    _rgbLumaOutputBuffer[1] = (meanY * 0.275).clamp(0.0, 255.0);  // G
+    _rgbLumaOutputBuffer[2] = (meanY * 0.1375).clamp(0.0, 255.0); // B
     _rgbLumaOutputBuffer[3] = meanY;                              // Y
 
     return _rgbLumaOutputBuffer;

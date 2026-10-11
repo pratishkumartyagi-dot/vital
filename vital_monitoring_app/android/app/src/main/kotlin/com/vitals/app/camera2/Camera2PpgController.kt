@@ -43,7 +43,7 @@ class Camera2PpgController(
     private var currentFacing: Int = CameraCharacteristics.LENS_FACING_BACK
     private var isInitialized = false
     private var isStreaming = false
-    private var torchEnabled = true
+    private var torchEnabled = false  // Default off; Dart enables explicitly
     private var appliedZlo = 16.0
     
     private var tonemapCurveRed: TonemapCurve? = null
@@ -293,9 +293,18 @@ private fun startStreaming(withCallback: Boolean, result: Result) {
                     val buffer = yPlane.buffer
                     val width = image.width
                     val height = image.height
-                    val bytes = ByteArray(buffer.remaining())
-                    buffer.get(bytes)
-                    frameCallback?.invoke(width, height, bytes)
+                    val rowStride = yPlane.bytesPerRow
+                    val pixelStride = yPlane.bytesPerPixel ?: 1
+                    
+                    // Copy only valid pixels (strip row stride padding)
+                    val packedY = ByteArray(width * height)
+                    for (y in 0 until height) {
+                        val srcOffset = y * rowStride
+                        val dstOffset = y * width
+                        val length = minOf(width * pixelStride, rowStride - srcOffset)
+                        buffer.get(dstOffset, packedY, dstOffset, length)
+                    }
+                    frameCallback?.invoke(width, height, packedY)
                 }
             }, backgroundHandler)
         }

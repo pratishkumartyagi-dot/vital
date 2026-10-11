@@ -7,7 +7,7 @@ import kotlin.math.PI
 
 class PpgSignalProcessor(
     private val sampleRateHz: Double = 30.0,
-    private val windowSizeSeconds: Int = 10,
+    private val windowSizeSeconds: Int = 5,  // Reduced from 10s to 5s for faster response
     private val zlo: Double = 0.0
 ) {
     private val maxBufferSize = (sampleRateHz * windowSizeSeconds).toInt()
@@ -142,7 +142,8 @@ class PpgSignalProcessor(
         val mean = signal.average()
         val variance = signal.map { (it - mean) * (it - mean) }.sum() / signal.size
         val stdDev = sqrt(variance)
-        val threshold = 0.5 * stdDev
+        // Use adaptive threshold: 0.8 * stdDev to avoid noise peaks
+        val threshold = 0.8 * stdDev
 
         for (i in 1 until signal.size - 1) {
             if (signal[i] > signal[i - 1] && signal[i] > signal[i + 1]) {
@@ -154,16 +155,28 @@ class PpgSignalProcessor(
 
         if (peaks.size < 3) return null
 
-        var totalIntervalFrames = 0
-        for (k in 0 until peaks.size - 1) {
-            totalIntervalFrames += (peaks[k + 1] - peaks[k])
+        // Filter peaks by minimum distance (refractory period ~300ms)
+        val minDistFrames = (0.3 * sampleRateHz).toInt()
+        val validPeaks = ArrayList<Int>()
+        for (p in peaks) {
+            if (validPeaks.isEmpty() || p - validPeaks.last() >= minDistFrames) {
+                validPeaks.add(p)
+            }
         }
 
-        val averageIntervalFrames = totalIntervalFrames.toDouble() / (peaks.size - 1)
+        if (validPeaks.size < 3) return null
+
+        var totalIntervalFrames = 0
+        for (k in 0 until validPeaks.size - 1) {
+            totalIntervalFrames += (validPeaks[k + 1] - validPeaks[k])
+        }
+
+        val averageIntervalFrames = totalIntervalFrames.toDouble() / (validPeaks.size - 1)
         val averageIntervalSeconds = averageIntervalFrames / sampleRateHz
         val bpm = 60.0 / averageIntervalSeconds
 
-        return if (bpm in 45.0..180.0) bpm else null
+        // Stricter physiological range
+        return if (bpm in 50.0..160.0) bpm else null
     }
 
     companion object {

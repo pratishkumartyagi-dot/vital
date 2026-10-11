@@ -641,10 +641,10 @@ function computeSignalQuality(
   //    gate's own zero crossing of 10, so a perfectly clean pulse scored
   //    pulseGate 0 and SQI 0. Narrowband prominence is the physically
   //    meaningful test and has no such degenerate branch.
-  //    Lower threshold: prominence >= 2 gives 0, >= 14 gives 1 (was 4->16).
+  //    Lower threshold: prominence >= 1.5 gives 0, >= 8 gives 1.
   //    This allows clean signals with moderate prominence to reach full score.
   const prominence = cardiacSpectralProminence(raw, fs);
-  const pulseGate = clamp01((prominence - 2) / 12);
+  const pulseGate = clamp01((prominence - 1.5) / 6.5);
 
   // Weighted average, still scaled down multiplicatively when no credible pulse
   // is present so that structured artifacts cannot report a healthy score.
@@ -974,7 +974,7 @@ export function analyzeHeartRate(
     const { snr } = spectralSnr(signal, fs);
     const snrScore = snr > 0 ? clamp01((Math.log10(snr) + 0.3) / 1.2) : 0;
     const prominence = cardiacSpectralProminence(signal, fs);
-    const pulseGate = clamp01((prominence - 4) / 12);
+    const pulseGate = clamp01((prominence - 1.5) / 6.5);
     const baseQuality = 0.4 * snrScore + 0.35 * piScore + 0.25 * 0; // no regularity without peaks
     return Math.round(clamp01(baseQuality * pulseGate) * 100);
   };

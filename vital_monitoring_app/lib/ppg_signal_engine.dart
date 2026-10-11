@@ -371,8 +371,11 @@ class PPGSignalEngine {
     final filtered = applyBandpassFilterCustom(detrend(trimmed), cardiacLo, cardiacHi, fs, true);
     final quality = computeSignalQuality(filtered, trimmed, valid, fs, dcRef ?? dcLevel(ppg));
 
+    // Reject HR if signal quality too low (prevents false 40bpm from noise)
+    final bpmValid = quality >= 30.0 && bpm > 40 && bpm < 200;
+
     return HeartMetrics(
-      bpm: bpm > 30 && bpm < 220 ? bpm : null,
+      bpm: bpmValid ? bpm : null,
       peaks: valid.map((p) => p.index).toList(),
       rrIntervals: rrMs,
       hrv: hrv,
@@ -403,8 +406,9 @@ class PPGSignalEngine {
     final regScore = cv < 10 ? 1.0 : math.max(0.0, 1.0 - (cv - 10) / 30).toDouble();
 
     final prominence = cardiacSpectralProminence(raw, fs);
-    // Lower threshold: prominence >= 2 gives 0, >= 14 gives 1 (was 4->16)
-    final pulseGate = clamp01((prominence - 2) / 12);
+    // Lower threshold: prominence >= 1.5 gives 0, >= 8 gives 1 (was 2->14)
+    // This allows more signals to pass the pulse gate
+    final pulseGate = clamp01((prominence - 1.5) / 6.5);
 
     final base = 0.4 * snrScore + 0.35 * piScore + 0.25 * regScore;
     return (clamp01(base * pulseGate) * 100).roundToDouble();

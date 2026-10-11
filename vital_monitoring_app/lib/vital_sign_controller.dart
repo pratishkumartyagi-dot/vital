@@ -250,32 +250,32 @@ class VitalSignController extends ChangeNotifier {
       _ppgHistory.removeAt(0);
     }
 
-    // Static checks
+    // Static checks - relaxed for Camera2 Y-plane estimation
     final torchActive = _torchActive;
-    final redBright = r > 80 && r < 245;
-    final redDominant = r > g + 15 && r > b + 15 && r / math.max(g, 1) > 1.05;
+    final redBright = r > 40 && r < 250;  // Was >80, now >40 for estimated values
+    final redDominant = r > g + 8 && r > b + 8 && r / math.max(g, 1) > 1.15;  // Was >15, >1.05
     final notSaturated = r < 250 && g < 250 && b < 250;
     final dcLevel = (r + g + b) / 3;
-    final dcInRange = dcLevel > 50 && dcLevel < 220;
+    final dcInRange = dcLevel > 30 && dcLevel < 230;  // Was >50, <220
 
     // Uniformity check (simplified - would need full frame for true variance)
     // For now, use perfusion index as proxy for signal quality
     bool hasPpgPulsation = false;
-    if (_ppgHistory.length >= 60) {
-      final recent = _ppgHistory.sublist(_ppgHistory.length - 60);
+    if (_ppgHistory.length >= 30) {  // Was 60 (2s), now 30 (1s) for faster detection
+      final recent = _ppgHistory.sublist(_ppgHistory.length - 30);
       final mean = recent.reduce((a, b) => a + b) / recent.length;
       double autocorr = 0;
       double variance = 0;
       for (int i = 0; i < recent.length; i++) {
         final diff = recent[i] - mean;
         variance += diff * diff;
-        if (i >= 30) {
-          autocorr += diff * (recent[i - 30] - mean);
+        if (i >= 15) {  // Was 30 (1s lag), now 15 (0.5s lag)
+          autocorr += diff * (recent[i - 15] - mean);
         }
       }
       variance /= recent.length;
       autocorr /= recent.length;
-      hasPpgPulsation = variance > 0.5 && autocorr / variance > 0.3;
+      hasPpgPulsation = variance > 0.3 && autocorr / variance > 0.25;  // Was 0.5, 0.3
     }
 
     // Finger detected only if ALL conditions met
