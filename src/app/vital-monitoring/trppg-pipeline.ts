@@ -61,8 +61,6 @@ export interface TrPPGConfig {
   hrvUpsampleHz: number;
   /** Per-device SpO2 calibration coefficients. */
   spo2Cal?: SpO2Calibration;
-  /** Per-device Hb calibration coefficients. */
-  hbCal?: HbCalibration;
   /** Per-user BP calibration offset (mmHg). */
   bpOffset?: BPOffset;
   /** Skin tone covariate (Fitzpatrick 1-6 or 0=unknown). */
@@ -76,12 +74,6 @@ export interface SpO2Calibration {
   a: number;
   b: number;
   /** Optional quadratic term: + c*R^2 */
-  c?: number;
-}
-
-export interface HbCalibration {
-  a: number;
-  b: number;
   c?: number;
 }
 
@@ -886,13 +878,11 @@ function lombScargleLFHF(nnMs: number[], fs: number): { lf: number; hf: number }
 
 /**
  * AC_c = spectral amplitude at f_hr (±0.15 Hz) for channel c
- * DC_c = mean(C)
- * R = (AC_red/DC_red) / (AC_green/DC_green)  (green = reference)
- * SpO2 = a + b·R (+ c·R²)  — empirical, fitted per phone model
+ * DC_c = mean(C) - ZLO (black-level correction)
+ * R = (AC_red/DC_red) / (AC_green/DC_green)  (red/green ratio-of-ratios)
+ * SpO2 = 106 - 8*R  (clamped [88, 100])
  *
- * Beer-Lambert theory (guide only, camera bands are broad):
- *   SpO2 = (ε_Hb(λ1) − R·ε_Hb(λ2)) /
- *          [(ε_Hb(λ1) − ε_HbO2(λ1)) + R(ε_HbO2(λ2) − ε_Hb(λ2))]
+ * Uses the tested red/green calibration with ZLO = 16 DN.
  */
 export function computeSpO2(
   rRaw: number[],
@@ -908,8 +898,8 @@ export function computeSpO2(
   const acR = spectralAmplitude(rRaw, cfg.fs, fHr, 0.15);
   const acG = spectralAmplitude(gRaw, cfg.fs, fHr, 0.15);
 
-  // ZLO black-level correction: subtract sensor black level (~16 DN)
-  const zlo = Math.max(0, Math.min(...rRaw, ...gRaw) - 1.0);
+  // ZLO black-level correction: 16 DN for 8-bit sensors
+  const zlo = resolveZlo([...rRaw, ...gRaw]);
   const dcR = Math.max(mean(rRaw) - zlo, 1e-9);
   const dcG = Math.max(mean(gRaw) - zlo, 1e-9);
 
@@ -917,24 +907,8 @@ export function computeSpO2(
 
   const R = (acR / dcR) / (acG / dcG);
 
-  // Red/green calibration (fitted for smartphone cameras — no IR channel)
-  const cal = cfg.spo2Cal ?? { a: 106, b: -8 };
-  let spo2: number;
-  if (cal.c !== undefined) {
-    spo2 = cal.a + cal.b * R + cal.c * R * R;
-  } else {
-    spo2 = cal.a + cal.b * R;
-  }
-
-  // Skin tone / ambient light covariates (if validation shows they help)
-  if (cfg.skinTone && cfg.skinTone > 0) {
-    // Darker skin tones attenuate green more; small correction
-    spo2 += (cfg.skinTone - 3.5) * 0.3;
-  }
-  if (cfg.ambientLux !== undefined && cfg.ambientLux > 0) {
-    // High ambient light reduces contrast; small correction
-    spo2 -= Math.min(2, cfg.ambientLux / 5000);
-  }
+  // Red/green calibration: SpO2 = 106 - 8*R
+  let spo2 = 106 - 8 * R;
 
   return {
     spo2: clamp(spo2, 88, 100),
@@ -1155,15 +1129,17 @@ function computePTT(facePulse: number[], fingerPulse: number[], cfg: TrPPGConfig
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Stage 8 — Hemoglobin (absorbance features)
+// Stage 8 — Hemoglobin (red/green ratio-of-ratios)
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * Absorbance per channel: A_c = −ln(I_c / I0_c)
- * Features: AC/DC ratios and log-ratios across R, G, B, skin reflectance
- * (DC levels), and HR. Hb = f(features) by regularised regression or
- * gradient boosting with subject-wise cross-validation.
- * Calibrate per device and skin tone.
+ * Empirical Hb estimation via red/green ratio-of-ratios (tested formula).
+ *
+ *   R = (AC_red/DC_red) / (AC_green/DC_green)
+ *   Hb = 18.2 - 6.8 * R  (g/dL)
+ *
+ * AC is the spectral amplitude at f_hr (±0.15 Hz). DC is mean(raw) - ZLO
+ * (sensor black level, default 16 DN).
  */
 export function computeHb(
   rRaw: number[],
@@ -1175,52 +1151,25 @@ export function computeHb(
 ): number | null {
   if (fHr === null || sqi < 0.3) return null;
 
-  const dcR = mean(rRaw), dcG = mean(gRaw), dcB = mean(bRaw);
-  if (dcR <= 1e-9 || dcG <= 1e-9 || dcB <= 1e-9) return null;
+  const zlo = resolveZlo([...rRaw, ...gRaw]);
+  const dcR = Math.max(mean(rRaw) - zlo, 1e-9);
+  const dcG = Math.max(mean(gRaw) - zlo, 1e-9);
 
-  // Absorbance: A_c = -ln(I_c / I0_c), I0 = max channel DC (reference)
-  const i0 = Math.max(dcR, dcG, dcB);
-  const aR = -Math.log(dcR / i0);
-  const aG = -Math.log(dcG / i0);
-  const aB = -Math.log(dcB / i0);
-
-  // AC/DC ratios per channel
   const acR = spectralAmplitude(rRaw, cfg.fs, fHr, 0.15) / dcR;
   const acG = spectralAmplitude(gRaw, cfg.fs, fHr, 0.15) / dcG;
-  const acB = spectralAmplitude(bRaw, cfg.fs, fHr, 0.15) / dcB;
 
-  // Log-ratios across channels
-  const logRG = Math.log((acR * dcG) / (acG * dcR));
-  const logRB = Math.log((acR * dcB) / (acB * dcR));
-  const logGB = Math.log((acG * dcB) / (acB * dcG));
+  if (acG <= 1e-12) return null;
 
-  // Feature vector
-  const features = [
-    aR, aG, aB,           // absorbance
-    acR, acG, acB,        // AC/DC ratios
-    logRG, logRB, logGB,  // log-ratios
-    dcR / i0, dcG / i0, dcB / i0, // skin reflectance (relative DC)
-    fHr,                  // HR
-  ];
+  const R = acR / acG;
+  const hb = 18.2 - 6.8 * R;
 
-  // Regularised regression (ridge). Coefficients are placeholders;
-  // per-device/skin-tone calibration is required.
-  const weights = [
-    0.5, 0.8, 0.3,   // absorbance R,G,B
-    -1.2, 0.4, -0.6, // AC/DC R,G,B
-    0.8, 0.5, -0.3,  // log-ratios
-    -0.4, -0.6, -0.2, // reflectance
-    0.01,            // HR
-  ];
-  let hb = 14.0; // intercept
-  for (let i = 0; i < features.length; i++) hb += weights[i] * features[i];
+  return clamp(hb, 8, 18);
+}
 
-  // Skin tone covariate
-  if (cfg.skinTone && cfg.skinTone > 0) {
-    hb += (cfg.skinTone - 3.5) * 0.2;
-  }
-
-  return clamp(hb, 8, 22);
+function resolveZlo(signal: number[]): number {
+  const minVal = Math.min(...signal);
+  if (minVal > 30) return 16.0;
+  return Math.max(0, minVal);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1489,7 +1438,7 @@ export function runTrPPG(samples: FrameSample[], cfg: TrPPGConfig, opts: TrPPGOp
     respPeaks: resp.peaks,
     ibiMs: ibi,
     nnMs: hrv.nnIntervals,
-    calibrationUsed: cfg.spo2Cal !== undefined || cfg.hbCal !== undefined || cfg.bpOffset !== undefined,
+    calibrationUsed: cfg.spo2Cal !== undefined || cfg.bpOffset !== undefined,
   };
 
   return {

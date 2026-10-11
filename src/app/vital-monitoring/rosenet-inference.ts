@@ -15,6 +15,7 @@
  *   2. Fine-tune on camera-based rPPG video STMaps (target domain)
  */
 import * as tf from "@tensorflow/tfjs";
+import { butterworthBandpass } from "./ppg-analysis";
 
 export interface ROSENetConfig {
   inputLength: number;
@@ -335,23 +336,26 @@ export class ROSENetInference {
 /**
  * Empirical SpO2 estimation via AC/DC ratio-of-ratios (red/green proxy).
  *
- * Smartphone cameras lack an IR channel at 940 nm, so the accepted proxy
- * is the red/green ratio-of-ratios:
+ * Smartphone cameras lack an IR channel at 940 nm. Green (550 nm) is
+ * absorbed more strongly by hemoglobin than red (660 nm), making the
+ * red/green ratio a suitable proxy for the red/IR ratio-of-ratios used
+ * in clinical pulse oximetry.
+ *
  *   R = (AC_red / DC_red) / (AC_green / DC_green)
+ *   SpO2 = 106 - 8 * R  (clamped [88, 100])
  *
- * The textbook `110 - 25·R` formula is calibrated for red/IR (R ≈ 0.4-0.8).
- * For red/green (R ≈ 0.6-1.8), the correct empirical calibration is:
- *   SpO2 = 106 - 8·R  (clamped [88, 100])
- *
- * ZLO (Zero Light Output) correction: the smartphone sensor black level
- * (~16 DN) is subtracted from each channel's DC before computing AC/DC,
- * preventing the black-level offset from biasing the ratio.
+ * AC is the mean absolute deviation of the bandpass-filtered (0.5-3.5 Hz)
+ * signal from its mean — the time-domain cardiac pulsatility amplitude.
+ * DC is the channel mean minus the sensor ZLO black level (default 16 DN,
+ * the typical 8-bit camera black level). ZLO can be resolved per-signal
+ * via `resolveZlo(signal)`.
  */
 const ZLO = 16.0;
 
 export function resolveZlo(signal: number[]): number {
   const minVal = Math.min(...signal);
-  return Math.max(0, minVal - 1.0);
+  if (minVal > 30) return 16.0; // well-above-black-level: use default
+  return Math.max(0, minVal);
 }
 
 export function channelAcDcWithZlo(
@@ -363,7 +367,7 @@ export function channelAcDcWithZlo(
   let ac = 0;
   const filtMean = mean(filtered);
   for (const v of filtered) ac += Math.abs(v - filtMean);
-  ac = ac / filtered.length;
+  ac = ac / Math.max(filtered.length, 1);
   return { ac, dc };
 }
 
@@ -373,18 +377,29 @@ export function computeEmpiricalSpO2(
   bRaw: number[],
   hr: number | null,
   sqi: number,
-  spo2Offset: number = 0,
+  fs: number = 30,
 ): SpO2Result {
   if (hr === null || hr <= 0) {
     return { spo2: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
   }
 
-  const fs = 30;
-  const acR = spectralAmplitude(rRaw, fs, hr / 60, 0.15);
-  const acG = spectralAmplitude(gRaw, fs, hr / 60, 0.15);
+  // Time-domain AC/DC: bandpass-filter at cardiac frequencies (0.5-3.5 Hz)
+  const redFiltered = butterworthBandpass(rRaw, 0.5, 3.5, fs);
+  const greenFiltered = butterworthBandpass(gRaw, 0.5, 3.5, fs);
+
+  // ZLO black-level correction
   const zlo = resolveZlo([...rRaw, ...gRaw]);
   const dcR = Math.max(mean(rRaw) - zlo, 1e-9);
   const dcG = Math.max(mean(gRaw) - zlo, 1e-9);
+  const filtMeanR = mean(redFiltered);
+  const filtMeanG = mean(greenFiltered);
+  let acR = 0, acG = 0;
+  for (let i = 0; i < redFiltered.length; i++) {
+    acR += Math.abs(redFiltered[i] - filtMeanR);
+    acG += Math.abs(greenFiltered[i] - filtMeanG);
+  }
+  acR /= Math.max(redFiltered.length, 1);
+  acG /= Math.max(greenFiltered.length, 1);
 
   if (dcR <= 1e-9 || dcG <= 1e-9 || acG <= 1e-12) {
     return { spo2: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
@@ -392,14 +407,9 @@ export function computeEmpiricalSpO2(
 
   const rRatio = (acR / dcR) / (acG / dcG);
 
-  // Red/green calibration: SpO2 = 106 - 8*R (valid for R ≈ 0.6-1.8)
-  let spo2 = 106 - 8 * rRatio + spo2Offset;
+  // Red/green calibration: SpO2 = 106 - 8*R
+  let spo2 = 106 - 8 * rRatio;
 
-  // Skin tone correction (Fitzpatrick 1-6, default 3.5)
-  spo2 += (3.5 - 3.5) * 0.3; // 0 by default
-
-  // Ambient light correction (if available)
-  // High ambient light reduces contrast
   if (sqi < 0.3) {
     return { spo2: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
   }

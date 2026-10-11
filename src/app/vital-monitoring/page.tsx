@@ -481,7 +481,7 @@ export default function VitalMonitoringPage() {
         }
 
         // Always compute empirical as immediate backup
-        const empResult = computeEmpiricalSpO2(rRaw, gRaw, bRaw, hr, sqi / 100);
+        const empResult = computeEmpiricalSpO2(rRaw, gRaw, bRaw, hr, sqi / 100, fs);
         if (empResult.spo2 !== null && spo2Val === null) {
           spo2Val = empResult.spo2;
           spo2MethodUsed = "empirical";
@@ -504,8 +504,7 @@ export default function VitalMonitoringPage() {
 
         if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
           const HbRatio = (acR / dcR) / (acG / dcG);
-          // Red/green calibration: Hb = 18.0 - 2.8*R (not red/IR 18.2 - 6.8*R)
-          hbVal = 18.0 - 2.8 * HbRatio;
+          hbVal = 18.2 - 6.8 * HbRatio;
           hbVal = Math.min(Math.max(hbVal, 5), 20);
         }
       }

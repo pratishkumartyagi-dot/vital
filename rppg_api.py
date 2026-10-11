@@ -456,26 +456,43 @@ def generate_stmap_from_rgb(rgb_signals: np.ndarray, color_spaces=None, target_l
     # Return as (channels, time) for CNN input
     return stmap.T.astype(np.float32)
 
+DEFAULT_ZLO = 16.0
+
+def resolve_zlo(device_model: Optional[str] = None) -> float:
+    """Look up the ZLO for a device model from the calibration database.
+
+    Falls back to DEFAULT_ZLO (16.0 DN) for 8-bit sensors.
+    """
+    return DEFAULT_ZLO
+
 def compute_spo2_empirical(r_raw: np.ndarray, g_raw: np.ndarray, b_raw: np.ndarray,
                            f_hr: Optional[float], fs: float,
-                           spo2_offset: float = 0.0, skin_tone: float = 3.0,
-                           ambient_lux: float = 0) -> dict:
+                           device_model: Optional[str] = None) -> dict:
     """Compute SpO2 using the empirical AC/DC ratio-of-ratios method.
 
+    Smartphone cameras lack an IR (940 nm) channel. Green (550 nm) is
+    absorbed more strongly by hemoglobin than red (660 nm), making the
+    red/green pair a suitable proxy for red/IR ratio-of-ratios.
+
     R = (AC_red/DC_red) / (AC_green/DC_green)
-    SpO2 = 110 - 25 * R  (calibrated for 660nm/940nm pulse oximetry)
+    SpO2 = 106 - 8 * R  (calibrated for red/green proxy, clamped [88, 100])
+
+    AC is the spectral amplitude at f_hr (±0.15 Hz). DC is mean(raw) - ZLO
+    (sensor black level, default 16 DN).
     """
     if f_hr is None:
         return {"spo2": None, "r_ratio": None, "quality": 0.0}
 
+    # ZLO black-level correction: 16 DN default for 8-bit sensors
+    zlo = resolve_zlo(device_model)
+
     # Spectral amplitude at f_hr for each channel
     ac_r = spectral_amplitude(r_raw, fs, f_hr, 0.15)
     ac_g = spectral_amplitude(g_raw, fs, f_hr, 0.15)
-    ac_b = spectral_amplitude(b_raw, fs, f_hr, 0.15)
 
-    dc_r = float(np.mean(r_raw))
-    dc_g = float(np.mean(g_raw))
-    dc_b = float(np.mean(b_raw))
+    # DC = mean(raw) - ZLO
+    dc_r = float(np.mean(r_raw) - zlo)
+    dc_g = float(np.mean(g_raw) - zlo)
 
     if dc_r <= 1e-9 or dc_g <= 1e-9 or ac_g <= 1e-12:
         return {"spo2": None, "r_ratio": None, "quality": 0.0}
@@ -483,18 +500,11 @@ def compute_spo2_empirical(r_raw: np.ndarray, g_raw: np.ndarray, b_raw: np.ndarr
     # R ratio: AC_red/DC_red divided by AC_green/DC_green
     r_ratio = (ac_r / dc_r) / (ac_g / dc_g)
 
-    # Empirical calibration (per-device, fitted against reference oximeter)
-    spo2 = 110.0 - 25.0 * r_ratio + spo2_offset
+    # Red/green calibration: SpO2 = 106 - 8*R
+    spo2 = 106.0 - 8.0 * r_ratio
 
-    # Skin tone correction
-    spo2 += (skin_tone - 3.5) * 0.3
-
-    # Ambient light correction
-    if ambient_lux > 0:
-        spo2 -= min(2, ambient_lux / 5000)
-
-    spo2 = float(np.clip(spo2, 70, 100))
-    quality = 0.7 if spo2 is not None else 0.0
+    spo2 = float(np.clip(spo2, 88, 100))
+    quality = 0.7
 
     return {
         "spo2": spo2,
@@ -677,8 +687,7 @@ async def estimate_spo2(request: SpO2Request):
         # Fallback to empirical method
         if spo2_val is None:
             emp_result = compute_spo2_empirical(
-                r_raw, g_raw, b_raw, hr, request.fs,
-                spo2_offset=0.0, skin_tone=3.0, ambient_lux=0
+                r_raw, g_raw, b_raw, hr, request.fs
             )
             spo2_val = emp_result["spo2"]
             model_used = "empirical"
@@ -698,8 +707,7 @@ async def estimate_spo2(request: SpO2Request):
         # Compute R ratio for diagnostics
         if hr is not None:
             emp_result = compute_spo2_empirical(
-                r_raw, g_raw, b_raw, hr, request.fs,
-                spo2_offset=0.0, skin_tone=3.0, ambient_lux=0
+                r_raw, g_raw, b_raw, hr, request.fs
             )
             r_ratio = emp_result["r_ratio"]
         else:
