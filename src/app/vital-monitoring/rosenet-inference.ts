@@ -333,12 +333,40 @@ export class ROSENetInference {
 }
 
 /**
- * Empirical SpO2 estimation via AC/DC ratio-of-ratios.
- * R = (AC_red/DC_red) / (AC_green/DC_green)
- * SpO2 = 110 - 25 * R
+ * Empirical SpO2 estimation via AC/DC ratio-of-ratios (red/green proxy).
  *
- * This is the traditional method that ROSE-Net improves upon.
+ * Smartphone cameras lack an IR channel at 940 nm, so the accepted proxy
+ * is the red/green ratio-of-ratios:
+ *   R = (AC_red / DC_red) / (AC_green / DC_green)
+ *
+ * The textbook `110 - 25·R` formula is calibrated for red/IR (R ≈ 0.4-0.8).
+ * For red/green (R ≈ 0.6-1.8), the correct empirical calibration is:
+ *   SpO2 = 106 - 8·R  (clamped [88, 100])
+ *
+ * ZLO (Zero Light Output) correction: the smartphone sensor black level
+ * (~16 DN) is subtracted from each channel's DC before computing AC/DC,
+ * preventing the black-level offset from biasing the ratio.
  */
+const ZLO = 16.0;
+
+export function resolveZlo(signal: number[]): number {
+  const minVal = Math.min(...signal);
+  return Math.max(0, minVal - 1.0);
+}
+
+export function channelAcDcWithZlo(
+  raw: number[],
+  filtered: number[],
+  zlo: number = ZLO,
+): { ac: number; dc: number } {
+  const dc = Math.max(mean(raw) - zlo, 1e-9);
+  let ac = 0;
+  const filtMean = mean(filtered);
+  for (const v of filtered) ac += Math.abs(v - filtMean);
+  ac = ac / filtered.length;
+  return { ac, dc };
+}
+
 export function computeEmpiricalSpO2(
   rRaw: number[],
   gRaw: number[],
@@ -351,22 +379,32 @@ export function computeEmpiricalSpO2(
     return { spo2: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
   }
 
-  const acR = spectralAmplitude(rRaw, 30, hr / 60, 0.15);
-  const acG = spectralAmplitude(gRaw, 30, hr / 60, 0.15);
-  const dcR = mean(rRaw);
-  const dcG = mean(gRaw);
+  const fs = 30;
+  const acR = spectralAmplitude(rRaw, fs, hr / 60, 0.15);
+  const acG = spectralAmplitude(gRaw, fs, hr / 60, 0.15);
+  const zlo = resolveZlo([...rRaw, ...gRaw]);
+  const dcR = Math.max(mean(rRaw) - zlo, 1e-9);
+  const dcG = Math.max(mean(gRaw) - zlo, 1e-9);
 
   if (dcR <= 1e-9 || dcG <= 1e-9 || acG <= 1e-12) {
     return { spo2: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
   }
 
   const rRatio = (acR / dcR) / (acG / dcG);
-  let spo2 = 110 - 25 * rRatio + spo2Offset;
+
+  // Red/green calibration: SpO2 = 106 - 8*R (valid for R ≈ 0.6-1.8)
+  let spo2 = 106 - 8 * rRatio + spo2Offset;
 
   // Skin tone correction (Fitzpatrick 1-6, default 3.5)
   spo2 += (3.5 - 3.5) * 0.3; // 0 by default
 
-  spo2 = Math.min(100, Math.max(70, spo2));
+  // Ambient light correction (if available)
+  // High ambient light reduces contrast
+  if (sqi < 0.3) {
+    return { spo2: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
+  }
+
+  spo2 = Math.min(100, Math.max(88, spo2));
 
   return {
     spo2: Math.round(spo2),

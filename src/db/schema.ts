@@ -31,7 +31,6 @@ export const vitalReadings = sqliteTable("vital_readings", {
   // Camera mode and metadata
   cameraMode: text("camera_mode", { enum: ["front", "rear"] }).notNull(),
   demoMode: integer("demo_mode", { mode: "boolean" }).notNull().default(false),
-  spo2Offset: integer("spo2_offset").notNull().default(0),
 
   // Video data
   videoData: blob("video_data", { mode: "buffer" }),

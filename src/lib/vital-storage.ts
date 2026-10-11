@@ -29,7 +29,6 @@ export interface VitalReading {
   videoMimeType?: string;
   cameraMode?: "front" | "rear";
   demoMode?: boolean;
-  spo2Offset?: number;
 }
 
 export interface ValidationStats {
@@ -105,7 +104,6 @@ export async function addVitalReading(
         vitals: reading.vitals,
         cameraMode: reading.cameraMode,
         demoMode: reading.demoMode,
-        spo2Offset: reading.spo2Offset,
         videoBlob: videoBase64,
         videoMimeType: videoBlob?.type,
       }),
@@ -201,7 +199,6 @@ export async function getVitalReadings(params?: {
         },
         cameraMode: r.cameraMode,
         demoMode: r.demoMode,
-        spo2Offset: r.spo2Offset,
       }));
     }
   } catch (error) {

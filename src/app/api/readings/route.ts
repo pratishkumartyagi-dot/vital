@@ -54,7 +54,7 @@ export async function POST(request: Request) {
     const db = getDb();
     const body = await request.json();
     
-    const { patient, vitals, cameraMode, demoMode, spo2Offset, videoBlob, videoMimeType } = body;
+    const { patient, vitals, cameraMode, demoMode, videoBlob, videoMimeType } = body;
     
     const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const timestamp = new Date();
@@ -84,7 +84,6 @@ export async function POST(request: Request) {
       rhythm: vitals.rhythm || "unknown",
       cameraMode: cameraMode || "front",
       demoMode: demoMode || false,
-      spo2Offset: spo2Offset || 0,
       videoData: videoBlob ? Buffer.from(videoBlob, "base64") : null,
       videoMimeType: videoMimeType || null,
       sessionDurationSec: 130,

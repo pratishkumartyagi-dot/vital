@@ -62,7 +62,6 @@ export default function VitalMonitoringPage() {
   const [cameraMode, setCameraMode] = useState<"front" | "rear">("front");
   const [torchOn, setTorchOn] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
-  const [spo2Offset, setSpo2Offset] = useState(0);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
   const [spo2Method, setSpo2Method] = useState<"rosenet" | "empirical">("empirical");
@@ -482,7 +481,7 @@ export default function VitalMonitoringPage() {
         }
 
         // Always compute empirical as immediate backup
-        const empResult = computeEmpiricalSpO2(rRaw, gRaw, bRaw, hr, sqi / 100, spo2Offset);
+        const empResult = computeEmpiricalSpO2(rRaw, gRaw, bRaw, hr, sqi / 100);
         if (empResult.spo2 !== null && spo2Val === null) {
           spo2Val = empResult.spo2;
           spo2MethodUsed = "empirical";
@@ -505,7 +504,8 @@ export default function VitalMonitoringPage() {
 
         if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
           const HbRatio = (acR / dcR) / (acG / dcG);
-          hbVal = 18.2 - 6.8 * HbRatio;
+          // Red/green calibration: Hb = 18.0 - 2.8*R (not red/IR 18.2 - 6.8*R)
+          hbVal = 18.0 - 2.8 * HbRatio;
           hbVal = Math.min(Math.max(hbVal, 5), 20);
         }
       }
@@ -565,7 +565,7 @@ export default function VitalMonitoringPage() {
     if (cameraOnRef.current) {
       animFrame.current = requestAnimationFrame(processFrame);
     }
-  }, [drawWaveform, spo2Offset, cameraMode, demoMode, patient, rosenetReady]);
+  }, [drawWaveform, cameraMode, demoMode, patient, rosenetReady]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -742,11 +742,10 @@ export default function VitalMonitoringPage() {
         vitals: computedReading,
         cameraMode,
         demoMode,
-        spo2Offset,
       }, videoBlob);
       await loadReadings();
     }
-  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
+  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
@@ -1271,28 +1270,15 @@ export default function VitalMonitoringPage() {
               </button>
             )}
             <button
-              onClick={() => setDemoMode((d) => !d)}
-              className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
+              onClick={() => setDemoMode(!demoMode)}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                 demoMode
-                  ? "bg-rose-600 border-rose-500 text-neutral-100"
-                  : "bg-neutral-800 border-neutral-700 text-neutral-400 hover:border-neutral-500"
+                  ? "bg-purple-600 hover:bg-purple-700 text-white"
+                  : "bg-neutral-700 hover:bg-neutral-600 text-neutral-300"
               }`}
             >
               {demoMode ? "Demo: On" : "Demo: Off"}
             </button>
-            <div className="ml-auto flex items-center gap-2">
-              <label className="text-[10px] text-neutral-400">SpO₂ offset</label>
-              <input
-                type="range"
-                min="-10"
-                max="10"
-                step="1"
-                value={spo2Offset}
-                onChange={(e) => setSpo2Offset(Number(e.target.value))}
-                className="w-24"
-              />
-              <span className="text-[10px] text-neutral-500 w-6">{spo2Offset > 0 ? `+${spo2Offset}` : spo2Offset}</span>
-            </div>
           </div>
         </div>
         <div className="px-4 pb-4">

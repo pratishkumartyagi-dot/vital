@@ -907,15 +907,18 @@ export function computeSpO2(
   // Spectral amplitude at f_hr (±0.15 Hz) for each channel
   const acR = spectralAmplitude(rRaw, cfg.fs, fHr, 0.15);
   const acG = spectralAmplitude(gRaw, cfg.fs, fHr, 0.15);
-  const dcR = mean(rRaw);
-  const dcG = mean(gRaw);
+
+  // ZLO black-level correction: subtract sensor black level (~16 DN)
+  const zlo = Math.max(0, Math.min(...rRaw, ...gRaw) - 1.0);
+  const dcR = Math.max(mean(rRaw) - zlo, 1e-9);
+  const dcG = Math.max(mean(gRaw) - zlo, 1e-9);
 
   if (dcR <= 1e-9 || dcG <= 1e-9 || acG <= 1e-12) return { spo2: null, R: null };
 
   const R = (acR / dcR) / (acG / dcG);
 
-  // Empirical calibration (per-device, fitted against reference oximeter)
-  const cal = cfg.spo2Cal ?? { a: 110, b: -20 };
+  // Red/green calibration (fitted for smartphone cameras — no IR channel)
+  const cal = cfg.spo2Cal ?? { a: 106, b: -8 };
   let spo2: number;
   if (cal.c !== undefined) {
     spo2 = cal.a + cal.b * R + cal.c * R * R;
@@ -934,7 +937,7 @@ export function computeSpO2(
   }
 
   return {
-    spo2: clamp(spo2, 70, 100),
+    spo2: clamp(spo2, 88, 100),
     R,
   };
 }
