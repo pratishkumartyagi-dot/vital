@@ -280,31 +280,79 @@ private fun startStreaming(withCallback: Boolean, result: Result) {
 
         // Set up frame callback if requested - this enables frame delivery back to Dart
         if (withCallback) {
-            frameCallback = { width, height, data ->
+            frameCallback = { width, height, yData, uData, vData, yRowStride, uvRowStride, uvPixelStride ->
                 methodChannel.invokeMethod("onFrame", mapOf(
                     "width" to width,
                     "height" to height,
-                    "data" to data
+                    "yData" to yData,
+                    "uData" to uData,
+                    "vData" to vData,
+                    "yRowStride" to yRowStride,
+                    "uvRowStride" to uvRowStride,
+                    "uvPixelStride" to uvPixelStride
                 ))
             }
             imageReader?.setOnImageAvailableListener({ reader ->
                 reader.acquireLatestImage()?.use { image ->
-                    val yPlane = image.planes[0]
-                    val buffer = yPlane.buffer
                     val width = image.width
                     val height = image.height
-                    val rowStride = yPlane.bytesPerRow
-                    val pixelStride = yPlane.bytesPerPixel ?: 1
                     
-                    // Copy only valid pixels (strip row stride padding)
+                    // Extract all three planes (Y, U, V) from YUV_420_888
+                    val yPlane = image.planes[0]
+                    val uPlane = image.planes[1]
+                    val vPlane = image.planes[2]
+                    
+                    val yRowStride = yPlane.bytesPerRow
+                    val uvRowStride = uPlane.bytesPerRow
+                    val uvPixelStride = uPlane.bytesPerPixel ?: 2
+                    
+                    // Copy Y plane (strip row stride padding)
+                    val yBuffer = yPlane.buffer
                     val packedY = ByteArray(width * height)
                     for (y in 0 until height) {
-                        val srcOffset = y * rowStride
+                        val srcOffset = y * yRowStride
                         val dstOffset = y * width
-                        val length = minOf(width * pixelStride, rowStride - srcOffset)
-                        buffer.get(dstOffset, packedY, dstOffset, length)
+                        val length = minOf(width, yRowStride - srcOffset)
+                        yBuffer.get(dstOffset, packedY, dstOffset, length)
                     }
-                    frameCallback?.invoke(width, height, packedY)
+                    
+                    // Copy U plane (strip row stride and pixel stride padding)
+                    val uBuffer = uPlane.buffer
+                    val uWidth = width / 2
+                    val uHeight = height / 2
+                    val packedU = ByteArray(uWidth * uHeight)
+                    for (y in 0 until uHeight) {
+                        val srcOffset = y * uvRowStride
+                        val dstOffset = y * uWidth
+                        var length = 0
+                        for (x in 0 until uWidth) {
+                            val srcIdx = srcOffset + x * uvPixelStride
+                            if (srcIdx < uBuffer.capacity()) {
+                                packedU[dstOffset + x] = uBuffer.get(srcIdx)
+                                length++
+                            }
+                        }
+                    }
+                    
+                    // Copy V plane (strip row stride and pixel stride padding)
+                    val vBuffer = vPlane.buffer
+                    val vWidth = width / 2
+                    val vHeight = height / 2
+                    val packedV = ByteArray(vWidth * vHeight)
+                    for (y in 0 until vHeight) {
+                        val srcOffset = y * uvRowStride
+                        val dstOffset = y * vWidth
+                        var length = 0
+                        for (x in 0 until vWidth) {
+                            val srcIdx = srcOffset + x * uvPixelStride
+                            if (srcIdx < vBuffer.capacity()) {
+                                packedV[dstOffset + x] = vBuffer.get(srcIdx)
+                                length++
+                            }
+                        }
+                    }
+                    
+                    frameCallback?.invoke(width, height, packedY, packedU, packedV, yRowStride, uvRowStride, uvPixelStride)
                 }
             }, backgroundHandler)
         }

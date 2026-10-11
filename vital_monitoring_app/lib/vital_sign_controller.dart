@@ -170,16 +170,18 @@ class VitalSignController extends ChangeNotifier {
     });
   }
 
-  /// Process a Camera2 frame (Y-plane from native Android Camera2 API).
+  /// Process a Camera2 frame (YUV420 from native Android Camera2 API).
   /// Used when the rear camera is managed by Camera2PpgController.
-  void processCamera2Frame(int width, int height, Uint8List yPlane) {
+  /// Receives packed Y, U, V planes and uses the existing YUV420 processing.
+  void processCamera2Frame(int width, int height, Uint8List yData, Uint8List uData, Uint8List vData, int yRowStride, int uvRowStride, int uvPixelStride) {
     if (_isDemoMode) return;
     if (_currentState == TrackingState.complete) return;
 
-    // Convert Y-plane to RGB-like values for processing
-    // YUV Y-plane represents luminance; for PPG we use it as green proxy
-    // and estimate R/B from Y with typical skin-tone ratios
-    final Float64List extractedValues = ZeroAllocationExtractor.processYPlane(yPlane, width, height);
+    // Create a CameraImage-like structure from the packed planes
+    // and use the existing YUV420 processing
+    final Float64List extractedValues = ZeroAllocationExtractor.processYUV420FromPlanes(
+      yData, uData, vData, width, height, yRowStride, uvRowStride, uvPixelStride
+    );
     final double currentRed = extractedValues[0];
     final double currentGreen = extractedValues[1];
     final double currentBlue = extractedValues[2];
