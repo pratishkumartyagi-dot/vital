@@ -9,6 +9,7 @@ import {
   resetROSENetInstance,
   type ROSENetConfig,
   computeEmpiricalSpO2,
+  computeEmpiricalHb,
 } from './rosenet-inference';
 import { 
   addVitalReading, 
@@ -568,26 +569,9 @@ export default function VitalMonitoringPage() {
           spo2MethodUsed = "empirical";
         }
 
-        // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
-        const redFiltered = butterworthBandpass(rRaw, 0.5, 3.5, fs);
-        const greenFiltered = butterworthBandpass(gRaw, 0.5, 3.5, fs);
-
-        const getAcDc = (raw: number[], filtered: number[]) => {
-          const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
-          let ac = 0;
-          for (const v of filtered) ac += Math.abs(v - (filtered.reduce((a, b) => a + b, 0) / filtered.length));
-          ac /= filtered.length;
-          return { ac, dc };
-        };
-
-        const { ac: acR, dc: dcR } = getAcDc(rRaw, redFiltered);
-        const { ac: acG, dc: dcG } = getAcDc(gRaw, greenFiltered);
-
-        if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
-          const HbRatio = (acR / dcR) / (acG / dcG);
-          hbVal = 18.2 - 6.8 * HbRatio;
-          hbVal = Math.min(Math.max(hbVal, 5), 20);
-        }
+        // Hb: use ZLO-corrected empirical formula from rosenet-inference
+        const hbResult = computeEmpiricalHb(rRaw, gRaw, bRaw, hr, sqi / 100, fs);
+        hbVal = hbResult.hb;
       }
 
       // BP and Glucose estimation from PPG morphological analysis

@@ -426,6 +426,61 @@ export function computeEmpiricalSpO2(
   };
 }
 
+export function computeEmpiricalHb(
+  rRaw: number[],
+  gRaw: number[],
+  bRaw: number[],
+  hr: number | null,
+  sqi: number,
+  fs: number = 30,
+): { hb: number | null; rRatio: number | null; quality: number; method: string; confidence: number; modelUsed: boolean } {
+  if (hr === null || hr <= 0) {
+    return { hb: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
+  }
+
+  // Time-domain AC/DC: bandpass-filter at cardiac frequencies (0.5-3.5 Hz)
+  const redFiltered = butterworthBandpass(rRaw, 0.5, 3.5, fs);
+  const greenFiltered = butterworthBandpass(gRaw, 0.5, 3.5, fs);
+
+  // ZLO black-level correction
+  const zlo = resolveZlo([...rRaw, ...gRaw]);
+  const dcR = Math.max(mean(rRaw) - zlo, 1e-9);
+  const dcG = Math.max(mean(gRaw) - zlo, 1e-9);
+  const filtMeanR = mean(redFiltered);
+  const filtMeanG = mean(greenFiltered);
+  let acR = 0, acG = 0;
+  for (let i = 0; i < redFiltered.length; i++) {
+    acR += Math.abs(redFiltered[i] - filtMeanR);
+    acG += Math.abs(greenFiltered[i] - filtMeanG);
+  }
+  acR /= Math.max(redFiltered.length, 1);
+  acG /= Math.max(greenFiltered.length, 1);
+
+  if (dcR <= 1e-9 || dcG <= 1e-9 || acG <= 1e-12) {
+    return { hb: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
+  }
+
+  const rRatio = (acR / dcR) / (acG / dcG);
+
+  // Red/green calibration: Hb = 18.2 - 6.8*R (g/dL)
+  let hb = 18.2 - 6.8 * rRatio;
+
+  if (sqi < 0.3) {
+    return { hb: null, rRatio: null, quality: 0, method: "empirical", confidence: 0, modelUsed: false };
+  }
+
+  hb = Math.min(18, Math.max(8, hb));
+
+  return {
+    hb: Math.round(hb * 10) / 10,
+    rRatio: rRatio,
+    quality: Math.min(1, sqi / 0.7),
+    method: "empirical",
+    confidence: 0.5,
+    modelUsed: false,
+  };
+}
+
 function spectralAmplitude(signal: number[], fs: number, targetFreq: number, tolHz: number): number {
   const n = signal.length;
   if (n < 8) return 0;

@@ -130,6 +130,15 @@ function detectPeaks(signal: number[], fs: number, minBpm = 40, maxBpm = 180): {
   return { peaks, filtered };
 }
 
+function computeFilteredPerfusionIndex(filtered: number[], dcRef: number): number {
+  if (filtered.length < 10 || dcRef <= 0) return 0;
+  // AC = RMS of bandpass-filtered signal
+  let ac = 0;
+  for (const v of filtered) ac += v * v;
+  ac = Math.sqrt(ac / filtered.length);
+  return (ac / dcRef) * 100;
+}
+
 function computePerfusionIndex(signal: number[]): number {
   if (signal.length < 10) return 0;
   const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
@@ -142,8 +151,9 @@ function computePerfusionIndex(signal: number[]): number {
 function computeSignalQuality(filtered: number[], raw: number[], peaks: Peak[], fs: number): number {
   if (peaks.length < 2) return 0;
 
-  // 1. Perfusion Index (AC/DC ratio) - normalized to 0-1
-  const pi = computePerfusionIndex(raw);
+  // 1. Perfusion Index (AC/DC ratio) - use filtered signal AC, raw DC as reference
+  const dcRef = raw.reduce((a, b) => a + b, 0) / raw.length;
+  const pi = computeFilteredPerfusionIndex(filtered, dcRef);
   const piScore = Math.min(1, pi / 1.5); // PI > 1.5% is good for smartphone camera PPG
 
   // 2. Spectral SNR in cardiac band (0.5-3.5 Hz)
