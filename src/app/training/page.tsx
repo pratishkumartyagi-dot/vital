@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import TrainingMethodologyToggle from './methodology-toggle';
 
 export default function TrainingPage() {
   return (
@@ -77,6 +78,8 @@ python training/run_training.py \\
           </div>
         </div>
       </div>
+
+      <TrainingMethodologyToggle />
 
       <div className="mt-6 flex gap-4">
         <Link href="/vital-monitoring" className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg transition">

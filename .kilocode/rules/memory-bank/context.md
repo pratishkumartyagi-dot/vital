@@ -148,6 +148,7 @@ After fixing the bandwidth/ perfusion/ pulse-gate defects, realistic simulated s
 - [x] SCNN_8rois model implementation with 8 ROI processing
 - [x] Complete training pipeline (`training/run_training.py`) with cross-validation
 - [x] Training dashboard page (`/training`) with model configuration display
+- [x] **Training methodology toggle + PDF export (2026-10-11)**: Added expandable toggle below the training dashboard (`src/app/training/methodology-toggle.tsx`) showing calculation/measurement parameters across all vitals (signal acquisition, PPG extraction, HR, SpO2, Hb, BP, RR, glucose, creatinine/eGFR/KDIGO, model training). Includes "Export as PDF" button using jsPDF. Integrated into `/training/page.tsx`. Added `jspdf` dependency. `bun typecheck` + `bun lint` pass.
 - [x] API route for training job management (`/api/training`)
 - [x] Enhanced vital monitoring UI with signal quality indicator
 - [x] Multi-ROI face detection approximation for improved signal extraction
