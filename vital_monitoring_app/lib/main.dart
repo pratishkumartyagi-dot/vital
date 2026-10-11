@@ -194,8 +194,8 @@ class _VitalSignPageState extends State<VitalSignPage> with WidgetsBindingObserv
         vitalSignController.setCameraMode(CameraMode.rear);
 
         await _camera2Controller!.startStreaming(
-          onFrame: (int width, int height, Uint8List data) {
-            vitalSignController.processCamera2Frame(width, height, data);
+          onFrame: (int width, int height, Uint8List yData, Uint8List uData, Uint8List vData, int yRowStride, int uvRowStride, int uvPixelStride) {
+            vitalSignController.processCamera2Frame(width, height, yData, uData, vData, yRowStride, uvRowStride, uvPixelStride);
           },
         );
 
