@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 import Link from 'next/link';
-import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass, posPulse, selectBestPpgChannel, estimateSpo2RedGreen, estimateSpo2Best, estimateHbRedGreen, resolveZlo } from './ppg-analysis';
+import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass } from './ppg-analysis';
 import { 
   addVitalReading, 
   getVitalReadings, 
@@ -13,65 +13,6 @@ import {
   deleteVitalReading,
   type VitalReading 
 } from '@/lib/vital-storage';
-
-// Finger-detection hysteresis, in frames of the rolling vote window. At 30 fps
-// FINGER_VOTE_FRAMES is ~1 s, which is long enough to debounce a real
-// placement or removal (0.5-2 s) instead of chattering frame to frame.
-const FINGER_VOTE_FRAMES = 30;
-const FINGER_ACQUIRE_FRACTION = 0.75;  // Need strong consensus to acquire
-const FINGER_RELEASE_FRACTION = 0.25;  // Release quickly when finger removed
-
-// Adaptive finger detection thresholds based on device calibration
-const FINGER_THRESHOLDS = {
-  // Base thresholds (used when no calibration available)
-  base: {
-    redBrightMin: 80,     // Was 100 - lowered for cold fingers
-    redBrightMax: 250,    // Saturation limit
-    redDominanceMin: 15,  // Was 25 - lowered for partial lens coverage
-    redDominanceRatio: 1.05, // red/green ratio must exceed this
-    lumVarMax: 1200,      // Was 800 - relaxed for slight movement
-    notSaturated: 250,    // Channel saturation limit
-  },
-  // Tight thresholds for known-good calibration
-  tight: {
-    redBrightMin: 100,
-    redBrightMax: 245,
-    redDominanceMin: 20,
-    redDominanceRatio: 1.1,
-    lumVarMax: 800,
-    notSaturated: 245,
-  },
-  // Relaxed thresholds for unknown/low-quality devices
-  relaxed: {
-    redBrightMin: 60,
-    redBrightMax: 255,
-    redDominanceMin: 10,
-    redDominanceRatio: 1.02,
-    lumVarMax: 2000,
-    notSaturated: 255,
-  },
-};
-
-// Get adaptive thresholds based on device calibration
-function getAdaptiveFingerThresholds(calibration?: { zlo: number; slope: number; source: string } | null): {
-  redBrightMin: number;
-  redBrightMax: number;
-  redDominanceMin: number;
-  redDominanceRatio: number;
-  lumVarMax: number;
-  notSaturated: number;
-} {
-  if (!calibration || calibration.source === 'FALLBACK') {
-    return FINGER_THRESHOLDS.relaxed;
-  }
-  
-  // Use tight thresholds for calibrated devices with known ZLO
-  if (calibration.source === 'REMOTE' || calibration.source === 'LOCAL_CACHE') {
-    return FINGER_THRESHOLDS.tight;
-  }
-  
-  return FINGER_THRESHOLDS.base;
-}
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -88,13 +29,13 @@ function getErrorMessage(err: unknown): string {
 }
 
 // Generate synthetic PPG for demo mode (delegated to ppg-analysis logic)
-function generateSyntheticPPG(seconds: number, fs: number, bpm: number, t0 = 0): number[] {
-  const n = Math.floor(seconds * fs + 1e-9);
+function generateSyntheticPPG(seconds: number, fs: number, bpm: number): number[] {
+  const n = Math.floor(seconds * fs);
   const out: number[] = new Array(n);
   const heartHz = bpm / 60;
   const respHz = 0.25;
   for (let i = 0; i < n; i++) {
-    const t = t0 + i / fs;
+    const t = i / fs;
     const beat = Math.sin(2 * Math.PI * heartHz * t);
     const dicrotic = 0.35 * Math.sin(2 * Math.PI * heartHz * t - 0.6);
     const pulse = Math.max(0, beat + dicrotic);
@@ -103,30 +44,6 @@ function generateSyntheticPPG(seconds: number, fs: number, bpm: number, t0 = 0):
     out[i] = 128 + 30 * pulse * baseline + noise * 6;
   }
   return out;
-}
-
-// Load device calibration from the calibration server
-async function loadDeviceCalibration(): Promise<{ zlo: number; slope: number; source: string }> {
-  try {
-    // Try to get device info
-    const response = await fetch('/api/calibration', {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      return {
-        zlo: data.zlo || 16.0,
-        slope: data.sensorLinearSlope || 1.0,
-        source: data.source || 'REMOTE'
-      };
-    }
-  } catch {
-    // Server not available, use default
-  }
-  
-  return { zlo: 16.0, slope: 1.0, source: 'FALLBACK' };
 }
 
 export default function VitalMonitoringPage() {
@@ -140,93 +57,55 @@ export default function VitalMonitoringPage() {
   const [cameraMode, setCameraMode] = useState<"front" | "rear">("front");
   const [torchOn, setTorchOn] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
+  const [spo2Offset, setSpo2Offset] = useState(0);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
   const [bp, setBp] = useState<string | null>(null);
   const [sugar, setSugar] = useState<number | null>(null);
   const [hb, setHb] = useState<number | null>(null);
   const [creatinine, setCreatinine] = useState<CreatinineMetrics | null>(null);
-  const [stress, setStress] = useState<{ level: string; score: number; confidence: number } | null>(null);
   const [signalQuality, setSignalQuality] = useState<number | null>(null);
   const [phase, setPhase] = useState<"idle" | "warming" | "measuring" | "finalized">("idle");
   const [countdown, setCountdown] = useState<number>(0);
   const [finalReading, setFinalReading] = useState<{
     bpm: number;
-    spo2: number | null;
-    hb: number | null;
-    bpSys: number | null;
-    bpDia: number | null;
-    sugar: number | null;
+    spo2: number;
+    hb: number;
+    bpSys: number;
+    bpDia: number;
+    sugar: number;
     signalQuality: number;
     respRate: number;
     sdnn: number;
     rmssd: number;
     pnn50: number;
-    creatinine: number | null;
-    egfr: number | null;
+    creatinine: number;
+    egfr: number;
     creatinineClass: string;
     creatinineConfidence: number;
     creatinineMethod: string;
     rhythm: string;
-    stressLevel: string;
-    stressScore: number;
   } | null>(null);
   const [respRate, setRespRate] = useState<number | null>(null);
   const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
-  const [rhythm, setRhythm] = useState<"regular" | "variable" | "irregular" | "unknown">("unknown");
+  const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
   const [fingerDetected, setFingerDetected] = useState(false);
-  const [skinDetected, setSkinDetected] = useState(false);
-  const [fingerPressure, setFingerPressure] = useState<"low" | "adequate" | "excessive" | null>(null);
-  const [pressureDetail, setPressureDetail] = useState<"TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL" | "NO_FINGER" | null>(null);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
   const greenRef = useRef<number[]>([]);
   const blueRef = useRef<number[]>([]);
   const ppgBufferRef = useRef<number[]>([]);
   const syntheticBufferRef = useRef<number[]>([]);
-  const synthTimeRef = useRef<number>(0);
   const baseHrvRef = useRef<{ sdnn: number; rmssd: number; pnn50: number }>({ sdnn: 45, rmssd: 38, pnn50: 12 });
   const fpsRef = useRef<number>(30);
-  const frameIntervalsRef = useRef<number[]>([]);
-  const fingerHistoryRef = useRef<boolean[]>([]);
-  /// Mirror of `fingerDetected` for use inside the rAF loop. The loop closure
-  /// captures the render-scope state, so reading the state directly froze the
-  /// value at first render and frame collection never responded to the finger
-  /// actually being placed or removed.
-  const fingerDetectedRef = useRef<boolean>(false);
-  /// Smoothed skin-mask centroid of the front-camera ROI, in frame pixels.
-  const roiCentroidRef = useRef<{ x: number; y: number } | null>(null);
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
+  const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
   const sessionStartRef = useRef<number>(0);
-  const samplesRef = useRef<{ bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string; stressLevel: string; stressScore: number }[]>([]);
+  const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
-  const spo2SmoothedRef = useRef<number | null>(null);
-  const hbSmoothedRef = useRef<number | null>(null);
-  // Per-frame timestamps for accurate resampling (fixes fs assumption)
-  const frameTimestampsRef = useRef<number[]>([]);
-  // Timestamps for COLLECTED frames only (matching ppgBufferRef length)
-  const ppgTimestampsRef = useRef<number[]>([]);
-  const lastResampleTimeRef = useRef<number>(0);
-  // Torch saturation flag for rear camera
-  const torchSaturatedRef = useRef(false);
-  // Finger detection confidence (0-1) for adaptive behavior
-  const fingerConfidenceRef = useRef<number>(0);
-  // PPG signal history for temporal finger validation (cardiac pulsation check)
-  const ppgHistoryRef = useRef<number[]>([]);
-  // Device calibration profile for adaptive thresholds
-  const calibrationRef = useRef<{ zlo: number; slope: number; source: string } | null>(null);
-  // Front camera safeguards: motion, face ROI, auto-exposure/WB drift
-  const frontCamPrevFrameRef = useRef<Uint8ClampedArray | null>(null);
-  const frontCamExposureDriftRef = useRef<number>(0);
-  // Pressure state machine refs
-  const pressureStateRef = useRef<"NO_FINGER" | "TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL" | null>(null);
-  const prevDcLevelRef = useRef<number | null>(null);
-  const prevPerfusionRef = useRef<number | null>(null);
-  const adequateDwellRef = useRef<number>(0);
-  const unstableDwellRef = useRef<number>(0);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -245,17 +124,6 @@ export default function VitalMonitoringPage() {
   const loadingRef = useRef(loading);
   const phaseRef = useRef(phase);
   const toggleCameraRef = useRef<(() => void) | null>(null);
-  /// Mirrors of `cameraMode` / `torchOn` for use inside async camera code.
-  /// `switchCameraMode` sets the state and then immediately invokes
-  /// `toggleCameraRef.current()`. React state updates are asynchronous, so the
-  /// `toggleCamera` closure still on the ref at that moment captured the
-  /// PREVIOUS mode: switching to front while the camera was off opened the
-  /// environment camera (and vice versa), which is why front mode showed the
-  /// rear sensor — and why finger detection then failed, because the analysis
-  /// path was looking at a face instead of a fingertip. These refs are updated
-  /// synchronously so `toggleCamera` always reads the mode the user just chose.
-  const cameraModeRef = useRef(cameraMode);
-  const torchOnRef = useRef(torchOn);
 
   const [patient, setPatient] = useState<{
     name: string;
@@ -313,17 +181,6 @@ export default function VitalMonitoringPage() {
     phaseRef.current = phase;
   }, [phase]);
 
-  // Keep the mode/torch mirrors in step with state. `switchCameraMode` and the
-  // torch button also write them synchronously, because those paths need the new
-  // value before React has re-rendered.
-  useEffect(() => {
-    cameraModeRef.current = cameraMode;
-  }, [cameraMode]);
-
-  useEffect(() => {
-    torchOnRef.current = torchOn;
-  }, [torchOn]);
-
   useEffect(() => {
     return () => {
       if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
@@ -344,6 +201,66 @@ export default function VitalMonitoringPage() {
     }, 600);
     return () => clearTimeout(timer);
   }, [checkPermission, patient]);
+
+  const detectFaceROI = useCallback((video: HTMLVideoElement): { roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, 64, 64);
+    const imageData = ctx.getImageData(0, 0, 64, 64);
+    const data = imageData.data;
+    
+    let minX = 64, maxX = 0, minY = 64, maxY = 0;
+    let found = false;
+    
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        const r = data[(y * 64 + x) * 4];
+        const g = data[(y * 64 + x) * 4 + 1];
+        const b = data[(y * 64 + x) * 4 + 2];
+        const brightness = (r + g + b) / 3;
+        
+        if (brightness > 20 && brightness < 240) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          found = true;
+        }
+      }
+    }
+    
+    if (!found || maxX - minX < 10 || maxY - minY < 10) return null;
+    
+    const roi: number[][] = [];
+    const regions = [
+      { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
+      { x: minX + (maxX - minX) * 0.6, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
+      { x: minX + (maxX - minX) * 0.35, y: minY + (maxY - minY) * 0.35, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
+      { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
+      { x: minX + (maxX - minX) * 0.55, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
+    ];
+    
+    for (const region of regions) {
+      const regionData: number[] = [];
+      const startX = Math.max(0, Math.floor(region.x));
+      const endX = Math.min(64, Math.floor(region.x + region.w));
+      const startY = Math.max(0, Math.floor(region.y));
+      const endY = Math.min(64, Math.floor(region.y + region.h));
+      
+      for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+          const idx = (y * 64 + x) * 4;
+          regionData.push(data[idx], data[idx + 1], data[idx + 2]);
+        }
+      }
+      roi.push(regionData);
+    }
+    
+    return { roi, coords: { x: minX, y: minY, w: maxX - minX, h: maxY - minY } };
+  }, []);
 
   const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current;
@@ -401,158 +318,32 @@ export default function VitalMonitoringPage() {
       return;
     }
 
-    // Increased resolution from 64x64 to 160x120 for better skin pixel count
-    // and more reliable facial ROI extraction (forehead, cheeks)
-    const PROC_W = 160;
-    const PROC_H = 120;
     const c = document.createElement("canvas");
-    c.width = PROC_W;
-    c.height = PROC_H;
+    c.width = 64;
+    c.height = 64;
     const ctx = c.getContext("2d");
     if (!ctx) return;
-    if (video) ctx.drawImage(video, 0, 0, PROC_W, PROC_H);
-    const data = ctx.getImageData(0, 0, PROC_W, PROC_H).data;
+    if (video) ctx.drawImage(video, 0, 0, 64, 64);
+    const data = ctx.getImageData(0, 0, 64, 64).data;
 
     let r = 0, g = 0, b = 0, count = 0;
-    // Luminance moments of the rear ROI, used for the occlusion/uniformity
-    // test: a fingertip covering the lens produces a structureless field,
-    // whereas any scene (face, room, hand) is full of edges.
-    let lumSum = 0, lumSqSum = 0;
-    let frameOk = true;
     if (cameraMode === "rear") {
-      // Rear camera: center ROI (finger on lens) - smaller, more focused region
-      // Use 25%-75% to get a tighter center region
-      const cx0 = Math.floor(PROC_W * 0.25), cy0 = Math.floor(PROC_H * 0.25);
-      const cx1 = Math.floor(PROC_W * 0.75), cy1 = Math.floor(PROC_H * 0.75);
+      const cx0 = 22, cy0 = 22, cx1 = 42, cy1 = 42;
       for (let y = cy0; y < cy1; y++) {
         for (let x = cx0; x < cx1; x++) {
-          const i = (y * PROC_W + x) * 4;
-          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-          r += pr;
-          g += pg;
-          b += pb;
+          const i = (y * 64 + x) * 4;
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
           count++;
-          const lum = (pr + pg + pb) / 3;
-          lumSum += lum;
-          lumSqSum += lum * lum;
         }
       }
     } else {
-      // Front camera: ROI locked to the skin-mask centroid (forehead + upper
-      // cheeks). A fixed box is the dominant rPPG error source: any head
-      // translation walks the ROI off the forehead and injects baseline wander
-      // plus amplitude modulation that the POS window cannot reject. Tracking
-      // the centroid of the YCbCr skin mask keeps the sampling region on
-      // perfused skin without needing a landmark model.
-      const searchY1 = Math.floor(PROC_H * 0.75); // exclude torso / clothing
-      let skinR = 0, skinG = 0, skinB = 0, skinCount = 0;
-      let sumX = 0, sumY = 0, maskCount = 0;
-
-      // Frame statistics for the adaptive brightness gate.
-      let totalBrightness = 0, brightPixels = 0;
-      for (let y = 0; y < searchY1; y++) {
-        for (let x = 0; x < PROC_W; x++) {
-          const i = (y * PROC_W + x) * 4;
-          totalBrightness += (data[i] + data[i + 1] + data[i + 2]) / 3;
-          brightPixels++;
-        }
-      }
-      const avgBrightness = brightPixels > 0 ? totalBrightness / brightPixels : 128;
-      const brightLow = Math.max(30, avgBrightness * 0.3);
-      const brightHigh = Math.min(250, avgBrightness * 1.8);
-
-      // Build the skin mask and its centroid in one pass.
-      for (let y = 0; y < searchY1; y++) {
-        for (let x = 0; x < PROC_W; x++) {
-          const i = (y * PROC_W + x) * 4;
-          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-          const brightness = (pr + pg + pb) / 3;
-          if (brightness < brightLow || brightness > brightHigh) continue;
-          const cb = 128 - 0.168736 * pr - 0.331264 * pg + 0.5 * pb;
-          const cr = 128 + 0.5 * pr - 0.418688 * pg - 0.081312 * pb;
-          if (cb >= 70 && cb <= 135 && cr >= 125 && cr <= 180) {
-            maskCount++;
-            sumX += x;
-            sumY += y;
-          }
-        }
-      }
-
-      // Smoothed centroid: slow EMA so a single misclassified frame cannot
-      // throw the ROI, seeded at the upper-centre of the frame.
-      if (!roiCentroidRef.current) roiCentroidRef.current = { x: PROC_W * 0.5, y: PROC_H * 0.22 };
-      const cx = roiCentroidRef.current.x;
-      const cy = roiCentroidRef.current.y;
-      if (maskCount >= 40) {
-        roiCentroidRef.current = {
-          x: cx * 0.85 + (sumX / maskCount) * 0.15,
-          y: cy * 0.85 + (sumY / maskCount) * 0.15,
-        };
-      }
-
-      // Fixed-size ROI centred on the tracked centroid, clamped to the frame.
-      const roiW = Math.floor(PROC_W * 0.34);
-      const roiH = Math.floor(PROC_H * 0.26);
-      const roiX0 = Math.max(0, Math.min(PROC_W - roiW, Math.round(cx - roiW / 2)));
-      const roiY0 = Math.max(0, Math.min(searchY1 - roiH, Math.round(cy - roiH / 2)));
-      const roiX1 = roiX0 + roiW;
-      const roiY1 = roiY0 + roiH;
-
-      // Average only skin pixels inside the tracked ROI.
-      for (let y = roiY0; y < roiY1; y++) {
-        for (let x = roiX0; x < roiX1; x++) {
-          const i = (y * PROC_W + x) * 4;
-          const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-          const brightness = (pr + pg + pb) / 3;
-          if (brightness < brightLow || brightness > brightHigh) continue;
-          const cb = 128 - 0.168736 * pr - 0.331264 * pg + 0.5 * pb;
-          const cr = 128 + 0.5 * pr - 0.418688 * pg - 0.081312 * pb;
-          if (cb >= 70 && cb <= 135 && cr >= 125 && cr <= 180) {
-            skinR += pr;
-            skinG += pg;
-            skinB += pb;
-            skinCount++;
-          }
-        }
-      }
-
-      const roiArea = roiW * roiH;
-      const hasSkin = skinCount >= Math.max(30, 0.05 * roiArea);
-      if (cameraMode === "front" && !demoMode) setSkinDetected(hasSkin);
-
-      if (hasSkin) {
-        r = skinR;
-        g = skinG;
-        b = skinB;
-        count = skinCount;
-        frameOk = true;
-      } else {
-        // Fallback: whole tracked ROI (unfiltered) so the waveform preview keeps
-        // updating, but do not collect analysis samples.
-        let fallbackR = 0, fallbackG = 0, fallbackB = 0, fallbackCount = 0;
-        for (let y = roiY0; y < roiY1; y++) {
-          for (let x = roiX0; x < roiX1; x++) {
-            const i = (y * PROC_W + x) * 4;
-            fallbackR += data[i];
-            fallbackG += data[i + 1];
-            fallbackB += data[i + 2];
-            fallbackCount++;
-          }
-        }
-        if (fallbackCount > 0) {
-          r = fallbackR;
-          g = fallbackG;
-          b = fallbackB;
-          count = fallbackCount;
-        } else {
-          for (let i = 0; i < data.length; i += 4) {
-            r += data[i];
-            g += data[i + 1];
-            b += data[i + 2];
-            count++;
-          }
-        }
-        frameOk = false;
+      for (let i = 0; i < data.length; i += 4) {
+        r += data[i];
+        g += data[i + 1];
+        b += data[i + 2];
+        count++;
       }
     }
     const avgR = count ? r / count : 128;
@@ -560,410 +351,78 @@ export default function VitalMonitoringPage() {
     const avgB = count ? b / count : 128;
     
     const now = performance.now();
-    // Store per-frame timestamp for accurate resampling
-    frameTimestampsRef.current.push(now);
-    if (frameTimestampsRef.current.length > 1800) frameTimestampsRef.current.shift();
-    
     if (lastFrameTimeRef.current > 0) {
       const dt = now - lastFrameTimeRef.current;
       if (dt > 0) {
-        // Outlier rejection: rAF jitter (GC pause, camera warm-up, tab
-        // throttling) produces occasional multi-hundred-ms gaps. A single 500 ms
-        // gap at 30 fps drags the EMA to ~27 Hz, and because every Butterworth
-        // cutoff is normalised by fs that shifts the 0.5-3.5 Hz band and biases
-        // every spectral HR/RR estimate. Reject intervals beyond 3x the running
-        // median, then take the median of the retained history.
-        if (!frameIntervalsRef.current) frameIntervalsRef.current = [];
-        const hist = frameIntervalsRef.current;
-        if (hist.length >= 5) {
-          const sortedHist = [...hist].sort((a, b) => a - b);
-          const med = sortedHist[Math.floor(sortedHist.length / 2)];
-          if (dt <= med * 3) hist.push(dt);
-        } else {
-          hist.push(dt);
-        }
-        if (hist.length > 30) hist.shift();
-
-        if (hist.length >= 5) {
-          const sorted = [...hist].sort((a, b) => a - b);
-          const medianDt = sorted[Math.floor(sorted.length / 2)];
-          fpsRef.current = Math.max(10, Math.min(60, 1000 / medianDt));
-        } else if (hist.length > 0) {
-          const instFps = 1000 / dt;
-          fpsRef.current = Math.max(10, Math.min(60, fpsRef.current * 0.9 + instFps * 0.1));
-        }
+        const instFps = 1000 / dt;
+        fpsRef.current = fpsRef.current * 0.9 + instFps * 0.1;
       }
     }
     lastFrameTimeRef.current = now;
 
-// Finger detection for rear camera.
-      // Physical signature: finger on lens with torch = BRIGHT red, low G/B, uniform
-      // ALSO requires: actual cardiac pulsations in the signal (temporal validation)
-      let isFingerFrame = false;
-      let torchSaturated = false;
-      if (cameraMode === "rear") {
-        // Torch must be ON for contact PPG - if no torch, finger detection is unreliable
-        const torchActive = torchOnRef.current;
-        
-        // Get adaptive thresholds based on device calibration
-        const thresholds = getAdaptiveFingerThresholds(calibrationRef.current);
-        
-        // Torch saturation check: if red channel clips, signal is unreliable
-        torchSaturated = avgR >= thresholds.notSaturated || avgG >= thresholds.notSaturated || avgB >= thresholds.notSaturated;
-        
-        // Adaptive thresholds for finger on lens with torch:
-        // - Finger on lens with torch: bright red, not saturated
-        // - Red must DOMINATE: red > green + delta, red > blue + delta
-        // - Uniform illumination (low variance across ROI)
-        const redBright = avgR > thresholds.redBrightMin && avgR < thresholds.redBrightMax;
-        const redDominant = avgR > avgG + thresholds.redDominanceMin && 
-                           avgR > avgB + thresholds.redDominanceMin && 
-                           avgR / Math.max(avgG, 1) > thresholds.redDominanceRatio;
-        const notSaturated = avgR < thresholds.notSaturated && avgG < thresholds.notSaturated && avgB < thresholds.notSaturated;
-        
-        // Uniformity check: finger on lens produces very uniform illumination
-        // Compute luminance variance in the ROI
-        let lumSum = 0, lumSqSum = 0, lumCount = 0;
-        const cx0 = Math.floor(PROC_W * 0.25), cy0 = Math.floor(PROC_H * 0.25);
-        const cx1 = Math.floor(PROC_W * 0.75), cy1 = Math.floor(PROC_H * 0.75);
-        for (let y = cy0; y < cy1; y++) {
-          for (let x = cx0; x < cx1; x++) {
-            const i = (y * PROC_W + x) * 4;
-            const pr = data[i], pg = data[i + 1], pb = data[i + 2];
-            const lum = (pr + pg + pb) / 3;
-            lumSum += lum;
-            lumSqSum += lum * lum;
-            lumCount++;
-          }
-        }
-        const lumMean = lumCount > 0 ? lumSum / lumCount : 0;
-        const lumVar = lumCount > 0 ? (lumSqSum / lumCount) - (lumMean * lumMean) : 0;
-        const isUniform = lumVar < thresholds.lumVarMax;
-        
-        // TEMPORAL VALIDATION: Check for actual cardiac pulsations in the signal history
-        // A real finger produces ~1Hz cardiac oscillations; static red surfaces do not
-        let hasPpgPulsation = false;
-        if (ppgHistoryRef.current && ppgHistoryRef.current.length >= 60) {
-          // Check last 2 seconds for ~1Hz oscillation (cardiac)
-          const recent = ppgHistoryRef.current.slice(-60); // 2 seconds at 30fps
-          // Compute autocorrelation at ~30 sample lag (1Hz @ 30fps)
-          const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
-          let autocorr = 0;
-          let variance = 0;
-          for (let i = 0; i < recent.length; i++) {
-            const diff = recent[i] - mean;
-            variance += diff * diff;
-            if (i >= 30) {
-              autocorr += diff * (recent[i - 30] - mean);
-            }
-          }
-          variance /= recent.length;
-          autocorr /= recent.length;
-          // Require significant autocorrelation at cardiac lag
-          hasPpgPulsation = variance > 0.5 && autocorr / variance > 0.3;
-        }
-        
-        // DC level check: finger on lens with torch should have specific DC range
-        // Too dark = no finger, too bright = saturation/reflection
-        const dcLevel = (avgR + avgG + avgB) / 3;
-        const dcInRange = dcLevel > 50 && dcLevel < 220;
-        
-        // Confidence scoring for finger detection
-        let confidence = 0;
-        if (torchActive) confidence += 0.2;
-        if (redBright) confidence += 0.15;
-        if (redDominant) confidence += 0.15;
-        if (notSaturated) confidence += 0.1;
-        if (isUniform) confidence += 0.1;
-        if (hasPpgPulsation) confidence += 0.2;  // Critical: requires actual PPG signal
-        if (dcInRange) confidence += 0.1;
-        
-        // DEBUG: Log finger detection values every 30 frames
-        if (Math.random() < 0.033) {
-          console.log('[FingerDetect]', {
-            torchActive, redBright, redDominant, notSaturated, isUniform,
-            hasPpgPulsation, dcInRange, dcLevel: dcLevel.toFixed(1),
-            confidence: confidence.toFixed(2),
-            thresholds,
-            avgR: avgR.toFixed(1), avgG: avgG.toFixed(1), avgB: avgB.toFixed(1),
-            lumMean: lumMean.toFixed(1), lumVar: lumVar.toFixed(1),
-            isFingerFrame: torchActive && redBright && redDominant && notSaturated && isUniform && hasPpgPulsation && dcInRange
-          });
-        }
-        
-        // Finger detected only if ALL conditions met AND torch is active
-        // CRITICAL: Require temporal PPG pulsation to prevent false positives
-        isFingerFrame = torchActive && redBright && redDominant && notSaturated && isUniform && hasPpgPulsation && dcInRange;
-        
-        // Update confidence ref for adaptive behavior
-        fingerConfidenceRef.current = confidence;
-
-      // Hysteresis over ~1s history (FINGER_VOTE_FRAMES = 30 frames at 30fps)
-      if (!fingerHistoryRef.current) fingerHistoryRef.current = [];
-      const hist = fingerHistoryRef.current;
-      hist.push(isFingerFrame);
-      if (hist.length > FINGER_VOTE_FRAMES) hist.shift();
-
-      const votes = hist.reduce((a, v) => a + (v ? 1 : 0), 0);
-      const frac = hist.length > 0 ? votes / hist.length : 0;
-      
-      // Update torch saturation ref for UI/analysis gating
-      torchSaturatedRef.current = torchSaturated;
-      
-      // `fingerDetected` state drives the UI; `fingerDetectedRef` is the value
-      // the acquisition and pressure paths read, so the two can never disagree
-      // mid-frame. The ref mirrors the state, so it is also used to decide
-      // whether a setState is needed at all (avoids a re-render every frame).
-      const wasDetected = fingerDetectedRef.current;
-      const nowDetected = wasDetected ? frac >= FINGER_RELEASE_FRACTION : frac >= FINGER_ACQUIRE_FRACTION;
-      if (nowDetected !== wasDetected) setFingerDetected(nowDetected);
-      fingerDetectedRef.current = nowDetected;
-    } else {
-      // Front camera safeguards: motion, face ROI, auto-exposure/WB drift
-      if (cameraMode === "front" && !demoMode) {
-        const frameData = new Uint8ClampedArray(data); // copy current frame
-        if (frontCamPrevFrameRef.current) {
-          // Frame difference for motion detection
-          let diffSum = 0;
-          for (let i = 0; i < frameData.length; i += 4) {
-            diffSum += Math.abs(frameData[i] - frontCamPrevFrameRef.current[i]);
-          }
-          const avgDiff = diffSum / (frameData.length / 4);
-          // High frame difference = motion artifact
-          if (avgDiff > 15) {
-            frameOk = false;
-          }
-          
-          // Auto-exposure/WB drift: track mean brightness change
-          const currMean = (avgR + avgG + avgB) / 3;
-          if (frontCamExposureDriftRef.current > 0) {
-            const drift = Math.abs(currMean - frontCamExposureDriftRef.current);
-            if (drift > 20) {
-              frameOk = false; // Sudden exposure/WB change
-            }
-          }
-          frontCamExposureDriftRef.current = currMean;
-        }
-        frontCamPrevFrameRef.current = frameData;
-      }
-      // Front camera - no finger detection needed
-      if (fingerHistoryRef.current) fingerHistoryRef.current = [];
-      if (fingerDetectedRef.current) {
-        fingerDetectedRef.current = false;
-        if (!demoMode) setFingerDetected(false);
-      }
-    }
+    const isFingerFrame = cameraMode === "rear"
+      ? (avgR > 90 && avgR < 245 && avgR > avgG + 15 && avgR > avgB + 15 && Math.abs(avgR - avgG) > 8)
+      : true;
+    if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
 
     if (demoMode) {
       const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
-      // Advance a continuous synthetic clock so the generated pulse does not
-      // reset phase every frame (which previously created a 10 Hz artifact and
-      // hid the 72 BPM fundamental).
-      const seconds = 1 / fs;
-      const sample = generateSyntheticPPG(seconds, fs, 72, synthTimeRef.current);
-      synthTimeRef.current += seconds;
+      const sample = generateSyntheticPPG(0.1, fs, 72);
       syntheticBufferRef.current.push(...sample);
       if (syntheticBufferRef.current.length > 1800) {
         syntheticBufferRef.current.splice(0, syntheticBufferRef.current.length - 1800);
       }
-      const collecting = phaseRef.current === "measuring";
-      const frameNow = performance.now();
-      // Generate per-sample timestamps matching the synthetic signal's continuous time
-      const sampleIntervalMs = (1000 / fs);
-      for (let i = 0; i < sample.length; i++) {
-        const v = sample[i];
-        const sampleTime = frameNow - (sample.length - 1 - i) * sampleIntervalMs;
+      for (const v of sample) {
         valuesRef.current.push(128 + (v - 128) * 1.2);
         if (valuesRef.current.length > 180) valuesRef.current.shift();
-        if (collecting) {
-          redRef.current.push(128 + (v - 128) * 1.2);
-          greenRef.current.push(v);
-          blueRef.current.push(128 + (v - 128) * 0.4);
-          ppgBufferRef.current.push(128 + (v - 128) * 1.2);
-          ppgTimestampsRef.current.push(sampleTime);
-          if (redRef.current.length > 1800) redRef.current.shift();
-          if (greenRef.current.length > 1800) greenRef.current.shift();
-          if (blueRef.current.length > 1800) blueRef.current.shift();
-          if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
-          if (ppgTimestampsRef.current.length > 1800) ppgTimestampsRef.current.shift();
-        }
-      }
-      setFingerDetected(true);
-    } else {
-      // Only collect the analysis buffers during the measuring phase and only
-      // when the frame actually contains the signal source. Read the finger
-      // state from the ref, not from React state: the rAF loop closure captures
-      // the render-scope value, so reading the state directly froze it at first
-      // render and collection never responded to the finger being placed.
-      // For rear camera, also collect if the raw signal already looks like a
-      // plausible finger (red-bright and red-dominant) so analysis can run
-      // before the hysteresis vote fully commits.
-      // IMPORTANT: Rear camera requires torch to be active for contact PPG
-      const torchActive = torchOnRef.current;
-      const signalLooksLikeFinger = cameraMode === "rear" && torchActive &&
-        avgR > 100 && avgR < 245 &&
-        avgR > avgG + 25 && avgR > avgB + 25 && Math.abs(avgR - avgG) > 20 &&
-        avgR < 250 && avgG < 250 && avgB < 250;
-      const fingerPresent = fingerDetectedRef.current;
-      const collecting = phaseRef.current === "measuring" && frameOk &&
-        (cameraMode !== "rear" || fingerPresent || signalLooksLikeFinger);
-      if (collecting) {
-        // For rear camera, red is typically the best contact PPG channel
-        // (haemoglobin absorbs green more strongly, so red penetrates deeper).
-        // Store the best-guess channel in ppgBufferRef for fallback use.
-        const ppgValue = cameraMode === "rear" ? avgR : avgG;
-        ppgBufferRef.current.push(ppgValue);
-        ppgTimestampsRef.current.push(now);
-        if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
-        if (ppgTimestampsRef.current.length > 1800) ppgTimestampsRef.current.shift();
-        redRef.current.push(avgR);
-        greenRef.current.push(avgG);
-        blueRef.current.push(avgB);
+        redRef.current.push(128 + (v - 128) * 1.2);
+        greenRef.current.push(v);
+        blueRef.current.push(128 + (v - 128) * 0.4);
         if (redRef.current.length > 1800) redRef.current.shift();
         if (greenRef.current.length > 1800) greenRef.current.shift();
         if (blueRef.current.length > 1800) blueRef.current.shift();
-        
-        // Update PPG history for temporal finger validation (use green/luminance)
-        const lumValue = (avgR + avgG + avgB) / 3;
-        ppgHistoryRef.current.push(lumValue);
-        if (ppgHistoryRef.current.length > 120) ppgHistoryRef.current.shift(); // Keep 4 seconds
+      }
+      setFingerDetected(true);
+    } else {
+      if (phaseRef.current === "measuring" && isFingerFrame) {
+        ppgBufferRef.current.push(avgG);
+        if (ppgBufferRef.current.length > 1800) ppgBufferRef.current.shift();
       }
 
-      valuesRef.current.push(cameraMode === "rear" ? avgR : avgG);
+      valuesRef.current.push(avgR);
       if (valuesRef.current.length > 180) valuesRef.current.shift();
+      redRef.current.push(avgR);
+      greenRef.current.push(avgG);
+      blueRef.current.push(avgB);
+      if (redRef.current.length > 1800) redRef.current.shift();
+      if (greenRef.current.length > 1800) greenRef.current.shift();
+      if (blueRef.current.length > 1800) blueRef.current.shift();
     }
-  
-  // Resample non-uniform signal to uniform grid using linear interpolation.
-  function resampleToUniform(
-    signal: number[],
-    timestamps: number[],
-    targetFs = 30,
-    maxDurationSec = 30
-  ): { signal: number[]; fs: number; uniformTimestamps: number[] } {
-    // Handle length mismatch: truncate to shorter length
-    const minLen = Math.min(signal.length, timestamps.length);
-    if (minLen < 3) {
-      return { signal: [], fs: targetFs, uniformTimestamps: [] };
-    }
-    // Truncate both to same length
-    const sig = signal.slice(-minLen);
-    const ts = timestamps.slice(-minLen);
-    
-    const t0 = ts[0];
-    const tEnd = ts[ts.length - 1];
-    const duration = (tEnd - t0) / 1000; // seconds
-    
-    const nTarget = Math.min(Math.floor(duration * targetFs), Math.floor(maxDurationSec * targetFs));
-    if (nTarget < 1) return { signal: [], fs: targetFs, uniformTimestamps: [] };
-    
-    const dt = 1 / targetFs;
-    const out: number[] = new Array(nTarget);
-    const outTimes: number[] = new Array(nTarget);
-    
-    let srcIdx = 0;
-    for (let i = 0; i < nTarget; i++) {
-      const tTarget = t0 + i * dt * 1000;
-      outTimes[i] = tTarget;
-      while (srcIdx + 1 < ts.length && ts[srcIdx + 1] <= tTarget) {
-        srcIdx++;
-      }
-      if (srcIdx === 0) {
-        out[i] = sig[0];
-      } else if (srcIdx >= ts.length - 1) {
-        out[i] = sig[sig.length - 1];
-      } else {
-        const t1 = ts[srcIdx];
-        const t2 = ts[srcIdx + 1];
-        const v1 = sig[srcIdx];
-        const v2 = sig[srcIdx + 1];
-        const alpha = (tTarget - t1) / (t2 - t1);
-        out[i] = v1 + alpha * (v2 - v1);
-      }
-    }
-    return { signal: out, fs: targetFs, uniformTimestamps: outTimes };
-  }
 
     // Run comprehensive vitals analysis using centralized module
     const sessionStart = sessionStartRef.current;
     const elapsedMs = sessionStart > 0 ? Date.now() - sessionStart : 0;
-    const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 130000;
+    const isMeasuring = phaseRef.current === "measuring" && elapsedMs >= 10000 && elapsedMs < 100000;
     
     // Update signal quality and vitals every 2 seconds
     const nowMs = Date.now();
     if (nowMs - lastBpmUpdate.current > 2000) {
       lastBpmUpdate.current = nowMs;
 
-      // Use target fs of 30 Hz for analysis, resample from actual timestamps
-      const targetFs = 30;
-      const windowSec = 30;
-      
-      // Resample all buffers to uniform 30 Hz grid using collected-frame timestamps
-      const timestamps = ppgTimestampsRef.current;
-      const ppgResampled = resampleToUniform(ppgBufferRef.current, timestamps, targetFs, windowSec);
-      const redResampled = resampleToUniform(redRef.current, timestamps, targetFs, windowSec);
-      const greenResampled = resampleToUniform(greenRef.current, timestamps, targetFs, windowSec);
-      const blueResampled = resampleToUniform(blueRef.current, timestamps, targetFs, windowSec);
-      
-      const ppgWin = ppgResampled.signal;
-      const redWin = redResampled.signal;
-      const greenWin = greenResampled.signal;
-      const blueWin = blueResampled.signal;
-      const fs = targetFs; // Now exactly 30 Hz
-      
-      let analysisSource: number[];
-      // AC/DC denominator for the perfusion term. For the rear path this must be
-      // the mean of the *winning* channel, not green: red and green have very
-      // different DC levels under torch (haemoglobin absorbs green far more),
-      // so AC_red / DC_green is not a perfusion index. For the front path the
-      // POS pulse is zero-mean by construction, so the green skin-ROI mean is
-      // the only meaningful denominator.
-      let dcRef: number | undefined;
-      if (demoMode) {
-        analysisSource = syntheticBufferRef.current;
-      } else if (cameraMode === "front") {
-        // Front camera: drive the pulse analysis from the POS chrominance
-        // pulse, which rejects illumination/motion artifacts that a raw
-        // averaged channel keeps. Fall back to the green skin-ROI trace while
-        // the POS window is still filling. With winLen=120 (4s at 30fps) and
-        // 50% overlap, we need ~6s of data for reliable POS output.
-        const pos = posPulse(redWin, greenWin, blueWin, Math.max(120, Math.round(fs * 4)));
-        analysisSource = pos.length >= Math.floor(fs * 6) ? pos : ppgWin;
-        dcRef = greenWin.length > 0 ? greenWin.reduce((a, b) => a + b, 0) / greenWin.length : undefined;
-      } else {
-        // Rear camera: pick the single channel with the best spectral SNR in the
-        // cardiac band. Red breaks ties because it penetrates finger tissue
-        // further, but SNR is the primary criterion.
-        const selected = selectBestPpgChannel(redWin, greenWin, blueWin, fs, true);
-        analysisSource = selected.signal.length >= Math.floor(fs * 5) ? selected.signal : ppgWin;
-        dcRef = selected.dcRef > 0 ? selected.dcRef : undefined;
-      }
+      const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
+      const analysisSource = demoMode
+        ? syntheticBufferRef.current.slice(-Math.min(syntheticBufferRef.current.length, Math.floor(fs * 30)))
+        : ppgBufferRef.current.slice(-Math.min(ppgBufferRef.current.length, Math.floor(fs * 30)));
       const analysis: VitalAnalysis = analyzeVitals(
         analysisSource,
         fs,
-        redWin,
-        greenWin,
-        blueWin,
+        redRef.current,
+        greenRef.current,
+        blueRef.current,
         {
           cameraMode,
           ageYears: patient ? parseInt(patient.age, 10) || null : null,
           sex: patient ? (patient.sex as "male" | "female") : null,
-          dcRef,
-          // Respiratory rate is extracted from baseline wander (0.05-0.5 Hz),
-          // which is BELOW the cardiac band. For rear/demo mode analysisSource
-          // is the 0.5-3.5 Hz bandpassed cardiac pulse, so passing it here
-          // removed the respiratory band entirely and the estimator returned
-          // ~0.0 for every rear-camera measurement. The raw green skin-ROI
-          // trace (and the synthetic buffer in demo mode) carry the full
-          // respiratory modulation and are used instead. For the front camera
-          // the raw green trace is used directly too — the POS chroma pulse is
-          // detrended but still carries the respiratory amplitude modulation.
-          //
-          // Do NOT fall back to analysisSource when greenWin is short: it is
-          // already high-passed at 0.5 Hz, so the respiratory band is gone and
-          // the estimator can only return null. The rear estimators need 10 s
-          // anyway, so gate on that instead of producing a garbage number.
-          respSource:
-            greenWin.length >= Math.floor(fs * 10) ? greenWin : undefined,
         }
       );
       const hr = analysis.bpm !== null ? Math.min(Math.max(analysis.bpm, 40), 180) : null;
@@ -972,146 +431,43 @@ export default function VitalMonitoringPage() {
       const sqi = analysis.heart.signalQuality;
       setSignalQuality(sqi / 100);
 
-      // Finger pressure state machine (rear camera only)
-      if (cameraMode === "rear" && !demoMode) {
-        // Use raw green window for DC and perfusion
-        const dcLevel = greenWin.length > 0 ? greenWin.reduce((a, b) => a + b, 0) / greenWin.length : 0;
-        const perfusion = analysis.heart.perfusionIndex ?? 0;
-        const snr = sqi; // Use composite SQI as SNR proxy (0-100)
-        const prevDc = prevDcLevelRef.current;
-        const prevPi = prevPerfusionRef.current;
-
-        // Update history
-        prevDcLevelRef.current = dcLevel;
-        prevPerfusionRef.current = perfusion;
-
-        // Finger presence check (min coverage). Read the ref: the rAF closure
-        // captures the render-scope `fingerDetected` state, which froze it at
-        // first render and made this state machine unreachable for real input.
-        const fingerCoverage = fingerDetectedRef.current && dcLevel > 20 && dcLevel < 240;
-        if (!fingerCoverage) {
-          pressureStateRef.current = "NO_FINGER";
-          adequateDwellRef.current = 0;
-          unstableDwellRef.current = 0;
-        } else {
-          // Trend detection
-          const dcRising = prevDc !== null && dcLevel > prevDc + 2; // DC increasing (finger pressing down)
-          const piCollapsed = prevPi !== null && perfusion < prevPi * 0.7 && prevPi > 0.5; // PI dropping sharply
-          const dcDriftHigh = prevDc !== null && Math.abs(dcLevel - prevDc) > 15;
-          const piTooHigh = perfusion > 8; // PI implausibly high = motion artifact
-          const saturated = dcLevel > 240 || dcLevel < 15; // Sensor clipping
-          const lightLeakEvidence = dcLevel > 190 && perfusion < 1.0 && (blueWin.length > 0 ? blueWin.reduce((a, b) => a + b, 0) / blueWin.length : 0) > dcLevel * 0.5; // Blue ~ Green = ambient light
-
-          let newState = pressureStateRef.current;
-
-          // Priority 1: TOO_HEAVY - occlusion evidence
-          if (saturated || (dcRising && piCollapsed)) {
-            newState = "TOO_HEAVY";
-            adequateDwellRef.current = 0;
-            unstableDwellRef.current = 0;
-          }
-          // Priority 2: UNSTABLE - motion/artifact, not pressure
-          if (piTooHigh || dcDriftHigh) {
-            newState = "UNSTABLE";
-            adequateDwellRef.current = 0;
-            unstableDwellRef.current = Math.min(5, unstableDwellRef.current + 1);
-          }
-          // Priority 3: ADEQUATE - stable good signal (with dwell + hysteresis)
-          else if (perfusion >= 0.5 && perfusion <= 5.0 && dcLevel >= 80 && dcLevel <= 180 && snr >= 30) {
-            adequateDwellRef.current = Math.min(5, adequateDwellRef.current + 1); // ~10s dwell at 2s intervals
-            if (adequateDwellRef.current >= 3) { // 6s stable
-              newState = "ADEQUATE";
-              unstableDwellRef.current = 0;
-            } else {
-              newState = "WEAK_SIGNAL"; // Building up
-            }
-          }
-          // Priority 4: TOO_LIGHT - ambient light leak
-          else if (lightLeakEvidence) {
-            newState = "TOO_LIGHT";
-            adequateDwellRef.current = 0;
-            unstableDwellRef.current = 0;
-          }
-          // Priority 5: WEAK_SIGNAL - neutral fallback
-          else {
-            adequateDwellRef.current = 0;
-            unstableDwellRef.current = 0;
-            newState = "WEAK_SIGNAL";
-          }
-
-          // Hysteresis: don't flip-flop TOO_HEAVY <-> TOO_LIGHT rapidly
-          // Type assertion needed because TS narrows newState type through the if/else chain
-          const ns = newState as "NO_FINGER" | "TOO_HEAVY" | "UNSTABLE" | "ADEQUATE" | "TOO_LIGHT" | "WEAK_SIGNAL";
-          if (ns === "TOO_HEAVY" && pressureStateRef.current === "TOO_LIGHT") {
-            newState = "TOO_LIGHT"; // Stick with light until clear heavy evidence
-          } else if (ns === "TOO_LIGHT" && pressureStateRef.current === "TOO_HEAVY") {
-            newState = "TOO_HEAVY";
-          }
-
-          pressureStateRef.current = newState;
-        }
-
-        // Map to display state
-        const displayMap: Record<string, "low" | "adequate" | "excessive" | null> = {
-          NO_FINGER: null,
-          TOO_HEAVY: "excessive",
-          UNSTABLE: "adequate", // Show as adequate but with "Hold still" hint
-          ADEQUATE: "adequate",
-          TOO_LIGHT: "low",
-          WEAK_SIGNAL: "low",
-        };
-        setFingerPressure(displayMap[pressureStateRef.current ?? "NO_FINGER"] ?? null);
-        setPressureDetail(pressureStateRef.current);
-      } else {
-        setFingerPressure(null);
-        setPressureDetail(null);
-        pressureStateRef.current = null;
-        adequateDwellRef.current = 0;
-        unstableDwellRef.current = 0;
-      }
-
-      // Compute SpO2 and Hb from the gated (measuring-phase) color buffers,
-      // but only when the composite signal quality is high enough for
-      // ratio-of-ratios math to be meaningful (weak/motion signals previously
-      // produced plausible-looking but worthless numbers).
-      // Note: smartphone cameras lack IR (940nm), so SpO2 is an estimate only.
+      // Compute SpO2 and Hb from bandpass-filtered color signals
+      // Note: Smartphone cameras lack IR (940nm), so SpO2 is an estimate only
       let spo2Val: number | null = null;
       let hbVal: number | null = null;
-      const minSamples = Math.floor(fs * 5);
-      // Lowered from 60 to 50 to allow more SpO2 measurements on marginal signals
-      if (sqi >= 50 && redWin.length >= minSamples && greenWin.length >= minSamples && blueWin.length >= minSamples) {
-        // Zero-phase bandpass at 0.5-3.5 Hz for proper AC/DC.
-        const redFiltered = butterworthBandpass(redWin, 0.5, 3.5, fs, true);
-        const greenFiltered = butterworthBandpass(greenWin, 0.5, 3.5, fs, true);
-        const blueFiltered = butterworthBandpass(blueWin, 0.5, 3.5, fs, true);
+      if (redRef.current.length >= fs * 3 && greenRef.current.length >= fs * 3 && blueRef.current.length >= fs * 3) {
+        // Bandpass filter color signals at 0.5-3.5 Hz for proper AC/DC
+        const redFiltered = butterworthBandpass(redRef.current, 0.5, 3.5, fs);
+        const greenFiltered = butterworthBandpass(greenRef.current, 0.5, 3.5, fs);
+        const blueFiltered = butterworthBandpass(blueRef.current, 0.5, 3.5, fs);
 
-        // ZLO (zero-level offset) correction: smartphone sensor black level /
-        // tone-mapped DC sits above the true zero, biasing every AC/DC ratio.
-        // The calibration database carries a per-model ZLO; the browser uses
-        // the default when the device model is unknown.
-        const zlo = resolveZlo(null);
+        const getAcDc = (raw: number[], filtered: number[]) => {
+          const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
+          let ac = 0;
+          for (const v of filtered) ac += Math.abs(v - (filtered.reduce((a, b) => a + b, 0) / filtered.length));
+          ac /= filtered.length;
+          return { ac, dc };
+        };
 
-        // SpO2: try log-domain method (PMC10705321) first for motion robustness,
-        // fall back to linear AC/DC ratio-of-ratios.
-        const { spo2: spo2Log, method } = estimateSpo2Best(redWin, greenWin, redFiltered, greenFiltered, zlo, fs);
-        spo2Val = spo2Log;
-        hbVal = estimateHbRedGreen(redWin, greenWin, redFiltered, greenFiltered, zlo);
+        const { ac: acR, dc: dcR } = getAcDc(redRef.current, redFiltered);
+        const { ac: acG, dc: dcG } = getAcDc(greenRef.current, greenFiltered);
+        const { ac: acB, dc: dcB } = getAcDc(blueRef.current, blueFiltered);
 
-        // Fallback: red/blue ratio-of-ratios (used only when green is
-        // saturated or absent — rare under torch, but keep the branch).
-        if (spo2Val === null && redWin.length > 0 && blueWin.length > 0) {
-          const dcR = redWin.reduce((a, b) => a + b, 0) / redWin.length - zlo;
-          const dcB = blueWin.reduce((a, b) => a + b, 0) / blueWin.length - zlo;
-          if (dcR > 0 && dcB > 0) {
-            let sq = 0;
-            for (const v of redFiltered) sq += v * v;
-            const acR = Math.sqrt(sq / redFiltered.length);
-            sq = 0;
-            for (const v of blueFiltered) sq += v * v;
-            const acB = Math.sqrt(sq / blueFiltered.length);
-            const R = (acR / dcR) / (acB / dcB);
-            spo2Val = Math.min(100, Math.max(88, 110 - 25 * R));
-          }
+        // SpO2: R = (AC_Red/DC_Red) / (AC_Blue/DC_Blue) - Note: needs IR (940nm) for accuracy
+        // Using blue as proxy for IR (not clinically valid, for display only)
+        if (dcR > 0 && dcB > 0 && acR > 0 && acB > 0) {
+          const Rratio = (acR / dcR) / (acB / dcB);
+          // Standard formula: SpO2 = 110 - 25*R (calibrated for 660nm/940nm)
+          // With blue as IR proxy, values will be off - cap and offset
+          spo2Val = 110 - 25 * Rratio + spo2Offset;
+          spo2Val = Math.min(Math.max(spo2Val, 70), 100);
+        }
+
+        // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
+        if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
+          const HbRatio = (acR / dcR) / (acG / dcG);
+          hbVal = 18.2 - 6.8 * HbRatio;
+          hbVal = Math.min(Math.max(hbVal, 5), 20);
         }
       }
 
@@ -1122,27 +478,15 @@ export default function VitalMonitoringPage() {
 
       // Always update with new values when available, preserving last valid otherwise
       setBpm(hr);
-      // SpO2/Hb are independent of HR validity: show them whenever the color
-      // buffers are usable (previously they only updated when HR was valid, so
-      // any HR failure also blanked SpO2/Hb).
-      if (hbVal !== null) setHb(hbVal);
-      else if (demoMode) setHb(13.5 + (Math.random() - 0.5) * 1.0);
-      if (spo2Val !== null) setSpo2(Math.round(spo2Val));
-      else if (demoMode) setSpo2(Math.round(97 + (Math.random() - 0.5) * 2));
+      if (hr !== null) {
+        // Update Hb and SpO2 when heart rate is valid, preserving last valid value if new one unavailable
+        setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
+        setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
+      }
       // Update BP and Glucose from PPG analysis
       setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
       setSugar(glucoseVal);
       setCreatinine(analysis.creatinine);
-      // Add stress level
-      if (analysis.stress) {
-        setStress({
-          level: analysis.stress.level,
-          score: analysis.stress.score,
-          confidence: analysis.stress.confidence
-        });
-      } else if (demoMode) {
-        setStress({ level: "low", score: 25 + Math.random() * 20, confidence: 0.7 });
-      }
       if (analysis.respRate !== null) {
         setRespRate(Math.round(analysis.respRate * 10) / 10);
       } else if (demoMode) {
@@ -1161,20 +505,18 @@ export default function VitalMonitoringPage() {
       if (isMeasuring && hr !== null) {
         samplesRef.current.push({
           bpm: hr,
-          spo2: spo2Val !== null ? Math.round(spo2Val) : null,
-          hb: hbVal !== null ? Math.round(hbVal * 10) / 10 : null,
-          bpSys: bpSysVal,
-          bpDia: bpDiaVal,
-          sugar: glucoseVal,
-          creatinine: analysis.creatinine.creatinine,
+          spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
+          hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
+          bpSys: bpSysVal ?? 0,
+          bpDia: bpDiaVal ?? 0,
+          sugar: glucoseVal ?? 0,
+          creatinine: analysis.creatinine.creatinine ?? (demoMode ? 1.0 + (Math.random() - 0.5) * 0.3 : 0),
           signalQuality: sqi / 100,
           respRate: analysis.respRate ?? 15,
           sdnn: analysis.hrv?.sdnn ?? 0,
           rmssd: analysis.hrv?.rmssd ?? 0,
           pnn50: analysis.hrv?.pnn50 ?? 0,
           rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
-          stressLevel: analysis.stress?.level ?? "unknown",
-          stressScore: analysis.stress?.score ?? 50,
         });
       }
     }
@@ -1183,7 +525,7 @@ export default function VitalMonitoringPage() {
     if (cameraOnRef.current) {
       animFrame.current = requestAnimationFrame(processFrame);
     }
-  }, [drawWaveform, cameraMode, demoMode, patient]);
+  }, [drawWaveform, spo2Offset, cameraMode, demoMode, patient]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -1195,9 +537,6 @@ export default function VitalMonitoringPage() {
       greenRef.current = [];
       blueRef.current = [];
       ppgBufferRef.current = [];
-      syntheticBufferRef.current = [];
-      synthTimeRef.current = 0;
-      ppgTimestampsRef.current = [];
       setHb(null);
       setBpm(null);
       setRespRate(null);
@@ -1207,14 +546,7 @@ export default function VitalMonitoringPage() {
       setBp(null);
       setSugar(null);
       setCreatinine(null);
-      setStress(null);
       setFingerDetected(false);
-      fingerDetectedRef.current = false;
-      fingerHistoryRef.current = [];
-      roiCentroidRef.current = null;
-      setSkinDetected(false);
-      setFingerPressure(null);
-      setPressureDetail(null);
     }
     return () => cancelAnimationFrame(animFrame.current);
   }, [cameraOn, processFrame]);
@@ -1270,23 +602,8 @@ export default function VitalMonitoringPage() {
 
   const finalizeSession = useCallback(async () => {
     const samples = samplesRef.current;
-    // Average only over samples where the value was actually produced; gated
-    // metrics (SpO2/Hb/glucose/creatinine under low SQI) are null, and
-    // averaging them as 0 previously dragged the final reading toward zero.
-    const avg = (key: keyof typeof samples[number]): number | null => {
-      const vals: number[] = [];
-      for (const s of samples) {
-        const v = s[key];
-        if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
-      }
-      return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-    };
-    const median = (vals: number[]): number | null => {
-      if (vals.length === 0) return null;
-      const sorted = vals.slice().sort((a, b) => a - b);
-      const mid = Math.floor(sorted.length / 2);
-      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-    };
+    const avg = (key: keyof typeof samples[number]) =>
+      samples.length > 0 ? samples.reduce((a, s) => a + (s[key] as number), 0) / samples.length : 0;
     const mode = <T extends string>(items: T[]): T => {
       const m = new Map<T, number>();
       for (const it of items) m.set(it, (m.get(it) ?? 0) + 1);
@@ -1301,60 +618,56 @@ export default function VitalMonitoringPage() {
       return best;
     };
 
-    let computedReading: { bpm: number; spo2: number | null; hb: number | null; bpSys: number | null; bpDia: number | null; sugar: number | null; creatinine: number | null; egfr: number | null; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown"; stressLevel: string; stressScore: number } | null = null;
+    let computedReading: { bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; egfr: number; creatinineClass: string; creatinineConfidence: number; creatinineMethod: string; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: "regular" | "irregular" | "unknown" } | null = null;
 
     const ageYears = patient ? parseInt(patient.age, 10) || null : null;
     const patientSex = patient ? (patient.sex as "male" | "female") : null;
-    const assignCreatinine = (cr: number | null) => {
-      const rounded = cr !== null && cr > 0 ? Math.round(cr * 100) / 100 : null;
-      const egfr = estimateEgfr(rounded, ageYears, patientSex);
+    const assignCreatinine = (cr: number) => {
+      const rounded = Math.round(cr * 100) / 100;
+      const egfr = estimateEgfr(rounded > 0 ? rounded : null, ageYears, patientSex);
       return {
         creatinine: rounded,
-        egfr: egfr === null ? null : Math.round(egfr),
-        creatinineClass: rounded === null ? "" : rounded > 1.3 ? "high" : rounded < 0.6 ? "low" : "normal",
+        egfr: egfr === null ? 0 : Math.round(egfr),
+        creatinineClass: rounded > 1.3 ? "high" : rounded < 0.6 ? "low" : "normal",
       };
     };
 
     if (samples.length > 0) {
-      const bpSysAvg = avg("bpSys");
-      const bpDiaAvg = avg("bpDia");
+      const bpSysAvg = Math.round(avg("bpSys"));
+      const bpDiaAvg = Math.round(avg("bpDia"));
       const cr = assignCreatinine(avg("creatinine"));
-      const stressLevelMode = mode(samples.map((s) => (s.stressLevel as string)));
-      const stressScoreAvg = avg("stressScore");
       computedReading = {
-        bpm: avg("bpm") ?? 0,
-        spo2: avg("spo2") !== null ? Math.round(avg("spo2") as number) : null,
-        hb: avg("hb") !== null ? Math.round((avg("hb") as number) * 10) / 10 : null,
-        bpSys: bpSysAvg !== null ? Math.round(bpSysAvg) : null,
-        bpDia: bpDiaAvg !== null ? Math.round(bpDiaAvg) : null,
-        sugar: avg("sugar") !== null ? Math.round(avg("sugar") as number) : null,
+        bpm: avg("bpm"),
+        spo2: Math.round(avg("spo2")),
+        hb: avg("hb"),
+        bpSys: bpSysAvg,
+        bpDia: bpDiaAvg,
+        sugar: Math.round(avg("sugar")),
         creatinine: cr.creatinine,
         egfr: cr.egfr,
         creatinineClass: cr.creatinineClass,
         creatinineConfidence: creatinine?.confidence ?? 0,
         creatinineMethod: creatinine?.method ?? cameraMode,
-        signalQuality: avg("signalQuality") ?? 0,
-        respRate: avg("respRate") ?? 0,
-        sdnn: avg("sdnn") ?? 0,
-        rmssd: avg("rmssd") ?? 0,
-        pnn50: avg("pnn50") ?? 0,
+        signalQuality: avg("signalQuality"),
+        respRate: avg("respRate"),
+        sdnn: avg("sdnn"),
+        rmssd: avg("rmssd"),
+        pnn50: avg("pnn50"),
         rhythm: mode(samples.map((s) => (s.rhythm as "regular" | "irregular" | "unknown"))),
-        stressLevel: stressLevelMode,
-        stressScore: stressScoreAvg !== null ? Math.round(stressScoreAvg) : 50,
       };
     } else {
       const bpStr = bp;
       const bpParts = bpStr ? bpStr.split("/") : [];
       const bpSysVal = bpParts.length === 2 ? parseInt(bpParts[0], 10) : 0;
       const bpDiaVal = bpParts.length === 2 ? parseInt(bpParts[1], 10) : 0;
-      const cr = assignCreatinine(creatinine?.creatinine ?? null);
+      const cr = assignCreatinine(creatinine?.creatinine ?? 0);
       computedReading = {
         bpm: bpm ?? 0,
-        spo2,
-        hb,
-        bpSys: bpSysVal > 0 ? bpSysVal : null,
-        bpDia: bpDiaVal > 0 ? bpDiaVal : null,
-        sugar,
+        spo2: spo2 ?? 0,
+        hb: hb ?? 0,
+        bpSys: bpSysVal,
+        bpDia: bpDiaVal,
+        sugar: sugar ?? 0,
         creatinine: cr.creatinine,
         egfr: cr.egfr,
         creatinineClass: cr.creatinineClass,
@@ -1366,8 +679,6 @@ export default function VitalMonitoringPage() {
         rmssd: hrv?.rmssd ?? 0,
         pnn50: hrv?.pnn50 ?? 0,
         rhythm: (rhythm as "regular" | "irregular" | "unknown"),
-        stressLevel: stress?.level ?? "unknown",
-        stressScore: stress?.score ?? 50,
       };
     }
 
@@ -1379,24 +690,6 @@ export default function VitalMonitoringPage() {
 
     const videoBlob = await stopVideoRecording().catch(() => null);
     if (videoBlob && patient && computedReading) {
-      // Storage keeps numbers (0 = not measurable this session); the on-screen
-      // final reading keeps nulls so gated metrics render as "—".
-      const storedVitals = {
-        bpm: computedReading.bpm,
-        spo2: computedReading.spo2 ?? 0,
-        hb: computedReading.hb ?? 0,
-        bpSys: computedReading.bpSys ?? 0,
-        bpDia: computedReading.bpDia ?? 0,
-        sugar: computedReading.sugar ?? 0,
-        signalQuality: computedReading.signalQuality,
-        respRate: computedReading.respRate,
-        sdnn: computedReading.sdnn,
-        rmssd: computedReading.rmssd,
-        pnn50: computedReading.pnn50,
-        creatinine: computedReading.creatinine ?? 0,
-        egfr: computedReading.egfr ?? 0,
-        rhythm: computedReading.rhythm,
-      };
       await addVitalReading({
         patient: {
           name: patient.name,
@@ -1406,39 +699,26 @@ export default function VitalMonitoringPage() {
           pregnancy: patient.pregnancy as "pregnant" | "non-pregnant" | undefined,
           menopause: patient.menopause as "yes" | "no" | undefined,
         },
-        vitals: storedVitals,
+        vitals: computedReading,
         cameraMode,
         demoMode,
+        spo2Offset,
       }, videoBlob);
       await loadReadings();
     }
-  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stress, stopStream, stopVideoRecording, patient, cameraMode, demoMode, loadReadings]);
+  }, [bpm, hb, spo2, bp, sugar, creatinine, signalQuality, respRate, hrv, rhythm, stopStream, stopVideoRecording, patient, cameraMode, demoMode, spo2Offset, loadReadings]);
 
   const startAutoCountdown = useCallback(() => {
     sessionStartRef.current = Date.now();
     samplesRef.current = [];
     videoChunksRef.current = [];
-    // Reset every signal buffer so a new session never inherits samples from a
-    // previous one (previously the color/PPG buffers persisted across sessions).
-    valuesRef.current = [];
-    redRef.current = [];
-    greenRef.current = [];
-    blueRef.current = [];
-    ppgBufferRef.current = [];
-    syntheticBufferRef.current = [];
-    synthTimeRef.current = 0;
-    frameIntervalsRef.current = [];
-    fingerHistoryRef.current = [];
-    roiCentroidRef.current = null;
-    lastBpmUpdate.current = 0;
-    ppgTimestampsRef.current = [];
     setFinalReading(null);
     setPhase("warming");
-    setCountdown(130);
+    setCountdown(100);
     if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
     countdownTimerRef.current = window.setInterval(() => {
       const elapsed = Date.now() - sessionStartRef.current;
-      const remaining = Math.max(0, 130 - Math.floor(elapsed / 1000));
+      const remaining = Math.max(0, 100 - Math.floor(elapsed / 1000));
       setCountdown(remaining);
       if (elapsed >= 10000 && phaseRef.current === "warming") {
         setPhase("measuring");
@@ -1452,11 +732,7 @@ export default function VitalMonitoringPage() {
   }, [finalizeSession]);
 
   const toggleCamera = useCallback(async () => {
-    // Read the on/off state from the ref: `switchCameraMode` calls this right
-    // after setState, so the closure's `cameraOn` can still say "on" when the
-    // camera has already been stopped, which would re-enter the stop branch and
-    // never open the new sensor.
-    if (cameraOnRef.current) {
+    if (cameraOn) {
       if (countdownTimerRef.current) {
         window.clearInterval(countdownTimerRef.current);
         countdownTimerRef.current = null;
@@ -1497,11 +773,7 @@ export default function VitalMonitoringPage() {
         height: { ideal: 480 }
       };
 
-      // Read the mode from the ref, not from the closure's `cameraMode`: when
-      // `switchCameraMode` calls this immediately after setState, the closure
-      // still holds the previous mode and would open the wrong sensor.
-      const mode = cameraModeRef.current;
-      if (mode === "rear") {
+      if (cameraMode === "rear") {
         videoConstraints.facingMode = "environment";
       } else {
         videoConstraints.facingMode = "user";
@@ -1517,42 +789,14 @@ export default function VitalMonitoringPage() {
       }
 
       const videoTrack = stream.getVideoTracks()[0];
-      // Report which sensor was actually granted so a device that ignores
-      // facingMode (common on desktop and some Android builds) is visible in
-      // the UI instead of silently analysing the wrong camera.
-      if (videoTrack) {
+      if (videoTrack && cameraMode === "rear") {
         try {
-          const caps = videoTrack.getCapabilities?.() as { facingMode?: unknown } | undefined;
-          if (caps?.facingMode && caps.facingMode !== mode) {
-            setError(
-              `This device opened the ${String(caps.facingMode)}-facing camera instead of ${mode}. ` +
-              `Finger/vitals detection requires the ${mode} camera.`
-            );
+          const caps = videoTrack.getCapabilities?.() as { torch?: unknown } | undefined;
+          if (caps?.torch) {
+            await videoTrack.applyConstraints({ torch: torchOn } as any);
           }
         } catch {
-          // getCapabilities is optional; ignore when unavailable.
-        }
-        if (mode === "rear") {
-          // Contact PPG is reflective: the finger must be illuminated or it
-          // merely blocks the lens and the frame goes near-black, in which case
-          // finger detection legitimately cannot succeed. Surface that instead
-          // of leaving the user with a silent "place fingertip over lens".
-          try {
-            const torchCaps = videoTrack.getCapabilities?.() as { torch?: unknown } | undefined;
-            if (torchCaps?.torch) {
-              await videoTrack.applyConstraints({ torch: torchOnRef.current } as any);
-            } else {
-              setError(
-                "This device does not expose a torch/flash for the rear camera. " +
-                "Rear-camera contact PPG needs the finger to be illuminated, so readings may be unreliable."
-              );
-            }
-          } catch {
-            setError(
-              "Could not enable the rear-camera torch. Rear-camera contact PPG needs the finger " +
-              "to be illuminated, so readings may be unreliable."
-            );
-          }
+          // Torch may not be supported on all devices
         }
       }
 
@@ -1560,16 +804,6 @@ export default function VitalMonitoringPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
-      }
-      
-      // Load device calibration for adaptive thresholds
-      try {
-        const calibration = await loadDeviceCalibration();
-        calibrationRef.current = calibration;
-        console.log('[Calibration] Loaded:', calibration);
-      } catch (e) {
-        console.warn('[Calibration] Failed to load, using fallback:', e);
-        calibrationRef.current = { zlo: 16.0, slope: 1.0, source: 'FALLBACK' };
       }
       
       startVideoRecording(stream);
@@ -1583,40 +817,24 @@ export default function VitalMonitoringPage() {
     } finally {
       setLoading(false);
     }
-  // cameraOn / cameraMode / torchOn are read through refs, not captured from the
-  // closure, so they are deliberately absent from the deps.
-  }, [stopStream, startAutoCountdown, demoMode, stopVideoRecording, startVideoRecording]);
+  }, [cameraOn, stopStream, startAutoCountdown, cameraMode, torchOn, demoMode, stopVideoRecording, startVideoRecording]);
 
   toggleCameraRef.current = toggleCamera;
 
   const switchCameraMode = useCallback(async (mode: "front" | "rear") => {
     const wasOn = cameraOnRef.current;
-    // Write the mirrors synchronously. `toggleCameraRef.current()` is invoked
-    // below and reads these refs; if they still held the previous mode the wrong
-    // sensor would open (front mode showing the rear camera, and rear mode
-    // showing a face so the finger was never detected).
-    cameraModeRef.current = mode;
     setCameraMode(mode);
-    const nextTorch = mode === "rear";
-    torchOnRef.current = nextTorch;
-    setTorchOn(nextTorch);
-    // Reset every per-mode detector so the new mode starts from a clean slate:
-    // the finger vote must not inherit history from a face, and the front-camera
-    // ROI centroid must be re-seeded rather than locked on the old framing.
-    fingerDetectedRef.current = false;
-    fingerHistoryRef.current = [];
-    roiCentroidRef.current = null;
-    setFingerDetected(false);
-    setFingerPressure(null);
-    setPressureDetail(null);
+    if (mode === "rear") {
+      setTorchOn(true);
+    } else {
+      setTorchOn(false);
+    }
     if (wasOn) {
       stopStream();
       setCameraOn(false);
       setError(null);
       setPhase("idle");
       setCountdown(0);
-      // Wait for React to commit the cameraOn=false transition so the restart
-      // path in `toggleCamera` sees a stopped camera.
       await new Promise((r) => setTimeout(r, 100));
     }
     toggleCameraRef.current?.();
@@ -1668,7 +886,7 @@ export default function VitalMonitoringPage() {
       <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
         <h1 className="text-4xl font-extrabold mb-2 tracking-tight text-center">PPG Vital Scan</h1>
         <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
-          Enter patient details to begin a 130-second measurement session.
+          Enter patient details to begin a 100-second measurement session.
         </p>
 
         <div className="w-full max-w-lg bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl shadow-red-900/20 p-6">
@@ -1845,7 +1063,7 @@ export default function VitalMonitoringPage() {
         <div className="w-full max-w-lg mb-6 p-4 rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 animate-fade-in">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-bold text-emerald-300">Measurement Complete</h2>
-            <span className="text-xs text-emerald-200/80">130s session • 120s recorded after 10s warm-up</span>
+            <span className="text-xs text-emerald-200/80">100s session • 90s recorded after 10s warm-up</span>
           </div>
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 text-center">
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
@@ -1854,7 +1072,7 @@ export default function VitalMonitoringPage() {
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">SpO₂</p>
-              <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2 !== null ? `${finalReading.spo2}%` : "—"}</p>
+              <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2}%</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Resp Rate</p>
@@ -1866,15 +1084,15 @@ export default function VitalMonitoringPage() {
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Hb</p>
-              <p className="text-xl font-bold text-rose-400">{finalReading.hb !== null ? `${finalReading.hb.toFixed(1)} g/dL` : "—"}</p>
+              <p className="text-xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Creatinine</p>
-              <p className="text-xl font-bold text-teal-400">{finalReading.creatinine !== null ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "—"}</p>
+              <p className="text-xl font-bold text-teal-400">{finalReading.creatinine > 0 ? finalReading.creatinine.toFixed(2) : "—"} mg/dL</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">eGFR</p>
-              <p className="text-xl font-bold text-teal-300">{finalReading.egfr !== null ? finalReading.egfr : "—"}</p>
+              <p className="text-xl font-bold text-teal-300">{finalReading.egfr > 0 ? finalReading.egfr : "—"}</p>
             </div>
             <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
               <p className="text-neutral-500 text-[10px] mb-1">Signal Quality</p>
@@ -1893,17 +1111,17 @@ export default function VitalMonitoringPage() {
               RMSSD: {finalReading.rmssd > 0 ? finalReading.rmssd.toFixed(1) : "—"} ms
             </span>
             <span className="px-2 py-1 rounded-full border text-rose-400 border-rose-500 bg-rose-500/10">
-              Hb: {finalReading.hb !== null ? `${finalReading.hb.toFixed(1)} g/dL` : "—"}
+              Hb: {finalReading.hb.toFixed(1)} g/dL
             </span>
             <span className={`px-2 py-1 rounded-full border ${
               finalReading.creatinineClass === "high" ? "text-red-400 border-red-500 bg-red-500/10" :
               finalReading.creatinineClass === "low" ? "text-sky-400 border-sky-500 bg-sky-500/10" :
               "text-teal-400 border-teal-500 bg-teal-500/10"
             }`}>
-              Creatinine: {finalReading.creatinine !== null ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "—"} ({finalReading.creatinineClass || "n/a"})
+              Creatinine: {finalReading.creatinine > 0 ? finalReading.creatinine.toFixed(2) : "—"} mg/dL ({finalReading.creatinineClass})
             </span>
             <span className="px-2 py-1 rounded-full border text-teal-300 border-teal-500 bg-teal-500/10">
-              eGFR: {finalReading.egfr !== null ? finalReading.egfr : "—"} mL/min/1.73m²
+              eGFR: {finalReading.egfr > 0 ? finalReading.egfr : "—"} mL/min/1.73m²
             </span>
             <span className="px-2 py-1 rounded-full border text-violet-400 border-violet-500 bg-violet-500/10">
               Signal: {(finalReading.signalQuality * 100).toFixed(1)}%
@@ -1915,35 +1133,8 @@ export default function VitalMonitoringPage() {
         <div className="relative h-64 bg-black">
           <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
           {cameraOn && cameraMode === "rear" && (
-            <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
-              <div className={`text-xs px-2 py-1 rounded ${fingerDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"}`}>
-                {fingerDetected ? "Finger detected" : "Place fingertip over lens"}
-              </div>
-              {fingerDetected && fingerPressure && (
-                <div className={`text-xs px-2 py-1 rounded font-medium ${
-                  fingerPressure === "adequate" ? "bg-emerald-700/90 text-emerald-50" :
-                  fingerPressure === "low" ? "bg-amber-700/90 text-amber-50" :
-                  "bg-red-700/90 text-red-50"
-                } flex items-center gap-1`}>
-                  {pressureDetail === "ADEQUATE" && <span className="text-emerald-300">✓</span>}
-                  {pressureDetail === "UNSTABLE" && <span className="text-sky-300">↻</span>}
-                  {fingerPressure === "low" && <span className="text-amber-300">⚠</span>}
-                  {fingerPressure === "excessive" && <span className="text-red-300">⚠</span>}
-                  <span>
-                    {pressureDetail === "TOO_HEAVY" ? "Press lighter — occlusion detected" :
-                     pressureDetail === "TOO_LIGHT" ? "Press firmer — light leak" :
-                     pressureDetail === "UNSTABLE" ? "Hold still — motion detected" :
-                     pressureDetail === "WEAK_SIGNAL" ? "Adjust gently, keep still" :
-                     pressureDetail === "ADEQUATE" ? "Pressure OK" :
-                     "Adjust pressure"}
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-          {cameraOn && cameraMode === "front" && !demoMode && (
-            <div className={`absolute top-2 right-2 ${skinDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"} text-xs px-2 py-1 rounded`}>
-              {skinDetected ? "Skin ROI locked" : "Looking for skin..."}
+            <div className={`absolute top-2 right-2 ${fingerDetected ? "bg-emerald-700/80 text-emerald-100" : "bg-amber-700/80 text-amber-100"} text-xs px-2 py-1 rounded`}>
+              {fingerDetected ? "Finger detected" : "Place fingertip over lens"}
             </div>
           )}
           {!cameraOn && <div className="absolute inset-0 flex items-center justify-center"><span className="text-neutral-500 text-sm">Camera off</span></div>}
@@ -1967,8 +1158,8 @@ export default function VitalMonitoringPage() {
               <span className="block text-sm text-neutral-300 truncate">
                 {phase === "warming" && countdown > 0
                   ? `Warming up — discarding first 10s (${countdown}s total remaining)`
-: phase === "measuring"
-                   ? `Measuring — recording next 120s (${countdown}s remaining)`
+                  : phase === "measuring"
+                   ? `Measuring — recording next 90s (${countdown}s remaining)`
                   : phase === "finalized"
                   ? "Measurement complete — final reading below"
                   : loading
@@ -2014,23 +1205,22 @@ export default function VitalMonitoringPage() {
             {cameraMode === "rear" && (
               <button
                  onClick={async () => {
-                    const next = !torchOn;
-                    torchOnRef.current = next;
-                    setTorchOn(next);
-                    const track = streamRef.current?.getVideoTracks()[0];
-                    if (track) {
-                      try {
-                        const caps = track.getCapabilities?.() as { torch?: unknown } | undefined;
-                        if (caps?.torch) {
-                          await track.applyConstraints({ torch: next } as any);
-                        } else {
-                          setError("This device/browser does not expose a torch/flash API for the selected track.");
-                        }
-                      } catch (e) {
-                        setError(getErrorMessage(e));
-                      }
-                    }
-                  }}
+                   const next = !torchOn;
+                   setTorchOn(next);
+                   const track = streamRef.current?.getVideoTracks()[0];
+                   if (track) {
+                     try {
+                       const caps = track.getCapabilities?.() as { torch?: unknown } | undefined;
+                       if (caps?.torch) {
+                         await track.applyConstraints({ torch: next } as any);
+                       } else {
+                         setError("This device/browser does not expose a torch/flash API for the selected track.");
+                       }
+                     } catch (e) {
+                       setError(getErrorMessage(e));
+                     }
+                   }
+                 }}
                 className={`px-3 py-2 rounded-lg text-xs font-semibold transition border ${
                   torchOn
                     ? "bg-amber-600 border-amber-500 text-neutral-100"
@@ -2050,6 +1240,19 @@ export default function VitalMonitoringPage() {
             >
               {demoMode ? "Demo: On" : "Demo: Off"}
             </button>
+            <div className="ml-auto flex items-center gap-2">
+              <label className="text-[10px] text-neutral-400">SpO₂ offset</label>
+              <input
+                type="range"
+                min="-10"
+                max="10"
+                step="1"
+                value={spo2Offset}
+                onChange={(e) => setSpo2Offset(Number(e.target.value))}
+                className="w-24"
+              />
+              <span className="text-[10px] text-neutral-500 w-6">{spo2Offset > 0 ? `+${spo2Offset}` : spo2Offset}</span>
+            </div>
           </div>
         </div>
         <div className="px-4 pb-4">
@@ -2096,7 +1299,7 @@ export default function VitalMonitoringPage() {
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Glucose</p>
               <p className="text-2xl font-bold text-amber-400">{sugar !== null ? `${sugar} mg/dL` : "--"}</p>
-              <p className="text-[10px] mt-1 text-neutral-500">not measurable from RGB alone</p>
+              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Creatinine</p>
@@ -2109,19 +1312,14 @@ export default function VitalMonitoringPage() {
               <p className="text-neutral-400 mb-1">Signal Quality</p>
               <p className="text-2xl font-bold text-violet-400">{signalQuality !== null ? `${(signalQuality * 100).toFixed(1)}%` : "--"}</p>
             </div>
-            <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
-              <p className="text-neutral-400 mb-1">Stress Level</p>
-              <p className="text-2xl font-bold text-orange-400">{stress ? stress.level.charAt(0).toUpperCase() + stress.level.slice(1) : "--"}</p>
-              <p className="text-[10px] mt-1 text-neutral-500">Score: {stress ? `${stress.score}/100` : "--"} • Conf: {stress ? `${(stress.confidence * 100).toFixed(0)}%` : "--"}</p>
-            </div>
           </div>
         )}
         {phase === "finalized" && finalReading && (
           <div className="px-4 pb-4">
             <div className="rounded-xl border-2 border-emerald-500/60 bg-emerald-950/30 p-4">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-base font-bold text-emerald-300">Final Reading (130s analysis)</h2>
-                <span className="text-[10px] text-emerald-200/80">120s recording after 10s warm-up</span>
+                <h2 className="text-base font-bold text-emerald-300">Final Reading (100s analysis)</h2>
+                <span className="text-[10px] text-emerald-200/80">90s recording after 10s warm-up</span>
               </div>
               <div className="mb-4 p-3 rounded-lg bg-neutral-900/80 border border-emerald-700/40 text-xs">
                 <p className="text-neutral-400 mb-1 font-semibold">Patient</p>
@@ -2172,44 +1370,38 @@ export default function VitalMonitoringPage() {
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">SpO₂</p>
-                  <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2 !== null ? `${finalReading.spo2}%` : "--"}</p>
+                  <p className="text-2xl font-bold text-cyan-400">{finalReading.spo2}%</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Hb</p>
-                  <p className="text-2xl font-bold text-rose-400">{finalReading.hb !== null ? `${finalReading.hb.toFixed(1)} g/dL` : "--"}</p>
+                  <p className="text-2xl font-bold text-rose-400">{finalReading.hb.toFixed(1)} g/dL</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">BP</p>
-                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys !== null && finalReading.bpDia !== null ? `${finalReading.bpSys}/${finalReading.bpDia}` : "--"}</p>
+                  <p className="text-xl font-bold text-emerald-400">{finalReading.bpSys > 0 ? `${finalReading.bpSys}/${finalReading.bpDia}` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Glucose</p>
-                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar !== null ? `${finalReading.sugar} mg/dL` : "--"}</p>
+                  <p className="text-xl font-bold text-amber-400">{finalReading.sugar > 0 ? `${finalReading.sugar} mg/dL` : "--"}</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-teal-700/40">
                   <p className="text-neutral-400 mb-1">Serum Creatinine</p>
-                  <p className="text-xl font-bold text-teal-400">{finalReading.creatinine !== null ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "--"}</p>
+                  <p className="text-xl font-bold text-teal-400">{finalReading.creatinine > 0 ? `${finalReading.creatinine.toFixed(2)} mg/dL` : "--"}</p>
                   <p className={`text-[10px] mt-1 font-semibold ${
                     finalReading.creatinineClass === "high" ? "text-red-400" :
-                    finalReading.creatinineClass === "low" ? "text-sky-400" :
-                    finalReading.creatinineClass === "normal" ? "text-emerald-400" : "text-neutral-500"
+                    finalReading.creatinineClass === "low" ? "text-sky-400" : "text-emerald-400"
                   }`}>
-                    {finalReading.creatinineClass === "high" ? "High (>1.3)" : finalReading.creatinineClass === "low" ? "Low (<0.6)" : finalReading.creatinineClass === "normal" ? "Normal (0.6–1.3)" : "Signal quality too low"}
+                    {finalReading.creatinineClass === "high" ? "High (>1.3)" : finalReading.creatinineClass === "low" ? "Low (<0.6)" : "Normal (0.6–1.3)"}
                   </p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-teal-700/40">
                   <p className="text-neutral-400 mb-1">eGFR (CKD-EPI 2021)</p>
-                  <p className="text-xl font-bold text-teal-300">{finalReading.egfr !== null ? `${finalReading.egfr}` : "--"}</p>
+                  <p className="text-xl font-bold text-teal-300">{finalReading.egfr > 0 ? `${finalReading.egfr}` : "--"}</p>
                   <p className="text-[10px] mt-1 text-neutral-500">mL/min/1.73m²</p>
                 </div>
                 <div className="bg-neutral-900/80 rounded-lg p-3 border border-emerald-700/40">
                   <p className="text-neutral-400 mb-1">Signal</p>
                   <p className="text-xl font-bold text-violet-400">{(finalReading.signalQuality * 100).toFixed(1)}%</p>
-                </div>
-                <div className="bg-neutral-900/80 rounded-lg p-3 border border-orange-700/40">
-                  <p className="text-neutral-400 mb-1">Stress Level</p>
-                  <p className="text-2xl font-bold text-orange-400">{finalReading.stressLevel !== undefined ? finalReading.stressLevel.charAt(0).toUpperCase() + finalReading.stressLevel.slice(1) : "--"}</p>
-                  <p className="text-[10px] mt-1 text-neutral-500">Score: {finalReading.stressScore !== undefined ? `${finalReading.stressScore}/100` : "--"}</p>
                 </div>
               </div>
               <div className="mt-3 mb-2 p-3 rounded-lg bg-neutral-900/80 border border-teal-700/40 text-[11px] text-neutral-400">
@@ -2371,13 +1563,13 @@ export default function VitalMonitoringPage() {
               <div
                 className="h-full bg-red-600 transition-all duration-300"
                 style={{
-                  width: phase === "finalized" ? "100%" : phase === "measuring" ? `${Math.min(100, ((130 - countdown) / 130) * 100)}%` : phase === "warming" ? `${Math.min(100, ((130 - countdown) / 130) * 100)}%` : "0%",
+                  width: phase === "finalized" ? "100%" : phase === "measuring" ? `${Math.min(100, ((100 - countdown) / 100) * 100)}%` : phase === "warming" ? `${Math.min(100, ((100 - countdown) / 100) * 100)}%` : "0%",
                 }}
               />
             </div>
             <p className="mt-1 text-[10px] text-neutral-500 text-center">
               {phase === "warming" && `Warm-up — discarding first 10s (${countdown}s)`}
-              {phase === "measuring" && `Measuring — recording next 120s (${countdown}s left)`}
+              {phase === "measuring" && `Measuring — recording next 90s (${countdown}s left)`}
               {phase === "finalized" && "Done"}
             </p>
           </div>
