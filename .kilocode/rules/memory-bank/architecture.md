@@ -9,24 +9,38 @@
 │       ├── layout.tsx          # Root layout
 │       ├── page.tsx            # Home page
 │       ├── globals.css         # Global styles
-│       ├── vital-monitoring/
-│       │   └── page.tsx        # Real-time PPG monitoring
-│       ├── training/
-│       │   └── page.tsx        # Training dashboard
-│       └── api/
-│           └── training/
-│               └── route.ts    # Training API
-├── training/
-│   ├── run_training.py         # Main training script
-│   ├── requirements.txt        # Python dependencies
-│   └── rppglib/                # MCD-rPPG library
-│       ├── models/             # Model implementations
-│       ├── train.py            # Training loop
-│       ├── processing.py       # Signal processing
-│       ├── face_utils.py       # Face detection
-│       └── data_utils.py       # Data loading
-└── vital_monitoring_app/       # Flutter app (legacy)
-```
+  │       ├── vital-monitoring/
+  │       │   └── page.tsx        # Real-time PPG monitoring
+  │       │   └── rosenet-inference.ts  # ROSE-Net TF.js model (SpO2)
+  │       │   └── trppg-pipeline.ts     # TrPPG pipeline (10 stages)
+  │       │   └── ppg-analysis.ts       # Signal processing
+  │       │   └── rrest-resp.ts         # RRest respiratory rate
+  │       ├── training/
+  │       │   └── page.tsx         # Training dashboard
+  │       └── api/
+  │           ├── training/
+  │           │   └── route.ts     # Training API
+  │           └── rppg/
+  │               ├── spo2/
+  │               │   └── route.ts # ROSE-Net SpO2 API (proxies to FastAPI)
+  │               └── stmap/
+  │                   └── route.ts # STMap extraction endpoint
+  ├── training/
+  │   ├── run_training.py          # Main training script
+  │   ├── train_rosenet.py         # ROSE-Net cross-domain training
+  │   ├── requirements.txt         # Python dependencies
+  │   └── rppglib/                 # MCD-rPPG library
+  │       ├── models/
+  │       │   └── ROSENet.py       # ROSE-Net PyTorch model
+  │       ├── stmap.py             # STMap generation + PPG→RGB synthesis
+  │       ├── bidmc_data.py        # BIDMC cross-domain dataset loader
+  │       ├── train.py             # Training loop
+  │       ├── processing.py        # Signal processing
+  │       ├── face_utils.py        # Face detection
+  │       └── data_utils.py        # Data loading
+  ├── rppg_api.py                  # FastAPI backend (port 8002, proxied via rewrites)
+  └── vital_monitoring_app/        # Flutter app (legacy)
+  ```
 
 ## Key Design Patterns
 

@@ -21,6 +21,13 @@
  */
 
 // ─────────────────────────────────────────────────────────────────────
+// Imports
+// ─────────────────────────────────────────────────────────────────────
+
+import { estimateSpO2 as estimateSpO2ROSENet, getROSENetInstance, type SpO2Result as ROSENetSpO2Result } from "./rosenet-inference";
+import type { ROSENetConfig } from "./rosenet-inference";
+
+// ─────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────
 
@@ -102,6 +109,8 @@ export interface TrPPGResult {
   hrv: HRVResult;
   spo2: number | null;
   spo2R: number | null;
+  spo2Method: "empirical" | "rosenet";
+  spo2Confidence: number;
   bp: BPResult;
   hb: number | null;
   glucose: number | null;
@@ -1490,12 +1499,75 @@ export function runTrPPG(samples: FrameSample[], cfg: TrPPGConfig, opts: TrPPGOp
     hrv,
     spo2,
     spo2R,
+    spo2Method: "empirical",
+    spo2Confidence: spo2 !== null ? 0.5 : 0,
     bp,
     hb,
     glucose,
     creatinine,
     diagnostics,
   };
+}
+
+/**
+ * Async wrapper around runTrPPG that upgrades SpO2 estimation using
+ * ROSE-Net (deep learning) when the model is available, falling back
+ * to the empirical AC/DC ratio-of-ratios method otherwise.
+ *
+ * This avoids loading the TF.js model during synchronous pipeline execution.
+ */
+export async function runTrPPGAsync(
+  samples: FrameSample[],
+  cfg: TrPPGConfig,
+  opts: TrPPGOptions & { rosenetConfig?: Partial<ROSENetConfig>; stmapPath?: string } = {},
+): Promise<TrPPGResult> {
+  // Run synchronous pipeline (uses empirical SpO2)
+  const result = runTrPPG(samples, cfg, opts);
+
+  // Try to load and run ROSE-Net
+  const rosenet = getROSENetInstance(opts.rosenetConfig);
+
+  if (!rosenet.isReady()) {
+    try {
+      if (opts.stmapPath) {
+        await rosenet.load(opts.stmapPath);
+      } else {
+        await rosenet.loadFromCache();
+      }
+    } catch (e) {
+      console.warn("ROSE-Net model load failed, using empirical SpO2:", e);
+    }
+  }
+
+  if (rosenet.isReady()) {
+    try {
+      const rRaw = samples.map((s) => s.r);
+      const gRaw = samples.map((s) => s.g);
+      const bRaw = samples.map((s) => s.b);
+
+      const spo2Result: ROSENetSpO2Result = await rosenet.estimateSpO2(
+        rRaw,
+        gRaw,
+        bRaw,
+        result.hr,
+        result.sqi,
+      );
+
+      if (spo2Result.spo2 !== null) {
+        return {
+          ...result,
+          spo2: spo2Result.spo2,
+          spo2Method: spo2Result.method,
+          spo2Confidence: spo2Result.confidence,
+          spo2R: result.spo2R,
+        };
+      }
+    } catch (e) {
+      console.warn("ROSE-Net inference failed, using empirical SpO2:", e);
+    }
+  }
+
+  return result;
 }
 
 /** Perfusion index (AC/DC) of the pulse against the green DC reference. */

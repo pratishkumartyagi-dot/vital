@@ -28,7 +28,11 @@ export async function POST(request: Request) {
 export async function GET() {
   return NextResponse.json({
     status: 'ready',
-    models: ['SCNN_8rois', 'POS', 'PBV', 'OMIT', 'PhysFormer', 'RhythmFormer', 'TSCAN', 'iBVPNet'],
-    datasets: ['mcd_rppg', 'MMPD', 'SCAMPS', 'UBFC_rPPG']
+    models: ['SCNN_8rois', 'POS', 'PBV', 'OMIT', 'PhysFormer', 'RhythmFormer', 'TSCAN', 'iBVPNet', 'ROSENet'],
+    datasets: ['mcd_rppg', 'MMPD', 'SCAMPS', 'UBFC_rPPG', 'bidmc'],
+    spo2Models: ['ROSENet'],
+    description: {
+      ROSENet: "Cross-domain SpO2 estimation: pre-train on BIDMC contact PPG, fine-tune on camera rPPG video (Chowdhury et al., BSPC 2025)"
+    }
   });
 }

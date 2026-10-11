@@ -5,6 +5,11 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import Link from 'next/link';
 import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass } from './ppg-analysis';
 import { 
+  getROSENetInstance,
+  type ROSENetConfig,
+  computeEmpiricalSpO2,
+} from './rosenet-inference';
+import { 
   addVitalReading, 
   getVitalReadings, 
   downloadReadings, 
@@ -60,6 +65,8 @@ export default function VitalMonitoringPage() {
   const [spo2Offset, setSpo2Offset] = useState(0);
   const [bpm, setBpm] = useState<number | null>(null);
   const [spo2, setSpo2] = useState<number | null>(null);
+  const [spo2Method, setSpo2Method] = useState<"rosenet" | "empirical">("empirical");
+  const [rosenetReady, setRosenetReady] = useState(false);
   const [bp, setBp] = useState<string | null>(null);
   const [sugar, setSugar] = useState<number | null>(null);
   const [hb, setHb] = useState<number | null>(null);
@@ -180,6 +187,25 @@ export default function VitalMonitoringPage() {
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadModel = async () => {
+      const rosenet = getROSENetInstance();
+      if (!rosenet.isReady()) {
+        try {
+          await rosenet.loadFromCache();
+          if (!cancelled) setRosenetReady(true);
+        } catch {
+          if (!cancelled) setRosenetReady(false);
+        }
+      } else {
+        if (!cancelled) setRosenetReady(true);
+      }
+    };
+    loadModel();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -431,15 +457,40 @@ export default function VitalMonitoringPage() {
       const sqi = analysis.heart.signalQuality;
       setSignalQuality(sqi / 100);
 
-      // Compute SpO2 and Hb from bandpass-filtered color signals
-      // Note: Smartphone cameras lack IR (940nm), so SpO2 is an estimate only
+      // Compute SpO2 using ROSE-Net if available, otherwise empirical AC/DC
       let spo2Val: number | null = null;
+      let spo2MethodUsed: "rosenet" | "empirical" = "empirical";
       let hbVal: number | null = null;
       if (redRef.current.length >= fs * 3 && greenRef.current.length >= fs * 3 && blueRef.current.length >= fs * 3) {
-        // Bandpass filter color signals at 0.5-3.5 Hz for proper AC/DC
-        const redFiltered = butterworthBandpass(redRef.current, 0.5, 3.5, fs);
-        const greenFiltered = butterworthBandpass(greenRef.current, 0.5, 3.5, fs);
-        const blueFiltered = butterworthBandpass(blueRef.current, 0.5, 3.5, fs);
+        const rRaw = redRef.current.slice(-Math.min(redRef.current.length, Math.floor(fs * 30)));
+        const gRaw = greenRef.current.slice(-Math.min(greenRef.current.length, Math.floor(fs * 30)));
+        const bRaw = blueRef.current.slice(-Math.min(blueRef.current.length, Math.floor(fs * 30)));
+
+        if (rosenetReady) {
+          // Async ROSE-Net SpO2 estimation (non-blocking, will update on next callback)
+          getROSENetInstance()
+            .estimateSpO2(rRaw, gRaw, bRaw, hr, sqi / 100)
+            .then((result) => {
+              if (result.spo2 !== null) {
+                setSpo2(result.spo2);
+                setSpo2Method(result.method);
+                setRosenetReady(true);
+              }
+            })
+            .catch((e) => console.warn("ROSE-Net inference error:", e));
+          spo2Val = null; // will be updated by the promise
+        }
+
+        // Always compute empirical as immediate backup
+        const empResult = computeEmpiricalSpO2(rRaw, gRaw, bRaw, hr, sqi / 100, spo2Offset);
+        if (empResult.spo2 !== null && spo2Val === null) {
+          spo2Val = empResult.spo2;
+          spo2MethodUsed = "empirical";
+        }
+
+        // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
+        const redFiltered = butterworthBandpass(rRaw, 0.5, 3.5, fs);
+        const greenFiltered = butterworthBandpass(gRaw, 0.5, 3.5, fs);
 
         const getAcDc = (raw: number[], filtered: number[]) => {
           const dc = raw.reduce((a, b) => a + b, 0) / raw.length;
@@ -449,21 +500,9 @@ export default function VitalMonitoringPage() {
           return { ac, dc };
         };
 
-        const { ac: acR, dc: dcR } = getAcDc(redRef.current, redFiltered);
-        const { ac: acG, dc: dcG } = getAcDc(greenRef.current, greenFiltered);
-        const { ac: acB, dc: dcB } = getAcDc(blueRef.current, blueFiltered);
+        const { ac: acR, dc: dcR } = getAcDc(rRaw, redFiltered);
+        const { ac: acG, dc: dcG } = getAcDc(gRaw, greenFiltered);
 
-        // SpO2: R = (AC_Red/DC_Red) / (AC_Blue/DC_Blue) - Note: needs IR (940nm) for accuracy
-        // Using blue as proxy for IR (not clinically valid, for display only)
-        if (dcR > 0 && dcB > 0 && acR > 0 && acB > 0) {
-          const Rratio = (acR / dcR) / (acB / dcB);
-          // Standard formula: SpO2 = 110 - 25*R (calibrated for 660nm/940nm)
-          // With blue as IR proxy, values will be off - cap and offset
-          spo2Val = 110 - 25 * Rratio + spo2Offset;
-          spo2Val = Math.min(Math.max(spo2Val, 70), 100);
-        }
-
-        // Hb: Hgb = 18.2 - 6.8 * (PI_Red / PI_Green)
         if (dcR > 0 && dcG > 0 && acR > 0 && acG > 0) {
           const HbRatio = (acR / dcR) / (acG / dcG);
           hbVal = 18.2 - 6.8 * HbRatio;
@@ -482,6 +521,7 @@ export default function VitalMonitoringPage() {
         // Update Hb and SpO2 when heart rate is valid, preserving last valid value if new one unavailable
         setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
         setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
+        if (spo2MethodUsed === "empirical") setSpo2Method("empirical");
       }
       // Update BP and Glucose from PPG analysis
       setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
@@ -525,7 +565,7 @@ export default function VitalMonitoringPage() {
     if (cameraOnRef.current) {
       animFrame.current = requestAnimationFrame(processFrame);
     }
-  }, [drawWaveform, spo2Offset, cameraMode, demoMode, patient]);
+  }, [drawWaveform, spo2Offset, cameraMode, demoMode, patient, rosenetReady]);
 
   useEffect(() => {
     if (cameraOn) {
@@ -1282,9 +1322,18 @@ export default function VitalMonitoringPage() {
               <p className="text-[10px] mt-1 text-neutral-500">RMSSD {hrv ? hrv.rmssd.toFixed(1) : "--"}</p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
-              <p className="text-neutral-400 mb-1">SpO₂</p>
+              <p className="text-neutral-400 mb-1 flex items-center gap-2">
+                SpO₂
+                {spo2Method === "rosenet" && rosenetReady && (
+                  <svg className="w-4 h-4 text-green-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-9 9a1 1 0 01-1.414 0l-5-5a1 1 0 010-1.414l1.414-1.414a1 1 0 011.414 0L7 12.586l8.293-8.293a1 1 0 011.414 0z" clipRule="evenodd"></path>
+                  </svg>
+                )}
+              </p>
               <p className="text-2xl font-bold text-cyan-400">{spo2 !== null ? `${spo2}%` : "--"}</p>
-              <p className="text-[10px] mt-1 text-neutral-500">estimate only</p>
+              <p className="text-[10px] mt-1 text-neutral-500">
+                {spo2Method === "rosenet" ? "ROSE-Net" : "AC/DC ratio (empirical)"}
+              </p>
             </div>
             <div className="bg-neutral-800 rounded-lg p-3 border border-neutral-700">
               <p className="text-neutral-400 mb-1">Hb</p>

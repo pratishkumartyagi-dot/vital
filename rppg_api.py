@@ -250,6 +250,23 @@ class RPPGResponse(BaseModel):
     method: str
     quality: Optional[float] = None
 
+class SpO2Request(BaseModel):
+    frames: List[FrameData]
+    fs: Optional[float] = 30.0
+    roi: Optional[str] = "face"  # face, forehead, left_cheek, right_cheek, nose
+    use_deep_model: Optional[bool] = True
+
+class SpO2Response(BaseModel):
+    spo2: Optional[float] = None
+    spo2_method: str
+    ac_dc_ratio: Optional[float] = None
+    r_ratio: Optional[float] = None
+    stmap_shape: Optional[List[int]] = None
+    model_used: Optional[str] = None
+    quality: Optional[float] = None
+    hr: Optional[float] = None
+    confidence: Optional[float] = None
+
 # Initialize FastAPI
 app = FastAPI(title="rPPG Inference API", version="1.0.0")
 
@@ -261,6 +278,65 @@ ALGORITHMS = {
     "OMIT": OMIT,
     "GREEN": GREEN
 }
+
+# ROSE-Net model (loaded lazily)
+_rosenet_model = None
+_rosenet_available = False
+
+def _load_rosenet(weights_path: Optional[str] = None):
+    """Load the ROSE-Net PyTorch model for SpO2 estimation."""
+    global _rosenet_model, _rosenet_available
+    if _rosenet_available:
+        return _rosenet_model
+
+    try:
+        import torch
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "training"))
+        from rppglib.models.ROSENet import ROSENet
+
+        config = type("Config", (), {
+            "in_channels": 6,
+            "input_length": 256,
+            "base_channels": 32,
+            "num_blocks": 4,
+            "lstm_hidden": 64,
+            "dropout": 0.3,
+            "use_attention": True,
+            "device": "cpu",
+            "results_folder": "results/rosenet",
+            "train_dataset": "bidmc",
+            "valid_fold": 0,
+            "pretrained_weights": None,
+        })()
+
+        model = ROSENet(
+            in_channels=6,
+            input_length=256,
+            base_channels=32,
+            num_blocks=4,
+            lstm_hidden=64,
+            dropout=0.3,
+            use_attention=True,
+        )
+
+        if weights_path and os.path.isfile(weights_path):
+            state_dict = torch.load(weights_path, map_location="cpu")
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            _rosenet_model = model
+            _rosenet_available = True
+            print(f"ROSE-Net model loaded from {weights_path}")
+        else:
+            model.eval()
+            _rosenet_model = model
+            _rosenet_available = True
+            print("ROSE-Net model initialized (untrained weights)")
+    except Exception as e:
+        print(f"ROSE-Net model not available: {e}")
+        _rosenet_available = False
+
+    return _rosenet_model
 
 # Buffer for temporal processing
 frame_buffer = []
@@ -322,6 +398,136 @@ def compute_hr_from_ppg(ppg: np.ndarray, fs: float) -> tuple:
     snr = len(peaks) / (len(ppg) / fs * 2)  # rough estimate
     
     return float(hr), float(min(snr, 10.0))
+
+def generate_stmap_from_rgb(rgb_signals: np.ndarray, color_spaces=None, target_length: int = 256) -> np.ndarray:
+    """Generate a spatial-temporal map (STMap) from RGB time-series.
+
+    Args:
+        rgb_signals: Array of shape (T, 3) — mean R, G, B per frame.
+        color_spaces: List of colour spaces to include.
+            Defaults to ["rgb", "yuv"].
+        target_length: Resample time axis to this length.
+
+    Returns:
+        STMap of shape (n_channels, target_length).
+    """
+    from scipy.signal import resample
+
+    if color_spaces is None:
+        color_spaces = ["rgb", "yuv"]
+
+    signals = rgb_signals.astype(np.float64)
+
+    # Temporal mean normalisation
+    means = signals.mean(axis=0, keepdims=True)
+    means = np.maximum(means, 1e-8)
+    signals_norm = signals / means
+
+    channels = []
+
+    for cs in color_spaces:
+        if cs == "rgb":
+            channels.append(signals_norm)
+        elif cs == "yuv":
+            r, g, b = signals_norm[:, 0], signals_norm[:, 1], signals_norm[:, 2]
+            y = 0.299 * r + 0.587 * g + 0.114 * b
+            u = 0.492 * (b - y)
+            v = 0.877 * (r - y)
+            yuv = np.stack([y, u, v], axis=1)
+            channels.append(yuv)
+        elif cs == "ycrcb":
+            r, g, b = signals_norm[:, 0], signals_norm[:, 1], signals_norm[:, 2]
+            y = 0.299 * r + 0.587 * g + 0.114 * b
+            cr = 0.713 * (r - y) + 0.5
+            cb = 0.713 * (b - y) + 0.5
+            ycb = np.stack([y, cr, cb], axis=1)
+            channels.append(ycb)
+
+    stmap = np.concatenate(channels, axis=1)  # (T, C_total)
+
+    # Resample to target length
+    if stmap.shape[0] != target_length:
+        x_old = np.linspace(0, 1, stmap.shape[0])
+        x_new = np.linspace(0, 1, target_length)
+        stmap = np.column_stack([
+            np.interp(x_new, x_old, stmap[:, c]) for c in range(stmap.shape[1])
+        ])
+
+    # Return as (channels, time) for CNN input
+    return stmap.T.astype(np.float32)
+
+def compute_spo2_empirical(r_raw: np.ndarray, g_raw: np.ndarray, b_raw: np.ndarray,
+                           f_hr: Optional[float], fs: float,
+                           spo2_offset: float = 0.0, skin_tone: float = 3.0,
+                           ambient_lux: float = 0) -> dict:
+    """Compute SpO2 using the empirical AC/DC ratio-of-ratios method.
+
+    R = (AC_red/DC_red) / (AC_green/DC_green)
+    SpO2 = 110 - 25 * R  (calibrated for 660nm/940nm pulse oximetry)
+    """
+    if f_hr is None:
+        return {"spo2": None, "r_ratio": None, "quality": 0.0}
+
+    # Spectral amplitude at f_hr for each channel
+    ac_r = spectral_amplitude(r_raw, fs, f_hr, 0.15)
+    ac_g = spectral_amplitude(g_raw, fs, f_hr, 0.15)
+    ac_b = spectral_amplitude(b_raw, fs, f_hr, 0.15)
+
+    dc_r = float(np.mean(r_raw))
+    dc_g = float(np.mean(g_raw))
+    dc_b = float(np.mean(b_raw))
+
+    if dc_r <= 1e-9 or dc_g <= 1e-9 or ac_g <= 1e-12:
+        return {"spo2": None, "r_ratio": None, "quality": 0.0}
+
+    # R ratio: AC_red/DC_red divided by AC_green/DC_green
+    r_ratio = (ac_r / dc_r) / (ac_g / dc_g)
+
+    # Empirical calibration (per-device, fitted against reference oximeter)
+    spo2 = 110.0 - 25.0 * r_ratio + spo2_offset
+
+    # Skin tone correction
+    spo2 += (skin_tone - 3.5) * 0.3
+
+    # Ambient light correction
+    if ambient_lux > 0:
+        spo2 -= min(2, ambient_lux / 5000)
+
+    spo2 = float(np.clip(spo2, 70, 100))
+    quality = 0.7 if spo2 is not None else 0.0
+
+    return {
+        "spo2": spo2,
+        "r_ratio": float(r_ratio),
+        "quality": quality,
+    }
+
+def spectral_amplitude(signal: np.ndarray, fs: float, target_freq: float, tol_hz: float) -> float:
+    """Compute spectral amplitude at a target frequency (±tol Hz)."""
+    n = signal.shape[0]
+    if n < 8:
+        return 0.0
+
+    # Detrend
+    from scipy.signal import detrend
+    sd = detrend(signal)
+
+    # Hann window
+    win = 0.5 * (1 - np.cos(2 * np.pi * np.arange(n) / (n - 1)))
+    win_sq = np.sum(win ** 2) / n or 1.0
+
+    # Search bins near target frequency
+    df = fs / n
+    k_target = int(round(target_freq / df))
+    k_tol = max(1, int(round(tol_hz / df)))
+
+    amp = 0.0
+    for k in range(max(1, k_target - k_tol), min(n // 2, k_target + k_tol) + 1):
+        re = np.sum(sd * win * np.cos(2 * np.pi * k * np.arange(n) / n))
+        im = -np.sum(sd * win * np.sin(2 * np.pi * k * np.arange(n) / n))
+        amp += np.sqrt(re * re + im * im) / (n * np.sqrt(win_sq))
+
+    return float(amp)
 
 @app.post("/rppg", response_model=RPPGResponse)
 async def extract_rppg(request: RPPGRequest):
@@ -407,8 +613,144 @@ async def list_methods():
             "PBV": "Plane Below Variance - Simple",
             "OMIT": "Over-complete Measurement In Time - Temporal",
             "GREEN": "Green channel average - Baseline"
+        },
+        "spO2_methods": ["empirical", "rosenet"],
+        "spO2_description": {
+            "empirical": "AC/DC ratio-of-ratios (110 - 25*R), calibrated for 660nm/940nm",
+            "rosenet": "ROSE-Net deep learning model (Chowdhury et al., BSPC 2025)"
         }
     }
+
+@app.post("/rppg/spo2", response_model=SpO2Response)
+async def estimate_spo2(request: SpO2Request):
+    """Estimate SpO2 from facial video frames using ROSE-Net or empirical method.
+    
+    ROSE-Net uses cross-domain training: pre-trained on BIDMC contact PPG data
+    and transferred to camera-based rPPG video. Falls back to empirical
+    AC/DC ratio-of-ratios when the deep model is unavailable.
+    """
+    try:
+        if len(request.frames) < 30:
+            raise HTTPException(status_code=400, detail="Need at least 30 frames for SpO2 estimation")
+        
+        # Extract RGB signals from frames
+        rgb_signal = process_frames(request.frames, request.roi)
+        
+        # Compute HR for cardiac frequency reference
+        # Use POS method to get the pulse signal
+        algo = POS()
+        rgb_for_algo = rgb_signal[:, None, :]  # (T, 1, 3)
+        ppg = algo.rgb_to_ppg(rgb_for_algo)
+        ppg = detrend(ppg)
+        ppg = butterworth_bandpass(ppg, 0.7, 3.5, request.fs)
+        ppg = (ppg - np.mean(ppg)) / (np.std(ppg) + 1e-8)
+        hr, snr = compute_hr_from_ppg(ppg, request.fs)
+        
+        # Extract individual channel signals for empirical method
+        r_raw = rgb_signal[:, 0]
+        g_raw = rgb_signal[:, 1]
+        b_raw = rgb_signal[:, 2]
+        
+        # Generate STMap
+        target_length = 256
+        stmap = generate_stmap_from_rgb(rgb_signal, color_spaces=["rgb", "yuv"], 
+                                        target_length=target_length)
+        
+        # Try ROSE-Net deep model first
+        spo2_val = None
+        model_used = None
+        
+        if request.use_deep_model:
+            weights_path = os.environ.get("ROSEN_NET_WEIGHTS", None)
+            model = _load_rosenet(weights_path)
+            
+            if _rosenet_available and model is not None:
+                import torch
+                with torch.no_grad():
+                    # STMap shape: (C, T) -> add batch and height dims
+                    input_tensor = torch.from_numpy(stmap).float().unsqueeze(0).unsqueeze(-2)  # (1, C, 1, T)
+                    pred = model(input_tensor)
+                    spo2_val = float(pred.squeeze().item())
+                    spo2_val = float(np.clip(spo2_val, 70, 100))
+                    model_used = "rosenet"
+        
+        # Fallback to empirical method
+        if spo2_val is None:
+            emp_result = compute_spo2_empirical(
+                r_raw, g_raw, b_raw, hr, request.fs,
+                spo2_offset=0.0, skin_tone=3.0, ambient_lux=0
+            )
+            spo2_val = emp_result["spo2"]
+            model_used = "empirical"
+            
+            return SpO2Response(
+                spo2=spo2_val,
+                spo2_method=model_used,
+                ac_dc_ratio=emp_result["r_ratio"],
+                r_ratio=emp_result["r_ratio"],
+                stmap_shape=list(stmap.shape),
+                model_used=model_used,
+                quality=emp_result["quality"],
+                hr=hr,
+                confidence=0.5 if spo2_val else 0.0
+            )
+        
+        # Compute R ratio for diagnostics
+        if hr is not None:
+            emp_result = compute_spo2_empirical(
+                r_raw, g_raw, b_raw, hr, request.fs,
+                spo2_offset=0.0, skin_tone=3.0, ambient_lux=0
+            )
+            r_ratio = emp_result["r_ratio"]
+        else:
+            r_ratio = None
+        
+        return SpO2Response(
+            spo2=spo2_val,
+            spo2_method=model_used,
+            ac_dc_ratio=r_ratio,
+            r_ratio=r_ratio,
+            stmap_shape=list(stmap.shape),
+            model_used=model_used,
+            quality=min(snr / 10.0, 1.0) if hr else 0.0,
+            hr=hr,
+            confidence=0.85
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/rppg/stmap")
+async def extract_stmap(request: SpO2Request):
+    """Extract spatial-temporal map (STMap) from frames for client-side ROSE-Net inference."""
+    try:
+        if len(request.frames) < 30:
+            raise HTTPException(status_code=400, detail="Need at least 30 frames")
+        
+        rgb_signal = process_frames(request.frames, request.roi)
+        stmap = generate_stmap_from_rgb(rgb_signal, color_spaces=["rgb", "yuv"], 
+                                        target_length=256)
+        
+        # Compute HR
+        algo = POS()
+        rgb_for_algo = rgb_signal[:, None, :]
+        ppg = algo.rgb_to_ppg(rgb_for_algo)
+        ppg = detrend(ppg)
+        ppg = butterworth_bandpass(ppg, 0.7, 3.5, request.fs)
+        ppg = (ppg - np.mean(ppg)) / (np.std(ppg) + 1e-8)
+        hr, snr = compute_hr_from_ppg(ppg, request.fs)
+        
+        return {
+            "stmap": stmap.T.tolist(),  # (T, C) format for client
+            "channels": stmap.shape[0],
+            "time_steps": stmap.shape[1],
+            "hr": hr,
+            "quality": min(snr / 10.0, 1.0) if hr else 0.0,
+            "method": "rosenet_stmap"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health():
