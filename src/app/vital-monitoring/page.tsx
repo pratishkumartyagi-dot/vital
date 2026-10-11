@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { analyzeVitals, type VitalAnalysis, type CreatinineMetrics, estimateEgfr, butterworthBandpass } from './ppg-analysis';
 import { 
   getROSENetInstance,
+  resetROSENetInstance,
   type ROSENetConfig,
   computeEmpiricalSpO2,
 } from './rosenet-inference';
@@ -18,6 +19,11 @@ import {
   deleteVitalReading,
   type VitalReading 
 } from '@/lib/vital-storage';
+import {
+  getMediapipeFaceROI,
+  resetMediapipeFaceROI,
+  type MediapipeROIResult,
+} from './mediapipe-face-roi';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) {
@@ -107,7 +113,9 @@ export default function VitalMonitoringPage() {
   const lastFrameTimeRef = useRef<number>(0);
   const animFrame = useRef<number>(0);
   const lastBpmUpdate = useRef<number>(0);
-  const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null>(null);
+  const roiDataRef = useRef<{ roi: number[][]; coords: { x: number; y: number; w: number; h: number }; landmarks: MediapipeROIResult["landmarks"] | null } | null>(null);
+  const faceRoiCacheRef = useRef<{ roiRegions: { x: number; y: number; w: number; h: number }[]; frameCount: number } | null>(null);
+  const frameCounterRef = useRef<number>(0);
   const sessionStartRef = useRef<number>(0);
   const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
@@ -206,15 +214,17 @@ export default function VitalMonitoringPage() {
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
-    return () => {
-      if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
-      if (autoStopTimerRef.current) window.clearTimeout(autoStopTimerRef.current);
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-        mediaRecorderRef.current.stop();
-      }
-    };
-  }, []);
+   useEffect(() => {
+     return () => {
+       if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
+       if (autoStopTimerRef.current) window.clearTimeout(autoStopTimerRef.current);
+       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+         mediaRecorderRef.current.stop();
+       }
+       resetMediapipeFaceROI();
+       resetROSENetInstance();
+     };
+   }, []);
 
   useEffect(() => {
     checkPermission();
@@ -227,7 +237,7 @@ export default function VitalMonitoringPage() {
     return () => clearTimeout(timer);
   }, [checkPermission, patient]);
 
-  const detectFaceROI = useCallback((video: HTMLVideoElement): { roi: number[][]; coords: { x: number; y: number; w: number; h: number } } | null => {
+  const detectFaceROI = useCallback((video: HTMLVideoElement): { roi: number[][]; coords: { x: number; y: number; w: number; h: number }; landmarks: MediapipeROIResult["landmarks"] | null } | null => {
     const canvas = document.createElement("canvas");
     canvas.width = 64;
     canvas.height = 64;
@@ -235,18 +245,32 @@ export default function VitalMonitoringPage() {
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, 64, 64);
     const imageData = ctx.getImageData(0, 0, 64, 64);
+
+    // Try MediaPipe FaceMesh first (Google AI Edge)
+    const faceROI = getMediapipeFaceROI();
+    if (faceROI.isInitialized()) {
+      const mpResult = faceROI.detect(video, 64, 64);
+      if (mpResult) {
+        const data = imageData.data;
+        // Extract ROI pixels from image data using face mesh landmarks
+        const roi = faceROI.extractRoiFromImageData(imageData, 64, 64, mpResult.landmarks);
+        return { roi, coords: mpResult.coords, landmarks: mpResult.landmarks };
+      }
+    }
+
+    // Fallback: brightness-based ROI detection
     const data = imageData.data;
-    
+
     let minX = 64, maxX = 0, minY = 64, maxY = 0;
     let found = false;
-    
+
     for (let y = 0; y < 64; y++) {
       for (let x = 0; x < 64; x++) {
         const r = data[(y * 64 + x) * 4];
         const g = data[(y * 64 + x) * 4 + 1];
         const b = data[(y * 64 + x) * 4 + 2];
         const brightness = (r + g + b) / 3;
-        
+
         if (brightness > 20 && brightness < 240) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
@@ -256,9 +280,9 @@ export default function VitalMonitoringPage() {
         }
       }
     }
-    
+
     if (!found || maxX - minX < 10 || maxY - minY < 10) return null;
-    
+
     const roi: number[][] = [];
     const regions = [
       { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.1, w: (maxX - minX) * 0.3, h: (maxY - minY) * 0.3 },
@@ -267,14 +291,14 @@ export default function VitalMonitoringPage() {
       { x: minX + (maxX - minX) * 0.1, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
       { x: minX + (maxX - minX) * 0.55, y: minY + (maxY - minY) * 0.6, w: (maxX - minX) * 0.35, h: (maxY - minY) * 0.25 },
     ];
-    
+
     for (const region of regions) {
       const regionData: number[] = [];
       const startX = Math.max(0, Math.floor(region.x));
       const endX = Math.min(64, Math.floor(region.x + region.w));
       const startY = Math.max(0, Math.floor(region.y));
       const endY = Math.min(64, Math.floor(region.y + region.h));
-      
+
       for (let y = startY; y < endY; y++) {
         for (let x = startX; x < endX; x++) {
           const idx = (y * 64 + x) * 4;
@@ -283,8 +307,8 @@ export default function VitalMonitoringPage() {
       }
       roi.push(regionData);
     }
-    
-    return { roi, coords: { x: minX, y: minY, w: maxX - minX, h: maxY - minY } };
+
+    return { roi, coords: { x: minX, y: minY, w: maxX - minX, h: maxY - minY }, landmarks: null };
   }, []);
 
   const drawWaveform = useCallback(() => {
@@ -364,11 +388,63 @@ export default function VitalMonitoringPage() {
         }
       }
     } else {
-      for (let i = 0; i < data.length; i += 4) {
-        r += data[i];
-        g += data[i + 1];
-        b += data[i + 2];
-        count++;
+      // Use MediaPipe FaceMesh ROI regions when available (Google AI Edge)
+      // Periodically update the face ROI cache (every 10 frames to avoid overhead)
+      const faceROI = getMediapipeFaceROI();
+      const frameCount = frameCounterRef.current;
+      frameCounterRef.current = frameCount + 1;
+
+      if (video && faceROI.isInitialized() && frameCount % 10 === 0) {
+        const mpResult = faceROI.detect(video, 640, 480);
+        if (mpResult) {
+          // Scale landmark coords to 64x64 canvas and cache ROI regions
+          const scaleX = 64 / 640;
+          const scaleY = 64 / 480;
+          // Use face bounding box to define 5 ROI regions on the 64x64 canvas
+          const bx = mpResult.coords.x * scaleX;
+          const by = mpResult.coords.y * scaleY;
+          const bw = mpResult.coords.w * scaleX;
+          const bh = mpResult.coords.h * scaleY;
+
+          faceRoiCacheRef.current = {
+            roiRegions: [
+              { x: bx + bw * 0.1, y: by + bh * 0.1, w: bw * 0.3, h: bh * 0.2 },   // forehead
+              { x: bx + bw * 0.05, y: by + bh * 0.35, w: bw * 0.25, h: bh * 0.3 },  // left cheek
+              { x: bx + bw * 0.70, y: by + bh * 0.35, w: bw * 0.25, h: bh * 0.3 },  // right cheek
+              { x: bx + bw * 0.40, y: by + bh * 0.35, w: bw * 0.20, h: bh * 0.35 }, // nose bridge
+              { x: bx + bw * 0.10, y: by + bh * 0.60, w: bw * 0.35, h: bh * 0.25 },  // lower face
+            ],
+            frameCount,
+          };
+        }
+      }
+
+      const cachedRoi = faceRoiCacheRef.current;
+      if (cachedRoi && frameCount - cachedRoi.frameCount < 30) {
+        // Sample from MediaPipe-detected face ROI regions
+        for (const region of cachedRoi.roiRegions) {
+          const startX = Math.max(0, Math.floor(region.x));
+          const endX = Math.min(64, Math.floor(region.x + region.w));
+          const startY = Math.max(0, Math.floor(region.y));
+          const endY = Math.min(64, Math.floor(region.y + region.h));
+          for (let y = startY; y < endY; y++) {
+            for (let x = startX; x < endX; x++) {
+              const i = (y * 64 + x) * 4;
+              r += data[i];
+              g += data[i + 1];
+              b += data[i + 2];
+              count++;
+            }
+          }
+        }
+      } else {
+        // Fallback: full frame averaging
+        for (let i = 0; i < data.length; i += 4) {
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
+          count++;
+        }
       }
     }
     const avgR = count ? r / count : 128;
@@ -594,6 +670,8 @@ export default function VitalMonitoringPage() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
+    faceRoiCacheRef.current = null;
+    frameCounterRef.current = 0;
   }, []);
 
   const startVideoRecording = useCallback((stream: MediaStream) => {
@@ -808,7 +886,8 @@ export default function VitalMonitoringPage() {
       let stream: MediaStream;
       const videoConstraints: MediaTrackConstraints = {
         width: { ideal: 640 },
-        height: { ideal: 480 }
+        height: { ideal: 480 },
+        frameRate: { ideal: 30, min: 30 },
       };
 
       if (cameraMode === "rear") {
@@ -843,7 +922,16 @@ export default function VitalMonitoringPage() {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
-      
+
+      // Initialize MediaPipe FaceMesh ROI detector (Google AI Edge)
+      // https://github.com/google-ai-edge/mediapipe
+      const faceROI = getMediapipeFaceROI();
+      if (!faceROI.isInitialized() && cameraMode === "front") {
+        faceROI.initialize().catch((err) => {
+          console.warn("MediaPipe FaceMesh initialization failed:", err);
+        });
+      }
+
       startVideoRecording(stream);
       
       setCameraOn(true);
