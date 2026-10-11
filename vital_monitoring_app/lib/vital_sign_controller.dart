@@ -17,14 +17,6 @@ class VitalSignController extends ChangeNotifier {
   double _hbLevel = 0.0;
   double _spo2Level = 0.0;
   double _respRate = 0.0;
-  double _bpSys = 0.0;
-  double _bpDia = 0.0;
-  double _glucoseLevel = 0.0;
-  double _creatinineLevel = 0.0;
-  double _egfrLevel = 0.0;
-  String _creatinineClass = '';
-  String _kdigoStage = '';
-  double _signalQuality = 0.0;
   bool _isDemoMode = false;
   Timer? _demoTimer;
   int _demoFrameCount = 0;
@@ -37,39 +29,19 @@ class VitalSignController extends ChangeNotifier {
   double get hbLevel => _hbLevel;
   double get spo2Level => _spo2Level;
   double get respRate => _respRate;
-  double get bpSys => _bpSys;
-  double get bpDia => _bpDia;
-  double get glucoseLevel => _glucoseLevel;
-  double get creatinineLevel => _creatinineLevel;
-  double get egfrLevel => _egfrLevel;
-  String get creatinineClass => _creatinineClass;
-  String get kdigoStage => _kdigoStage;
-  double get signalQuality => _signalQuality;
   bool get isDemoMode => _isDemoMode;
   CameraMode get cameraMode => _cameraMode;
-  double get calibrationZlo => _calibrationZlo;
-  double get calibrationSlope => _calibrationSlope;
-  bool get fingerDetected => _fingerDetected;
-  bool get torchActive => _torchActive;
 
-  static const int _waveformDisplaySize = 300;
-  static const int _analysisWindowSize = 300;
-  static const int _minSamplesForHR = 90;
-  static const double _fs = 30.0;
-  static const double _defaultZlo = 16.0;
-  static const double _defaultSlope = 1.0;
-
-  double _calibrationZlo = _defaultZlo;
-  double _calibrationSlope = _defaultSlope;
-  bool _fingerDetected = false;
-  bool _torchActive = false;
-  final List<double> _ppgHistory = [];
-  static const int _ppgHistoryMaxLen = 120; // 4 seconds at 30fps
-
+  // Separate buffers for multi-wavelength analysis
   final List<double> _liveRedBuffer = [];
   final List<double> _liveGreenBuffer = [];
   final List<double> _liveBlueBuffer = [];
+  
+  // Buffer for waveform display
   final List<double> _waveformBuffer = [];
+  static const int _waveformDisplaySize = 300;
+  static const int _analysisWindowSize = 300; // 10 seconds at 30fps
+  static const int _minSamplesForHR = 90; // 3 seconds
 
   VitalSignController() {
     _enableDemoMode();
@@ -110,21 +82,21 @@ class VitalSignController extends ChangeNotifier {
 
   void _startDemoTimer() {
     _demoTimer?.cancel();
-    _demoTimer = Timer.periodic(const Duration(milliseconds: 33), (timer) {
+    _demoTimer = Timer.periodic(const Duration(milliseconds: 33), (timer) { // ~30fps
       _demoFrameCount++;
       if (_isDemoMode) {
         final double time = _demoFrameCount * 0.033;
-        final double baseSignal = 100 +
-            20 * math.sin(2 * math.pi * 1.2 * time) +
-            5 * math.sin(2 * math.pi * 2.5 * time) +
-            (math.Random().nextDouble() - 0.5) * 2;
-
+        final double baseSignal = 100 + 
+            20 * math.sin(2 * math.pi * 1.2 * time) + // ~72 BPM (1.2 Hz)
+            5 * math.sin(2 * math.pi * 2.5 * time) +   // Harmonics
+            (math.Random().nextDouble() - 0.5) * 2; // Noise
+        
         if (_demoFrameCount % 200 == 0) {
           _liveGreenBuffer.add(baseSignal + (math.Random().nextDouble() - 0.5) * 30);
         } else {
           _liveGreenBuffer.add(baseSignal);
         }
-
+        
         _waveformBuffer.add(baseSignal);
         if (_waveformBuffer.length > _waveformDisplaySize) {
           _waveformBuffer.removeAt(0);
@@ -132,7 +104,7 @@ class VitalSignController extends ChangeNotifier {
 
         if (_liveGreenBuffer.length >= 120) {
           final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-
+          
           if (pi < 0.5) {
             _currentState = TrackingState.rejected;
             _toastPrompt = "Unreliable Signal. Please steady your finger and apply lighter pressure.";
@@ -143,7 +115,7 @@ class VitalSignController extends ChangeNotifier {
             _currentState = TrackingState.profiling;
             _toastPrompt = "Analyzing heart rate stability. Keep perfectly still...";
             _gatheringProgress += 0.02;
-
+            
             if (_gatheringProgress >= 1.0) {
               _gatheringProgress = 1.0;
               _currentState = TrackingState.complete;
@@ -164,147 +136,66 @@ class VitalSignController extends ChangeNotifier {
 
   void attachStreamPipeline(CameraController controller) {
     if (_isDemoMode) return;
-
+    
     controller.startImageStream((CameraImage streamedFrame) {
-      _processCameraFrame(streamedFrame);
-    });
-  }
+      if (_currentState == TrackingState.complete) return;
 
-  /// Process a Camera2 frame (YUV420 from native Android Camera2 API).
-  /// Used when the rear camera is managed by Camera2PpgController.
-  /// Receives packed Y, U, V planes and uses the existing YUV420 processing.
-  void processCamera2Frame(int width, int height, Uint8List yData, Uint8List uData, Uint8List vData, int yRowStride, int uvRowStride, int uvPixelStride) {
-    if (_isDemoMode) return;
-    if (_currentState == TrackingState.complete) return;
+      // Extract raw RGB metrics
+      final Float64List extractedValues = ZeroAllocationExtractor.processYUV420Frame(streamedFrame);
+      final double currentRed = extractedValues[0];
+      final double currentGreen = extractedValues[1];
+      final double currentBlue = extractedValues[2];
 
-    // Create a CameraImage-like structure from the packed planes
-    // and use the existing YUV420 processing
-    final Float64List extractedValues = ZeroAllocationExtractor.processYUV420FromPlanes(
-      yData, uData, vData, width, height, yRowStride, uvRowStride, uvPixelStride
-    );
-    final double currentRed = extractedValues[0];
-    final double currentGreen = extractedValues[1];
-    final double currentBlue = extractedValues[2];
+      // Software guard: reject saturated or dark frames
+      if (currentRed > 250.0 || currentGreen > 250.0 || currentBlue > 250.0) {
+        _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
+        return;
+      }
+      if (currentRed < 15.0 && currentGreen < 15.0 && currentBlue < 15.0) {
+        _toastPrompt = "No signal detected. Cover the lens and flash completely.";
+        return;
+      }
+      
+      // Append to multi-wavelength buffers
+      _liveRedBuffer.add(currentRed);
+      _liveGreenBuffer.add(currentGreen);
+      _liveBlueBuffer.add(currentBlue);
+      
+      // Add to waveform display (use green for rear, combined for front)
+      _waveformBuffer.add(_cameraMode == CameraMode.rear ? currentGreen : 
+          (currentRed + currentGreen + currentBlue) / 3);
+      if (_waveformBuffer.length > _waveformDisplaySize) {
+        _waveformBuffer.removeAt(0);
+      }
 
-    _processCameraFrameValues(currentRed, currentGreen, currentBlue);
-  }
+      // Maintain analysis window size
+      if (_liveRedBuffer.length > _analysisWindowSize) {
+        _liveRedBuffer.removeAt(0);
+        _liveGreenBuffer.removeAt(0);
+        _liveBlueBuffer.removeAt(0);
+      }
 
-  void _processCameraFrame(CameraImage streamedFrame) {
-    final Float64List extractedValues = ZeroAllocationExtractor.processYUV420Frame(streamedFrame);
-    final double currentRed = extractedValues[0];
-    final double currentGreen = extractedValues[1];
-    final double currentBlue = extractedValues[2];
-
-    _processCameraFrameValues(currentRed, currentGreen, currentBlue);
-  }
-
-  void _processCameraFrameValues(double currentRed, double currentGreen, double currentBlue) {
-    // Finger detection for rear camera (before adding to buffers)
-    if (_cameraMode == CameraMode.rear) {
-      _updateFingerDetection(currentRed, currentGreen, currentBlue);
-    }
-
-    // For Camera2 estimated values, R is capped at 250, so use slightly higher threshold
-    final saturationThreshold = 252.0;
-    if (currentRed > saturationThreshold || currentGreen > saturationThreshold || currentBlue > saturationThreshold) {
-      _toastPrompt = "Signal over-amplified. Reduce finger pressure on the lens.";
-      return;
-    }
-    // For Camera2, estimated G can be low (~20-50), so check only R and B for "no signal"
-    if (currentRed < 10.0 && currentBlue < 10.0) {
-      _toastPrompt = "No signal detected. Cover the lens and flash completely.";
-      return;
-    }
-
-    _liveRedBuffer.add(currentRed);
-    _liveGreenBuffer.add(currentGreen);
-    _liveBlueBuffer.add(currentBlue);
-
-    _waveformBuffer.add(_cameraMode == CameraMode.rear ? currentGreen :
-        (currentRed + currentGreen + currentBlue) / 3);
-    if (_waveformBuffer.length > _waveformDisplaySize) {
-      _waveformBuffer.removeAt(0);
-    }
-
-    if (_liveRedBuffer.length > _analysisWindowSize) {
-      _liveRedBuffer.removeAt(0);
-      _liveGreenBuffer.removeAt(0);
-      _liveBlueBuffer.removeAt(0);
-    }
-
-    // Only use native processor for front camera (CameraController path)
-    // For rear Camera2, we do full analysis in Dart
-    if (_cameraMode == CameraMode.front) {
+      // Send green channel to native PPG DSP for heart rate
       NativeHardwareBridge.processPpgSample(currentGreen).then((nativeBpm) {
         if (nativeBpm != null && nativeBpm > 0) {
           _heartRate = nativeBpm;
           notifyListeners();
         }
       });
-    }
 
-    if (_cameraMode == CameraMode.rear) {
-      _processRearCameraPPG();
-    } else {
-      _processFrontCameraRPPG();
-    }
-  }
-
-  /// Update finger detection state with temporal PPG validation
-  void _updateFingerDetection(double r, double g, double b) {
-    // Simple perfusion index based finger detection (matching stable version fa8506a)
-    // The perfusion index check in _processRearCameraPPG handles validation
-    
-    // Update PPG history for temporal validation
-    final lum = (r + g + b) / 3;
-    _ppgHistory.add(lum);
-    if (_ppgHistory.length > _ppgHistoryMaxLen) {
-      _ppgHistory.removeAt(0);
-    }
-
-    // Static checks - simple version that worked in stable
-    final torchActive = _torchActive;
-    final redBright = r > 30 && r < 250;
-    final redDominant = r > g && r > b;
-    final notSaturated = r < 250 && g < 250 && b < 250;
-    final dcLevel = (r + g + b) / 3;
-    final dcInRange = dcLevel > 20 && dcLevel < 235;
-
-    // Uniformity check - simple version
-    bool hasPpgPulsation = false;
-    if (_ppgHistory.length >= 20) {
-      final recent = _ppgHistory.sublist(_ppgHistory.length - 20);
-      final mean = recent.reduce((a, b) => a + b) / recent.length;
-      double variance = 0;
-      for (int i = 0; i < recent.length; i++) {
-        final diff = recent[i] - mean;
-        variance += diff * diff;
+      // Process based on camera mode
+      if (_cameraMode == CameraMode.rear) {
+        _processRearCameraPPG();
+      } else {
+        _processFrontCameraRPPG();
       }
-      variance /= recent.length;
-      hasPpgPulsation = variance > 0.1;  // Very low threshold
-    }
-
-    // Finger detected if ALL conditions met
-    _fingerDetected = torchActive && redBright && redDominant && notSaturated && dcInRange && hasPpgPulsation;
+    });
   }
 
-  /// Runs the full analysis pipeline for the rear (contact fingertip) path.
-  /// The analysis signal is the SNR-best channel (green by default, red on
-  /// thick/dark/cold fingers) selected by the engine's spectral-SNR rule.
   void _processRearCameraPPG() {
-    // Early reject if finger not detected (prevents false analysis on non-finger)
-    if (!_fingerDetected) {
-      if (_currentState != TrackingState.baseline) {
-        _currentState = TrackingState.baseline;
-        _gatheringProgress = 0.0;
-        _toastPrompt = "Place fingertip over camera lens with flash on.";
-        notifyListeners();
-      }
-      return;
-    }
-
+    // Safety gate: Perfusion Index check
     if (_liveGreenBuffer.length >= 30) {
-      final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
+      final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
       if (pi < 0.2) {
         _currentState = TrackingState.rejected;
         _toastPrompt = "Low pulse signal detected. Warm hands and reduce finger pressure.";
@@ -315,34 +206,42 @@ class VitalSignController extends ChangeNotifier {
       }
     }
 
+    // Multi-wavelength evaluation in 4-second windows (120 frames at 30fps)
     if (_liveGreenBuffer.length >= 120) {
-      final analysisSignal = PPGSignalEngine.selectBestPpgChannel(
-        _liveRedBuffer, _liveGreenBuffer, _liveBlueBuffer, _fs);
-      final analysis = PPGSignalEngine.analyzeVitals(
-        analysisSignal, _fs,
-        _liveRedBuffer, _liveGreenBuffer, _liveBlueBuffer,
-        AnalyzeOptions(cameraMode: 'rear', zlo: _calibrationZlo),
-      );
+      // SpO2 via Red/Blue ratio (using blue as IR proxy - not clinical grade)
+      final double redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer);
+      final double bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer);
+      final double greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
+      
+      double calculatedSpO2 = 110.0 - (25.0 * (redPI / bluePI));
+      calculatedSpO2 = calculatedSpO2.clamp(70.0, 100.0);
+      _spo2Level = calculatedSpO2;
 
-      _applyAnalysis(analysis);
+      // Haemoglobin via Red/Green ratio
+      double calculatedHb = 18.2 - (6.8 * (redPI / greenPI));
+      calculatedHb = calculatedHb.clamp(5.0, 20.0);
+      _hbLevel = calculatedHb;
 
-      final redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer, _calibrationZlo);
-      final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
-      final bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer, _calibrationZlo);
-      final avgGreenDC = _liveGreenBuffer.reduce((a, b) => a + b) / _liveGreenBuffer.length;
+      // Ambient light check
+      final double avgGreenDC = _liveGreenBuffer.reduce((a,b) => a+b) / _liveGreenBuffer.length;
       if (avgGreenDC > 240) {
         _toastPrompt = "Ambient lighting too bright. Shade the lens with your finger.";
       }
+      
+      // Respiratory rate estimation from baseline wander
+      _respRate = _estimateRespiratoryRate(_liveGreenBuffer);
 
+      // Update state and progress
       if (redPI > 0.5 && greenPI > 0.5 && bluePI > 0.5) {
         _currentState = TrackingState.profiling;
-        _toastPrompt = "Analyzing stability... HR: ${_heartRate.toStringAsFixed(0)} BPM | SpO₂: ${_spo2Level.toStringAsFixed(0)}% | Hb: ${_hbLevel.toStringAsFixed(1)} g/dL";
+        _toastPrompt = "Analyzing stability... HR: ${_heartRate.toStringAsFixed(0)} BPM | SpO₂: ${calculatedSpO2.toStringAsFixed(0)}% | Hb: ${calculatedHb.toStringAsFixed(1)} g/dL";
         _gatheringProgress += 0.02;
-
+        
         if (_gatheringProgress >= 1.0) {
           _gatheringProgress = 1.0;
           _currentState = TrackingState.complete;
-          _toastPrompt = "Measurement complete. HR: ${_heartRate.toStringAsFixed(0)} | SpO₂: ${_spo2Level.toStringAsFixed(0)}% | Hb: ${_hbLevel.toStringAsFixed(1)}";
+          _toastPrompt = "Measurement complete. HR: ${_heartRate.toStringAsFixed(0)} | SpO₂: ${calculatedSpO2.toStringAsFixed(0)}% | Hb: ${calculatedHb.toStringAsFixed(1)}";
+          _calculateHeartRate();
         }
         notifyListeners();
       } else {
@@ -355,14 +254,14 @@ class VitalSignController extends ChangeNotifier {
     }
   }
 
-  /// Runs the full analysis pipeline for the front (facial rPPG) path.
-  /// The analysis signal is the POS chrominance pulse (Wang 2017), which
-  /// cancels common-mode illumination and motion artifacts far better than
-  /// any single raw channel, with the green skin-ROI mean as its DC ref.
   void _processFrontCameraRPPG() {
+    // Front camera rPPG uses different thresholds and processing
+    // Requires face detection - simplified here
+    
     if (_liveGreenBuffer.length >= 30) {
+      // For rPPG, signal amplitude is much smaller
       final double pi = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-      if (pi < 0.05) {
+      if (pi < 0.05) { // Lower threshold for rPPG
         _currentState = TrackingState.rejected;
         _toastPrompt = "Weak face signal. Ensure good lighting and face visibility.";
         _gatheringProgress = 0.0;
@@ -373,27 +272,35 @@ class VitalSignController extends ChangeNotifier {
     }
 
     if (_liveGreenBuffer.length >= 120) {
-      final posPulse = PPGSignalEngine.posPulse(
-        _liveRedBuffer, _liveGreenBuffer, _liveBlueBuffer);
-      final dcRef = PPGSignalEngine.dcLevel(_liveGreenBuffer);
-      final analysis = PPGSignalEngine.analyzeVitals(
-        posPulse.isNotEmpty ? posPulse : _liveGreenBuffer, _fs,
-        _liveRedBuffer, _liveGreenBuffer, _liveBlueBuffer,
-        AnalyzeOptions(cameraMode: 'front', dcRef: dcRef),
-      );
+      // For rPPG, use green channel primarily (best SNR for face)
+      // Can also use POS algorithm (Plane-Orthogonal-to-Skin) for better results
+      final double greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
+      final double redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer);
+      final double bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer);
+      
+      // rPPG SpO2 estimation (very approximate without IR)
+      double calculatedSpO2 = 110.0 - (25.0 * (redPI / bluePI));
+      calculatedSpO2 = calculatedSpO2.clamp(70.0, 100.0);
+      _spo2Level = calculatedSpO2;
 
-      _applyAnalysis(analysis);
+      // Hb estimation
+      double calculatedHb = 18.2 - (6.8 * (redPI / greenPI));
+      calculatedHb = calculatedHb.clamp(5.0, 20.0);
+      _hbLevel = calculatedHb;
 
-      final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer);
-      if (greenPI > 0.1) {
+      // Respiratory rate from green channel baseline
+      _respRate = _estimateRespiratoryRate(_liveGreenBuffer);
+
+      if (greenPI > 0.1) { // Lower threshold for rPPG
         _currentState = TrackingState.profiling;
-        _toastPrompt = "rPPG analysis... HR: ${_heartRate.toStringAsFixed(0)} | SpO₂: ${_spo2Level.toStringAsFixed(0)}%";
-        _gatheringProgress += 0.015;
-
+        _toastPrompt = "rPPG analysis... HR: ${_heartRate.toStringAsFixed(0)} | SpO₂: ${calculatedSpO2.toStringAsFixed(0)}%";
+        _gatheringProgress += 0.015; // Slower progress for rPPG
+        
         if (_gatheringProgress >= 1.0) {
           _gatheringProgress = 1.0;
           _currentState = TrackingState.complete;
-          _toastPrompt = "rPPG complete. HR: ${_heartRate.toStringAsFixed(0)} | SpO₂: ${_spo2Level.toStringAsFixed(0)}%";
+          _toastPrompt = "rPPG complete. HR: ${_heartRate.toStringAsFixed(0)} | SpO₂: ${calculatedSpO2.toStringAsFixed(0)}%";
+          _calculateHeartRate();
         }
         notifyListeners();
       } else {
@@ -406,36 +313,43 @@ class VitalSignController extends ChangeNotifier {
     }
   }
 
-  /// Copies the engine's analysis results into the controller state,
-  /// falling back to the previous inline ratios for SpO₂/Hb so the
-  /// displayed values stay consistent with the validated calibration.
-  void _applyAnalysis(VitalAnalysis analysis) {
-    if (analysis.heart.bpm != null) {
-      _heartRate = analysis.heart.bpm!;
-    }
-    _signalQuality = analysis.heart.signalQuality;
+  double _estimateRespiratoryRate(List<double> signal) {
+    // Respiratory rate estimation from baseline wander in PPG
+    // Breathing causes low-frequency modulation (0.1-0.5 Hz) of the DC level
+    if (signal.length < 180) return 15.0; // Need at least 6s at 30fps
 
-    final redPI = PPGSignalEngine.computePerfusionIndex(_liveRedBuffer, _calibrationZlo);
-    final greenPI = PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer, _calibrationZlo);
-    final bluePI = PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer, _calibrationZlo);
+    // Detrend
+    final mean = signal.reduce((a, b) => a + b) / signal.length;
+    final detrended = signal.map((v) => v - mean).toList();
 
-    if (redPI > 0 && bluePI > 0) {
-      _spo2Level = (110.0 - 25.0 * (redPI / bluePI)).clamp(70.0, 100.0).toDouble();
-    } else if (analysis.heart.bpm != null) {
-      _spo2Level = 95.0;
-    }
-    if (redPI > 0 && greenPI > 0) {
-      _hbLevel = (18.2 - 6.8 * (redPI / greenPI)).clamp(5.0, 20.0).toDouble();
+    // Simple exponential smoothing as a lowpass filter (~0.3 Hz cutoff at 30fps)
+    final alpha = 0.15;
+    final smoothed = <double>[];
+    double prev = detrended[0];
+    smoothed.add(prev);
+    for (int i = 1; i < detrended.length; i++) {
+      final val = alpha * detrended[i] + (1 - alpha) * prev;
+      smoothed.add(val);
+      prev = val;
     }
 
-    _respRate = analysis.resp.respRate ?? _respRate;
-    _bpSys = analysis.bp.systolic ?? _bpSys;
-    _bpDia = analysis.bp.diastolic ?? _bpDia;
-    _glucoseLevel = analysis.glucose.glucose ?? _glucoseLevel;
-    _creatinineLevel = analysis.creatinine.creatinine ?? _creatinineLevel;
-    _egfrLevel = analysis.creatinine.egfr ?? _egfrLevel;
-    _creatinineClass = analysis.creatinine.creatinineClass ?? '';
-    _kdigoStage = analysis.creatinine.stage ?? '';
+    // Find peaks in the smoothed baseline (min distance ~2s = 60 samples at 30fps)
+    final peaks = _findPeaks(smoothed, minDistance: 60, threshold: 0.0);
+    if (peaks.length < 2) return 15.0;
+
+    // Calculate intervals between consecutive peaks
+    final intervals = <double>[];
+    for (int i = 1; i < peaks.length; i++) {
+      intervals.add((peaks[i] - peaks[i - 1]) / 30.0); // seconds
+    }
+
+    // Filter physiologically plausible intervals (1s to 6s = 10-60 breaths/min)
+    final valid = intervals.where((t) => t >= 1.0 && t <= 6.0).toList();
+    if (valid.isEmpty) return 15.0;
+
+    final avgInterval = valid.reduce((a, b) => a + b) / valid.length;
+    final rate = 60.0 / avgInterval;
+    return rate.clamp(8.0, 35.0);
   }
 
   void _clearBuffers() {
@@ -448,153 +362,70 @@ class VitalSignController extends ChangeNotifier {
 
   void _calculateHeartRate() {
     if (_liveGreenBuffer.length < _minSamplesForHR) return;
-
-    final analysis = PPGSignalEngine.analyzeHeartRate(_liveGreenBuffer, _fs);
-    if (analysis.bpm != null) {
-      _heartRate = analysis.bpm!;
+    
+    // Apply bandpass filter to get cleaner signal
+    final filtered = PPGSignalEngine.applyBandpassFilter(_liveGreenBuffer);
+    
+    // Find peaks in the filtered signal
+    final List<int> peaks = _findPeaks(filtered, minDistance: 8, threshold: 0.3);
+    
+    if (peaks.length >= 3) {
+      final List<double> intervals = [];
+      for (int i = 1; i < peaks.length; i++) {
+        intervals.add((peaks[i] - peaks[i-1]) / 30.0);
+      }
+      
+      // Remove outliers (intervals outside 0.33-1.5s = 40-180 BPM)
+      final validIntervals = intervals.where((i) => i >= 0.33 && i <= 1.5).toList();
+      if (validIntervals.length >= 2) {
+        final double avgInterval = validIntervals.reduce((a, b) => a + b) / validIntervals.length;
+        if (avgInterval > 0) {
+          _heartRate = (60 / avgInterval).clamp(40, 180);
+        }
+      }
     }
-    _signalQuality = analysis.signalQuality;
   }
-
+  
+  List<int> _findPeaks(List<double> signal, {int minDistance = 1, double threshold = 0.0}) {
+    final List<int> peaks = <int>[];
+    if (signal.length < 3) return peaks;
+    
+    // Dynamic threshold based on signal statistics
+    final mean = signal.reduce((a, b) => a + b) / signal.length;
+    final stdDev = math.sqrt(signal.map((v) => (v - mean) * (v - mean)).reduce((a, b) => a + b) / signal.length);
+    final dynamicThreshold = threshold * stdDev;
+    
+    for (int i = 1; i < signal.length - 1; i++) {
+      if (signal[i] > signal[i - 1] && 
+          signal[i] > signal[i + 1] && 
+          signal[i] > dynamicThreshold) {
+        if (peaks.isEmpty || i - peaks.last >= minDistance) {
+          peaks.add(i);
+        }
+      }
+    }
+    return peaks;
+  }
+  
+  // Get normalized waveform data for display (0-1 range)
   List<double> get waveformData {
     if (_waveformBuffer.isEmpty) return [];
-
+    
     double minVal = _waveformBuffer.reduce(math.min);
     double maxVal = _waveformBuffer.reduce(math.max);
-
+    
     if (maxVal - minVal < 0.001) {
       return List.filled(_waveformBuffer.length, 0.5);
     }
-
-    return _waveformBuffer.map((value) =>
+    
+    return _waveformBuffer.map((value) => 
         (value - minVal) / (maxVal - minVal)).toList();
-  }
-
-  Map<String, dynamic> exportRawSignals({
-    Map<String, dynamic>? groundTruth,
-    String? sessionId,
-    String? patientId,
-  }) {
-    return {
-      'metadata': {
-        'timestamp': DateTime.now().toIso8601String(),
-        'sessionId': sessionId ?? 'session_${DateTime.now().millisecondsSinceEpoch}',
-        'patientId': patientId,
-        'cameraMode': _cameraMode.name,
-        'samplingRateHz': 30,
-        'durationSeconds': _liveGreenBuffer.length / 30.0,
-        'appVersion': '1.0.0',
-      },
-      'signals': {
-        'red': List<double>.from(_liveRedBuffer),
-        'green': List<double>.from(_liveGreenBuffer),
-        'blue': List<double>.from(_liveBlueBuffer),
-      },
-      'vitals': {
-        'heartRate': _heartRate,
-        'spo2': _spo2Level,
-        'hemoglobin': _hbLevel,
-        'respiratoryRate': _respRate,
-        'signalQuality': signalQuality,
-        'bpSys': _bpSys,
-        'bpDia': _bpDia,
-        'glucose': _glucoseLevel,
-        'creatinine': _creatinineLevel,
-        'egfr': _egfrLevel,
-      },
-      'groundTruth': groundTruth ?? {},
-      'quality': {
-        'perfusionIndex': PPGSignalEngine.computePerfusionIndex(_liveGreenBuffer),
-        'redPI': PPGSignalEngine.computePerfusionIndex(_liveRedBuffer),
-        'bluePI': PPGSignalEngine.computePerfusionIndex(_liveBlueBuffer),
-        'bufferLength': _liveGreenBuffer.length,
-        'state': _currentState.name,
-      },
-    };
-  }
-
-  String exportRawSignalsJson({
-    Map<String, dynamic>? groundTruth,
-    String? sessionId,
-    String? patientId,
-  }) {
-    final data = exportRawSignals(
-      groundTruth: groundTruth,
-      sessionId: sessionId,
-      patientId: patientId,
-    );
-    return _jsonEncode(data);
-  }
-
-  String _jsonEncode(Map<String, dynamic> data) {
-    final buffer = StringBuffer();
-    _writeJson(buffer, data, 0);
-    return buffer.toString();
-  }
-
-  void _writeJson(StringBuffer buffer, dynamic value, int indent) {
-    if (value is Map<String, dynamic>) {
-      if (value.isEmpty) {
-        buffer.write('{}');
-        return;
-      }
-      buffer.write('{\n');
-      final keys = value.keys.toList();
-      for (int i = 0; i < keys.length; i++) {
-        buffer.write('  ' * (indent + 1));
-        buffer.write('"${keys[i]}": ');
-        _writeJson(buffer, value[keys[i]], indent + 1);
-        if (i < keys.length - 1) buffer.write(',');
-        buffer.write('\n');
-      }
-      buffer.write('  ' * indent);
-      buffer.write('}');
-    } else if (value is List) {
-      if (value.isEmpty) {
-        buffer.write('[]');
-        return;
-      }
-      buffer.write('[\n');
-      for (int i = 0; i < value.length; i++) {
-        buffer.write('  ' * (indent + 1));
-        _writeJson(buffer, value[i], indent + 1);
-        if (i < value.length - 1) buffer.write(',');
-        buffer.write('\n');
-      }
-      buffer.write('  ' * indent);
-      buffer.write(']');
-    } else if (value is String) {
-      buffer.write('"${value.replaceAll('"', '\\"')}"');
-    } else if (value is num || value is bool || value == null) {
-      buffer.write(value == null ? 'null' : value.toString());
-    } else {
-      buffer.write('"${value.toString()}"');
-    }
   }
 
   @override
   void dispose() {
     _stopDemoTimer();
     super.dispose();
-  }
-
-  /// Set the ZLO calibration value from native Android/iOS
-  void setCalibrationZlo(double zlo, {double slope = 1.0}) {
-    _calibrationZlo = zlo;
-    _calibrationSlope = slope;
-    debugPrint('Calibration set: ZLO=$zlo, Slope=$slope');
-  }
-
-  /// Set calibration from a CalibrationProfile
-  void setCalibrationProfile(CalibrationProfile profile) {
-    _calibrationZlo = profile.zlo;
-    _calibrationSlope = profile.sensorLinearSlope;
-    debugPrint('Calibration profile set: source=${profile.source}, ZLO=${_calibrationZlo}, Slope=${_calibrationSlope}');
-  }
-
-  /// Set torch state from main.dart (synced with actual hardware torch)
-  void setTorchState(bool active) {
-    _torchActive = active;
   }
 
   void reset() {
@@ -604,19 +435,8 @@ class VitalSignController extends ChangeNotifier {
     _hbLevel = 0.0;
     _spo2Level = 0.0;
     _respRate = 0.0;
-    _bpSys = 0.0;
-    _bpDia = 0.0;
-    _glucoseLevel = 0.0;
-    _creatinineLevel = 0.0;
-    _egfrLevel = 0.0;
-    _creatinineClass = '';
-    _kdigoStage = '';
-    _signalQuality = 0.0;
-    _fingerDetected = false;
-    _torchActive = false;
-    _ppgHistory.clear();
     _clearBuffers();
-
+    
     if (_cameraMode == CameraMode.front) {
       _toastPrompt = "Position your face in the frame with good lighting.";
     } else {

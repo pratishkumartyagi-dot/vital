@@ -1,53 +1,34 @@
 package com.vitals.app
 
-import kotlin.math.cos
-import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.math.PI
 
 class PpgSignalProcessor(
     private val sampleRateHz: Double = 30.0,
-    private val windowSizeSeconds: Int = 5,  // Reduced from 10s to 5s for faster response
-    private val zlo: Double = 0.0
+    private val windowSizeSeconds: Int = 10
 ) {
     private val maxBufferSize = (sampleRateHz * windowSizeSeconds).toInt()
     private val rawSignalBuffer = ArrayList<Double>()
 
-    data class BiquadCoeffs(
-        val b0: Double,
-        val b1: Double,
-        val b2: Double,
-        val a1: Double,
-        val a2: Double
+    // 4th-order Butterworth bandpass filter (0.5-3.5 Hz @ 30 Hz)
+    // SOS coefficients from scipy.signal.butter(4, [0.5/15, 3.5/15], btype='band', output='sos')
+    // Section 1: [0.00295136, 0.0, -0.00295136, 1.0, -1.891408, 0.897916]
+    // Section 2: [1.0, 2.0, 1.0, 1.0, -1.882394, 0.906327]
+    private val sos = doubleArrayOf(
+        // Section 1: b0, b1, b2, a1, a2
+        0.00295136, 0.0, -0.00295136, -1.891408, 0.897916,
+        // Section 2: b0, b1, b2, a1, a2
+        1.0, 2.0, 1.0, -1.882394, 0.906327
     )
 
     fun addSample(value: Double) {
-        val correctedValue = applyZloCorrection(value)
-        if (rawSignalBuffer.size >= maxBufferSize) {
-            rawSignalBuffer.removeAt(0)
-        }
-        rawSignalBuffer.add(correctedValue)
-    }
-
-    fun addRawSample(value: Double) {
         if (rawSignalBuffer.size >= maxBufferSize) {
             rawSignalBuffer.removeAt(0)
         }
         rawSignalBuffer.add(value)
     }
 
-    private fun applyZloCorrection(rawValue: Double): Double {
-        if (zlo <= 0.0) return rawValue
-        val corrected = rawValue - zlo
-        return if (corrected > 0.0) corrected else 0.0
-    }
-
     fun reset() {
         rawSignalBuffer.clear()
-    }
-
-    fun updateZlo(newZlo: Double): PpgSignalProcessor {
-        return PpgSignalProcessor(sampleRateHz, windowSizeSeconds, newZlo)
     }
 
     fun processWindow(): Double? {
@@ -56,85 +37,38 @@ class PpgSignalProcessor(
         val mean = rawSignalBuffer.average()
         val detrended = rawSignalBuffer.map { it - mean }.toDoubleArray()
 
-        val filtered = applyBandpassFilter(detrended)
+        val filtered = applySosFilter(detrended)
 
         return calculateHeartRate(filtered)
     }
 
-    fun processWindowRaw(): DoubleArray? {
-        if (rawSignalBuffer.size < maxBufferSize) return null
-        return rawSignalBuffer.toDoubleArray()
-    }
-
-    private fun applyBandpassFilter(input: DoubleArray): DoubleArray {
-        val fs = sampleRateHz
-        val low = 0.5
-        val high = 3.5
-
-        if (input.size < 10 || fs <= 0 || low <= 0 || high <= low || high >= fs / 2) {
-            return input.copyOf()
+    private fun applySosFilter(input: DoubleArray): DoubleArray {
+        var stage = input.copyOf()
+        
+        // Process two cascaded biquad sections
+        for (sectionIdx in 0..1) {
+            val offset = sectionIdx * 5
+            val b0 = sos[offset]
+            val b1 = sos[offset + 1]
+            val b2 = sos[offset + 2]
+            val a1 = sos[offset + 3]
+            val a2 = sos[offset + 4]
+            
+            val output = DoubleArray(stage.size)
+            var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
+            
+            for (i in stage.indices) {
+                val x0 = stage[i]
+                val y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                
+                output[i] = y0
+                x2 = x1; x1 = x0
+                y2 = y1; y1 = y0
+            }
+            stage = output
         }
-
-        val hp = highpassBiquad(low, fs)
-        val lp = lowpassBiquad(high, fs)
-        val dc = input.average()
-
-        var y = applyBiquad(input, hp, dc, 0.0)
-        y = applyBiquad(y, lp, 0.0, 0.0)
-
-        y = y.reversed().toDoubleArray()
-        y = applyBiquad(y, hp, 0.0, 0.0)
-        y = applyBiquad(y, lp, 0.0, 0.0)
-        y = y.reversed().toDoubleArray()
-
-        return y
-    }
-
-    private fun lowpassBiquad(fc: Double, fs: Double, q: Double = 1.0 / sqrt(2.0)): BiquadCoeffs {
-        val w0 = (2 * PI * fc) / fs
-        val cw = cos(w0)
-        val sw = sin(w0)
-        val alpha = sw / (2 * q)
-        val a0 = 1 + alpha
-        return BiquadCoeffs(
-            b0 = (1 - cw) / 2 / a0,
-            b1 = (1 - cw) / a0,
-            b2 = (1 - cw) / 2 / a0,
-            a1 = (-2 * cw) / a0,
-            a2 = (1 - alpha) / a0
-        )
-    }
-
-    private fun highpassBiquad(fc: Double, fs: Double, q: Double = 1.0 / sqrt(2.0)): BiquadCoeffs {
-        val w0 = (2 * PI * fc) / fs
-        val cw = cos(w0)
-        val sw = sin(w0)
-        val alpha = sw / (2 * q)
-        val a0 = 1 + alpha
-        return BiquadCoeffs(
-            b0 = (1 + cw) / 2 / a0,
-            b1 = -(1 + cw) / a0,
-            b2 = (1 + cw) / 2 / a0,
-            a1 = (-2 * cw) / a0,
-            a2 = (1 - alpha) / a0
-        )
-    }
-
-    private fun applyBiquad(input: DoubleArray, c: BiquadCoeffs, seedX: Double, seedY: Double): DoubleArray {
-        val out = DoubleArray(input.size)
-        var x1 = seedX
-        var x2 = seedX
-        var y1 = seedY
-        var y2 = seedY
-        for (i in input.indices) {
-            val y = c.b0 * input[i] + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2
-            out[i] = y
-            x2 = x1
-            x1 = input[i]
-            y2 = y1
-            y1 = y
-        }
-        return out
+        
+        return stage
     }
 
     private fun calculateHeartRate(signal: DoubleArray): Double? {
@@ -142,8 +76,7 @@ class PpgSignalProcessor(
         val mean = signal.average()
         val variance = signal.map { (it - mean) * (it - mean) }.sum() / signal.size
         val stdDev = sqrt(variance)
-        // Use adaptive threshold: 0.8 * stdDev to avoid noise peaks
-        val threshold = 0.8 * stdDev
+        val threshold = 0.5 * stdDev
 
         for (i in 1 until signal.size - 1) {
             if (signal[i] > signal[i - 1] && signal[i] > signal[i + 1]) {
@@ -155,40 +88,15 @@ class PpgSignalProcessor(
 
         if (peaks.size < 3) return null
 
-        // Filter peaks by minimum distance (refractory period ~300ms)
-        val minDistFrames = (0.3 * sampleRateHz).toInt()
-        val validPeaks = ArrayList<Int>()
-        for (p in peaks) {
-            if (validPeaks.isEmpty() || p - validPeaks.last() >= minDistFrames) {
-                validPeaks.add(p)
-            }
-        }
-
-        if (validPeaks.size < 3) return null
-
         var totalIntervalFrames = 0
-        for (k in 0 until validPeaks.size - 1) {
-            totalIntervalFrames += (validPeaks[k + 1] - validPeaks[k])
+        for (k in 0 until peaks.size - 1) {
+            totalIntervalFrames += (peaks[k + 1] - peaks[k])
         }
 
-        val averageIntervalFrames = totalIntervalFrames.toDouble() / (validPeaks.size - 1)
+        val averageIntervalFrames = totalIntervalFrames.toDouble() / (peaks.size - 1)
         val averageIntervalSeconds = averageIntervalFrames / sampleRateHz
         val bpm = 60.0 / averageIntervalSeconds
 
-        // Stricter physiological range
-        return if (bpm in 50.0..160.0) bpm else null
-    }
-
-    companion object {
-        fun createWithCalibration(
-            sampleRateHz: Double = 30.0,
-            windowSizeSeconds: Int = 10,
-            model: String,
-            manufacturer: String,
-            apiLevel: Int = android.os.Build.VERSION.SDK_INT
-        ): PpgSignalProcessor {
-            val zlo = CameraCalibration.getZloForDevice(model, manufacturer, apiLevel)
-            return PpgSignalProcessor(sampleRateHz, windowSizeSeconds, zlo)
-        }
+        return if (bpm in 45.0..180.0) bpm else null
     }
 }
