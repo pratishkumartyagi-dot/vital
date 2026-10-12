@@ -82,6 +82,8 @@ const methodologyContent: { title: string; subtitle: string; sections: MethodSec
         {"label": "ZLO Resolution", "value": "Returns 16.0 if signal min > 30; otherwise max(0, min(signal))"},
         {"label": "SQI Gate", "value": "SpO2 computed when SQI >= 30 (0.3 threshold)"},
         {"label": "ROSE-Net", "value": "CNN+BiLSTM+attention on STMaps, cross-domain trained (BIDMC contact PPG -> rPPG video). Fallback to empirical when unavailable."},
+        {"label": "ROSE-Net Unavailable", "value": "Model not yet downloaded/loaded, IndexedDB cache miss, or WebGL inference failed — empirical formula provides immediate readings with lower accuracy"},
+        {"label": "ROSE-Net Rationale", "value": "Smartphones lack IR (940nm) LEDs; RGB-only SpO2 is inherently limited. ROSE-Net models non-linear dynamics (skin perfusion, motion artifacts, temporal patterns) that simple R/G ratios cannot. Cross-domain training (BIDMC medical PPG -> synthesized RGB via Beer-Lambert -> rPPG video) bridges the IR gap."},
         {"label": "Confidence", "value": "0.5 (empirical) or model-derived (ROSE-Net)"},
       ],
     },
