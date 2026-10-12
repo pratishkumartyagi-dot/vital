@@ -1,6 +1,346 @@
 "use strict";
 
+import * as tf from "@tensorflow/tfjs";
 import { butterworthBandpass } from "./ppg-analysis";
+import { computeEmpiricalHb as computeEmpiricalHbBase } from "./rosenet-inference";
+
+/**
+ * HMALCNN (Hemoglobin Multi-wavelength Adaptive Lightweight CNN)
+ * 
+ * Based on: Smarandache et al., "Noninvasive Hemoglobin Estimation with 
+ * Adaptive Lightweight Convolutional Neural Network Using Wearable PPG",
+ * Computer Modeling in Engineering & Sciences, 2025, 144(3): 3715-3735.
+ * DOI: 10.32604/cmes.2025.068736
+ * 
+ * Architecture:
+ * - 4 convolutional blocks: Conv1D + BatchNorm + ReLU + MaxPool
+ * - 3 fully connected layers for regression
+ * - Input: multi-wavelength PPG time-series (R, G, B channels for smartphone)
+ * - Output: Hb value (g/dL)
+ * 
+ * Trained on: Two multi-regional datasets (Dataset-A: 68 subjects, 660nm/880nm;
+ * Dataset-B: 152 subjects). Subject-independent 5-fold CV.
+ * Results: RMSE 0.90/1.20 g/dL, Pearson r 0.82/0.72, 91.3%/86.7% within ±1 g/dL.
+ */
+
+export interface HMALCNNConfig {
+  inputLength: number;
+  inChannels: number;
+  convFilters: number[];
+  kernelSize: number;
+  poolSize: number;
+  fcUnits: number[];
+  dropout: number;
+}
+
+const DEFAULT_HMALCNN_CONFIG: HMALCNNConfig = {
+  inputLength: 256,
+  inChannels: 3, // RGB channels for smartphone contact PPG
+  convFilters: [32, 64, 128, 256],
+  kernelSize: 3,
+  poolSize: 2,
+  fcUnits: [128, 64, 1],
+  dropout: 0.3,
+};
+
+export class HMALCNNInference {
+  private model: tf.LayersModel | null = null;
+  private config: HMALCNNConfig;
+  private isLoaded = false;
+
+  constructor(config: Partial<HMALCNNConfig> = {}) {
+    this.config = { ...DEFAULT_HMALCNN_CONFIG, ...config };
+  }
+
+  /**
+   * Build the HMALCNN model architecture (for training or when loading from scratch).
+   */
+  buildModel(): tf.LayersModel {
+    const input = tf.input({ shape: [this.config.inputLength, this.config.inChannels] });
+    let x = input;
+
+    // 4 Convolutional blocks
+    for (let i = 0; i < this.config.convFilters.length; i++) {
+      const filters = this.config.convFilters[i];
+      x = tf.layers.conv1d({
+        filters,
+        kernelSize: this.config.kernelSize,
+        padding: "same",
+        activation: "relu",
+        name: `conv1d_${i + 1}`,
+      }).apply(x) as tf.SymbolicTensor;
+      x = tf.layers.batchNormalization({ name: `bn_${i + 1}` }).apply(x) as tf.SymbolicTensor;
+      x = tf.layers.maxPooling1d({
+        poolSize: this.config.poolSize,
+        padding: "same",
+        name: `maxpool_${i + 1}`,
+      }).apply(x) as tf.SymbolicTensor;
+    }
+
+    // Global average pooling
+    x = tf.layers.globalAveragePooling1d({ name: "gap" }).apply(x) as tf.SymbolicTensor;
+
+    // 3 Fully connected layers
+    for (let i = 0; i < this.config.fcUnits.length - 1; i++) {
+      const units = this.config.fcUnits[i];
+      x = tf.layers.dense({ units, activation: "relu", name: `fc_${i + 1}` }).apply(x) as tf.SymbolicTensor;
+      x = tf.layers.dropout({ rate: this.config.dropout, name: `dropout_${i + 1}` }).apply(x) as tf.SymbolicTensor;
+    }
+
+    // Output layer (single value: Hb in g/dL)
+    x = tf.layers.dense({ units: 1, activation: "linear", name: "output" }).apply(x) as tf.SymbolicTensor;
+
+    const model = tf.model({ inputs: input, outputs: x, name: "HMALCNN" });
+    return model;
+  }
+
+  /**
+   * Load the HMALCNN model from a URL (TF.js format).
+   */
+  async load(modelUrl: string): Promise<void> {
+    try {
+      this.model = await tf.loadLayersModel(modelUrl);
+      this.isLoaded = true;
+      console.log("HMALCNN model loaded successfully");
+    } catch (error) {
+      console.warn("Failed to load HMALCNN model:", error);
+      this.isLoaded = false;
+      this.model = null;
+    }
+  }
+
+  /**
+   * Load model from IndexedDB cache.
+   */
+  async loadFromCache(modelName: string = "hmalcnn-model"): Promise<void> {
+    try {
+      this.model = await tf.loadLayersModel(`indexeddb://${modelName}`);
+      this.isLoaded = true;
+      console.log("HMALCNN model loaded from IndexedDB");
+    } catch (error) {
+      console.warn("No cached HMALCNN model found:", error);
+      this.isLoaded = false;
+      this.model = null;
+    }
+  }
+
+  /**
+   * Save model to IndexedDB.
+   */
+  async saveToCache(modelName: string = "hmalcnn-model"): Promise<void> {
+    if (!this.model) throw new Error("No model to save");
+    await this.model.save(`indexeddb://${modelName}`);
+    console.log("HMALCNN model saved to IndexedDB");
+  }
+
+  /**
+   * Preprocess RGB PPG signals into a TF.js tensor for model input.
+   * Input shape: [batch, time_steps, channels] = [1, inputLength, 3]
+   */
+  preprocess(
+    rRaw: number[],
+    gRaw: number[],
+    bRaw: number[],
+    targetLength?: number,
+  ): tf.Tensor {
+    const len = targetLength ?? this.config.inputLength;
+    const n = Math.min(rRaw.length, gRaw.length, bRaw.length);
+
+    // Normalize each channel
+    const normalize = (signal: number[]): number[] => {
+      const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+      const std = Math.sqrt(
+        signal.reduce((a, b) => a + (b - mean) ** 2, 0) / signal.length,
+      );
+      return signal.map((v) => (v - mean) / (std || 1));
+    };
+
+    const rNorm = normalize(rRaw.slice(0, n));
+    const gNorm = normalize(gRaw.slice(0, n));
+    const bNorm = normalize(bRaw.slice(0, n));
+
+    // Resample to targetLength
+    const resample = (signal: number[]): number[] => {
+      if (signal.length === len) return signal;
+      const xOld = signal.length > 1
+        ? Array.from({ length: signal.length }, (_, i) => i / (signal.length - 1))
+        : [0, 1];
+      const xNew = Array.from({ length: len }, (_, i) =>
+        len > 1 ? i / (len - 1) : 0,
+      );
+      const result = new Array(len);
+      for (let t = 0; t < len; t++) {
+        const idx = xNew[t] * (signal.length - 1);
+        const i0 = Math.floor(idx);
+        const i1 = Math.min(i0 + 1, signal.length - 1);
+        const frac = idx - i0;
+        result[t] = signal[i0] * (1 - frac) + signal[i1] * frac;
+      }
+      return result;
+    };
+
+    const rResampled = resample(rNorm);
+    const gResampled = resample(gNorm);
+    const bResampled = resample(bNorm);
+
+    // Stack channels: [time, channels] -> [1, time, channels]
+    const flatData = new Float32Array(len * 3);
+    for (let t = 0; t < len; t++) {
+      flatData[t * 3 + 0] = rResampled[t];
+      flatData[t * 3 + 1] = gResampled[t];
+      flatData[t * 3 + 2] = bResampled[t];
+    }
+
+    return tf.tensor(flatData, [1, len, 3]);
+  }
+
+  /**
+   * Run HMALCNN Hb inference.
+   * Returns Hb in g/dL with metadata.
+   */
+  async estimateHb(
+    rRaw: number[],
+    gRaw: number[],
+    bRaw: number[],
+  ): Promise<HbResult> {
+    if (rRaw.length < this.config.inputLength / 2) {
+      return {
+        hb: null,
+        rRatio: null,
+        absorbanceFeatures: emptyAbsorbanceFeatures(),
+        confidence: 0,
+        method: "hmalcnn",
+        modelUsed: false,
+      };
+    }
+
+    if (this.isLoaded && this.model) {
+      const inputTensor = this.preprocess(rRaw, gRaw, bRaw);
+      try {
+        const output = this.model.predict(inputTensor) as tf.Tensor;
+        const data = await output.data();
+        const hb = data[0];
+        inputTensor.dispose();
+        output.dispose();
+
+        // Clamp to physiological range
+        const clampedHb = Math.min(18, Math.max(7, hb));
+
+        return {
+          hb: Math.round(clampedHb * 10) / 10,
+          rRatio: null,
+          absorbanceFeatures: computeAbsorbanceFeatures(rRaw, gRaw, bRaw),
+          confidence: 0.85,
+          method: "hmalcnn",
+          modelUsed: true,
+        };
+      } catch (error) {
+        console.warn("HMALCNN inference failed, falling back:", error);
+        inputTensor.dispose();
+      }
+    }
+
+    // Fallback to empirical formula
+    return computeEmpiricalHb(rRaw, gRaw, bRaw);
+  }
+
+  isReady(): boolean {
+    return this.isLoaded;
+  }
+
+  dispose(): void {
+    if (this.model) {
+      this.model.dispose();
+      this.model = null;
+      this.isLoaded = false;
+    }
+  }
+}
+
+function emptyAbsorbanceFeatures(): AbsorbanceFeatures {
+  return {
+    odR: 0,
+    odG: 0,
+    odB: 0,
+    logAcDcRed: 0,
+    logAcDcGreen: 0,
+    logAcDcBlue: 0,
+    pi: 0,
+    skinReflectance: 0,
+  };
+}
+
+function computeAbsorbanceFeatures(
+  rRaw: number[],
+  gRaw: number[],
+  bRaw: number[],
+): AbsorbanceFeatures {
+  const meanR = mean(rRaw);
+  const meanG = mean(gRaw);
+  const meanB = mean(bRaw);
+  const maxR = Math.max(...rRaw);
+  const maxG = Math.max(...gRaw);
+  const maxB = Math.max(...bRaw);
+
+  return {
+    odR: meanR > 0 ? -Math.log(meanR / maxR) : 0,
+    odG: meanG > 0 ? -Math.log(meanG / maxG) : 0,
+    odB: meanB > 0 ? -Math.log(meanB / maxB) : 0,
+    logAcDcRed: 0,
+    logAcDcGreen: 0,
+    logAcDcBlue: 0,
+    pi: 0,
+    skinReflectance: meanR / 255,
+  };
+}
+
+function mean(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+// Singleton instance
+let hmalcnnInstance: HMALCNNInference | null = null;
+
+export function getHMALCNNInstance(config?: Partial<HMALCNNConfig>): HMALCNNInference {
+  if (!hmalcnnInstance) {
+    hmalcnnInstance = new HMALCNNInference(config);
+  }
+  return hmalcnnInstance;
+}
+
+export async function estimateHbHMALCNN(
+  rRaw: number[],
+  gRaw: number[],
+  bRaw: number[],
+): Promise<HbResult> {
+  const instance = getHMALCNNInstance();
+  return instance.estimateHb(rRaw, gRaw, bRaw);
+}
+
+export function resetHMALCNNInstance(): void {
+  if (hmalcnnInstance) {
+    hmalcnnInstance.dispose();
+    hmalcnnInstance = null;
+  }
+}
+
+/**
+ * Wrapper for empirical Hb formula that adds method/modelUsed fields.
+ */
+function computeEmpiricalHb(
+  rRaw: number[],
+  gRaw: number[],
+  bRaw: number[],
+): HbResult {
+  const base = computeEmpiricalHbBase(rRaw, gRaw, bRaw, null, 0.5, 30);
+  return {
+    ...base,
+    absorbanceFeatures: computeAbsorbanceFeatures(rRaw, gRaw, bRaw),
+    method: "empirical",
+    modelUsed: false,
+  };
+}
 
 export type CameraMode = "contact" | "rppg";
 
@@ -118,6 +458,8 @@ export interface HbResult {
   rRatio: number | null;
   absorbanceFeatures: AbsorbanceFeatures;
   confidence: number;
+  method: "hmalcnn" | "empirical";
+  modelUsed: boolean;
 }
 
 export interface AbsorbanceFeatures {
@@ -161,11 +503,6 @@ export interface QualityResult {
   spectralSnr: number;
   pi: number;
   accepted: boolean;
-}
-
-function mean(arr: number[]): number {
-  if (arr.length === 0) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
 function stddev(arr: number[]): number {
@@ -827,7 +1164,7 @@ function computeHemoglobin(
   fs: number,
 ): HbResult {
   if (rRaw.length < fs * 3) {
-    return { hb: null, rRatio: null, absorbanceFeatures: emptyAbsorbanceFeatures(), confidence: 0 };
+    return { hb: null, rRatio: null, absorbanceFeatures: computeAbsorbanceFeatures(rRaw, gRaw, bRaw), confidence: 0, method: "empirical", modelUsed: false };
   }
 
   const absorbance: AbsorbanceFeatures = {
@@ -851,7 +1188,7 @@ function computeHemoglobin(
   const acG = mean(greenFiltered.map((v) => Math.abs(v - mean(greenFiltered))));
 
   if (dcR <= 0 || dcG <= 0 || acG <= 1e-12) {
-    return { hb: null, rRatio: null, absorbanceFeatures: absorbance, confidence: 0 };
+    return { hb: null, rRatio: null, absorbanceFeatures: absorbance, confidence: 0, method: "empirical", modelUsed: false };
   }
 
   const rRatio = (acR / dcR) / (acG / dcG);
@@ -864,19 +1201,8 @@ function computeHemoglobin(
     rRatio: Math.round(rRatio * 10000) / 10000,
     absorbanceFeatures: absorbance,
     confidence: Math.round(confidence * 100) / 100,
-  };
-}
-
-function emptyAbsorbanceFeatures(): AbsorbanceFeatures {
-  return {
-    odR: 0,
-    odG: 0,
-    odB: 0,
-    logAcDcRed: 0,
-    logAcDcGreen: 0,
-    logAcDcBlue: 0,
-    pi: 0,
-    skinReflectance: 0,
+    method: "empirical",
+    modelUsed: false,
   };
 }
 
@@ -1399,14 +1725,14 @@ function kdigoStageC(egfr: number | null): string | null {
   return "G5";
 }
 
-export function computeValidationMetrics(
+export async function computeValidationMetrics(
   rRaw: number[],
   gRaw: number[],
   bRaw: number[],
   cameraMode: CameraMode,
   fs: number,
   options: ComputeOptions = { referenceChannel: "green" },
-): ValidationResult {
+): Promise<ValidationResult> {
   const minLen = Math.min(rRaw.length, gRaw.length, bRaw.length);
   rRaw = rRaw.slice(0, minLen);
   gRaw = gRaw.slice(0, minLen);
@@ -1492,8 +1818,19 @@ export function computeValidationMetrics(
     options.calibratedBP ?? false,
   );
 
-  // Hemoglobin
-  const hb = computeHemoglobin(rRaw, gRaw, bRaw, acdc, fs);
+  // Hemoglobin: HMALCNN for contact PPG, empirical for rPPG
+  let hb: HbResult;
+  if (cameraMode === "contact") {
+    // Try HMALCNN first (async, will use empirical as fallback if model not loaded)
+    const hmalcnnResult = await estimateHbHMALCNN(rRaw, gRaw, bRaw);
+    if (hmalcnnResult.modelUsed) {
+      hb = hmalcnnResult;
+    } else {
+      hb = computeEmpiricalHb(rRaw, gRaw, bRaw);
+    }
+  } else {
+    hb = computeEmpiricalHb(rRaw, gRaw, bRaw);
+  }
 
   // Glucose (research estimate)
   const glucose = computeGlucose(processedSignal, rRaw, gRaw, bRaw, peaks, acdc.pi, fs);
