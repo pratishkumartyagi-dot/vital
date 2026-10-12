@@ -147,6 +147,26 @@ const methodologyContent: { title: string; subtitle: string; sections: MethodSec
         {"label": "Results", "value": "PPG MAE: 0.5556 | HR MAE: 4.32 BPM"},
       ],
     },
+    {
+      heading: "12. Validation: Contact PPG & rPPG Dual Measurement",
+      content: [
+        {"label": "Contact PPG (Rear)", "value": "150x120 px center ROI, torch ON, 30 fps fixed"},
+        {"label": "rPPG (Front)", "value": "MediaPipe FaceMesh 468 landmarks, 5 ROI regions, 30 fps fixed"},
+        {"label": "Signal Extraction (Contact)", "value": "OD_c(t) = -ln(I_c/I0_c) or p(t) = -detrended(C(t)); bandpass 0.5-4 Hz zero-phase"},
+        {"label": "Signal Extraction (rPPG)", "value": "Cn(t) = C(t)/mean(C) detrended + bandpass 0.7-3.0 Hz. Methods: Green, CHROM (3R-2G, 1.5R+G-1.5B), POS overlap-added over 1.6s windows"},
+        {"label": "Heart Rate", "value": "Beat detection with parabolic interpolation or spectral argmax in 0.7-3.0 Hz. Sub-frame timing via parabolic peak interpolation or spline upsampling to >=120 Hz"},
+        {"label": "Per-beat AC/DC", "value": "AC = mean(P_max - P_min) per beat; DC = mean intensity. PI = (AC/DC)*100% as quality gate"},
+        {"label": "SpO2 (Contact)", "value": "R = (AC_red/DC_red)/(AC_x/DC_x), x=green or blue. Fit: SpO2 = a - b*R (e.g. 110 - 25R). Also available: quadratic (a + bR + cR²) and log form"},
+        {"label": "SpO2 (rPPG)", "value": "AC_c = spectral amplitude at f_hr (+/-0.15 Hz); DC_c = mean(C). R = (AC_red/DC_red)/(AC_green/DC_green). Empirical fit per phone model"},
+        {"label": "Respiratory Rate", "value": "Three modulations: baseline wander (0.1-0.5 Hz), amplitude modulation (Hilbert envelope), frequency modulation (IBI series). SQI-weighted fusion of PSD peaks"},
+        {"label": "HRV", "value": "Upsample to 120 Hz (cubic spline) before peak detection. SDNN, RMSSD, pNN50 (>50ms). LF(0.04-0.15 Hz)/HF(0.15-0.40 Hz) via Lomb-Scargle on NN series"},
+        {"label": "Blood Pressure", "value": "Waveform features: stiffness index SI = height/ΔT, reflection index RI = b/a, APG ratios (b/a, c/a, d/a, e/a), aging index. Model: SBP = β0 + Σβi·xi (ridge/gradient boosting). Two-site adds PTT = a + b·ln(PTT). Per-user calibration offset required"},
+        {"label": "Hemoglobin", "value": "Absorbance per channel: A_c = -ln(I_c/I0_c). Features: AC/DC ratios, log-ratios, PI, skin reflectance, HR. Hb = 18.2 - 6.8*R (red/green). Per-device calibration"},
+        {"label": "Glucose/Creatinine", "value": "y = f(waveform features, HR, HRV, age, sex, BMI). ML regression benchmarked against covariate-only baseline. Glucose: exploratory estimate only. Creatinine: CKD-EPI 2021 eGFR + KDIGO stages"},
+        {"label": "Quality Index", "value": "SQI = corr(beat_i, mean_template) > 0.85 acceptance threshold. Combined: perfusion index, spectral SNR at f_hr, skewness/kurtosis, PI threshold > 0.2% or reject"},
+        {"label": "Evaluation Metrics", "value": "d = app - reference; bias = mean(d); LoA = bias +/- 1.96*SD(d); MAE, RMSE, ARMS. Lin CCC = 2ρσxσy / (σx² + σy² + (μx - μy)²)"},
+      ],
+    },
   ],
 };
 

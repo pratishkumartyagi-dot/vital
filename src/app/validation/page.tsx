@@ -10,6 +10,7 @@ import {
   getValidationMeasurements,
   type ValidationStats,
 } from '@/lib/vital-storage';
+import { computeValidationMetrics, type ComputeOptions, type ValidationResult, type CameraMode } from '@/app/vital-monitoring/validation-metrics';
 
 interface ValidationSession {
   id: string;
@@ -99,6 +100,10 @@ export default function ValidationPage() {
     protocolNotes: '',
     sex: '' as '' | 'male' | 'female',
   });
+
+  const [newToggle, setNewToggle] = useState(false);
+  const [newValidationPhase, setNewValidationPhase] = useState<'idle' | 'recording' | 'processing' | 'results'>('idle');
+  const [newValidationResult, setNewValidationResult] = useState<any>(null);
 
   const [newMeasurement, setNewMeasurement] = useState({
     appBpm: '',
@@ -452,6 +457,18 @@ export default function ValidationPage() {
               Home
             </Link>
           </div>
+          <label className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-800 rounded-lg cursor-pointer transition hover:bg-neutral-700">
+            <input
+              type="checkbox"
+              checked={newToggle}
+              onChange={(e) => setNewToggle(e.target.checked)}
+              className="w-4 h-4 appearance-none bg-neutral-600 rounded relative cursor-pointer"
+            />
+            <span className="text-sm font-medium text-white">New</span>
+            {newToggle && (
+              <span className="text-xs text-cyan-400">(Dual: Contact PPG + rPPG)</span>
+            )}
+          </label>
         </div>
 
         <div className="flex gap-4 mb-6">
@@ -1076,9 +1093,136 @@ export default function ValidationPage() {
               requires laboratory calibration (Sridevi et al., Smart Health 2025 / Healthcare Analytics 2025) before
               any diagnostic use.
             </p>
-          </div>
-        </div>
       </div>
-    </main>
+        </div>
+
+        {newToggle && (
+          <div className="bg-neutral-900 rounded-2xl border border-neutral-800 p-6 mb-8">
+            <h2 className="text-xl font-bold text-white mb-4">
+              New: Contact PPG & rPPG Validation Measurement
+            </h2>
+            <p className="text-sm text-neutral-400 mb-4">
+              Dual-mode measurement capturing both Contact PPG (rear camera, finger-on-lens) and rPPG (front camera, facial ROI).
+              Measures the full parameter chain per the updated methodology.
+            </p>
+
+            {newValidationPhase === 'idle' && (
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setNewValidationPhase('recording')}
+                  className="px-5 py-2.5 bg-cyan-600 hover:bg-cyan-700 text-white text-sm rounded-lg transition"
+                >
+                  Start Dual Measurement
+                </button>
+                <button
+                  onClick={() => {
+                    const opts: ComputeOptions = { referenceChannel: 'blue', ageYears: 45, sex: 'male', bmi: 25, calibratedBP: false };
+                    const dummyR = Array.from({ length: 900 }, () => 120 + Math.sin(Math.random()) * 10);
+                    const dummyG = Array.from({ length: 900 }, () => 100 + Math.sin(Math.random()) * 10);
+                    const dummyB = Array.from({ length: 900 }, () => 80 + Math.sin(Math.random()) * 10);
+                    const contactResult = computeValidationMetrics(dummyR, dummyG, dummyB, 'contact', 30, opts);
+                    const rppgResult = computeValidationMetrics(dummyR, dummyG, dummyB, 'rppg', 30, opts);
+                    setNewValidationResult({ contact: contactResult, rppg: rppgResult });
+                    setNewValidationPhase('results');
+                  }}
+                  className="px-5 py-2.5 bg-neutral-700 hover:bg-neutral-600 text-white text-sm rounded-lg transition"
+                >
+                  Run Demo
+                </button>
+              </div>
+            )}
+
+            {newValidationPhase === 'recording' && (
+              <div className="py-8 text-center text-neutral-400">
+                <p className="mb-2">Recording... (60s)</p>
+                <div className="w-64 h-2 bg-neutral-800 rounded-full mx-auto overflow-hidden">
+                  <div className="h-full bg-cyan-500 w-1/2 animate-pulse"></div>
+                </div>
+                <button
+                  onClick={() => setNewValidationPhase('idle')}
+                  className="mt-4 px-4 py-2 bg-neutral-700 hover:bg-neutral-600 text-white text-sm rounded-lg transition"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {newValidationPhase === 'processing' && (
+              <div className="py-8 text-center text-neutral-400">
+                Processing signals...
+              </div>
+            )}
+
+            {newValidationPhase === 'results' && newValidationResult && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {(['contact', 'rppg'] as const).map((mode) => {
+                  const res = newValidationResult[mode] as ValidationResult;
+                  const isContact = mode === 'contact';
+                  return (
+                    <div key={mode} className="bg-neutral-800/50 rounded-lg border border-neutral-700 p-4">
+                      <h3 className="text-lg font-bold text-white mb-3">
+                        {isContact ? 'Contact PPG (Rear)' : 'rPPG (Front)'}
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">Heart Rate:</span>
+                          <span className="text-white">{res.heartRate.bpm !== null ? `${res.heartRate.bpm} BPM` : '--'} (method: {res.heartRate.method})</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">SpO2:</span>
+                          <span className="text-white">{res.spo2.spo2 !== null ? `${res.spo2.spo2}%` : '--'} R={res.spo2.rRatio ?? '--'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">Hb:</span>
+                          <span className="text-white">{res.hb.hb !== null ? `${res.hb.hb} g/dL` : '--'} R={res.hb.rRatio ?? '--'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">RR:</span>
+                          <span className="text-white">{res.respRate.respRate !== null ? `${res.respRate.respRate} /min` : '--'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">HRV (SDNN):</span>
+                          <span className="text-white">{res.hrv.sdnn} ms (RMSSD: {res.hrv.rmssd})</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">BP:</span>
+                          <span className="text-white">
+                            {res.bp.systolic !== null ? `${res.bp.systolic}/${res.bp.diastolic} mmHg` : '--'}
+                            {res.bp.method === 'two-site' && ' (calibrated)'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">Glucose:</span>
+                          <span className="text-white">{res.glucose.glucose !== null ? `${res.glucose.glucose} mg/dL` : '--'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">Creatinine:</span>
+                          <span className="text-white">{res.creatinine.creatinine !== null ? `${res.creatinine.creatinine} mg/dL` : '--'} (eGFR: {res.creatinine.egfr ?? '--'})</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">Perfusion Index:</span>
+                          <span className="text-white">{res.perfusionIndex.toFixed(2)}%</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-400">Quality (SQI):</span>
+                          <span className="text-white">{res.quality.sqi}% (accepted: {res.quality.accepted ? 'yes' : 'no'})</span>
+                        </div>
+                        {!isContact && (
+                          <div className="flex justify-between">
+                            <span className="text-neutral-400">Pulse Method:</span>
+                            <span className="text-white">{(res as any).pulseMethod}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+     </main>
   );
 }
+
