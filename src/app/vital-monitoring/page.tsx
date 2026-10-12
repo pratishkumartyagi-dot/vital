@@ -129,6 +129,8 @@ export default function VitalMonitoringPage() {
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
   const validationResultRef = useRef<ValidationResult | null>(null);
+  const fingerFrameCountRef = useRef<number>(0);
+  const fingerStableCountRef = useRef<number>(0);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -472,14 +474,58 @@ export default function VitalMonitoringPage() {
     lastFrameTimeRef.current = now;
 
     // Finger detection for rear camera:
-    // A finger on the lens attenuates torch light (moderate brightness, avgR < 200)
-    // and is red-dominant (hemoglobin absorbs green/blue more than red).
-    // Without a finger: torch light is at max brightness (avgR > 200) → not a finger.
-    // With a finger: light is attenuated (avgR in [30, 200]) and red-dominant.
-    const isFingerFrame = cameraMode === "rear"
-      ? (avgR > 30 && avgR < 200 && avgR > avgG + 5 && avgR > avgB + 5)
-      : true;
-    if (cameraMode === "rear" && !demoMode) setFingerDetected(isFingerFrame);
+    // Only run when torch is ON. A finger on the lens attenuates torch light:
+    // - Moderate brightness (avgR in [30, 200]), not saturated
+    // - Red-dominant: hemoglobin absorbs green/blue more than red (avgR > avgG + 15, avgR > avgB + 15)
+    // Without finger + torch ON: saturated/bright (avgR > 200, many pixels at 255)
+    // Without finger + torch OFF: variable, not reliable
+    let isFingerFrame = false;
+    if (cameraMode === "rear" && torchOn && !demoMode) {
+      // Count saturated pixels (at or near 255)
+      let saturatedCount = 0;
+      for (let y = 4; y < 124; y++) {
+        for (let x = 5; x < 155; x++) {
+          const i = (y * 160 + x) * 4;
+          const r = data[i];
+          if (r >= 250) saturatedCount++;
+        }
+      }
+      const totalPixels = 150 * 120;
+      const saturationRatio = saturatedCount / totalPixels;
+
+      // Finger present: moderate brightness, red-dominant, NOT saturated
+      // No finger: high brightness, saturated
+      const brightnessOK = avgR > 30 && avgR < 200;
+      const redDominant = avgR > avgG + 15 && avgR > avgB + 15;
+      const notSaturated = saturationRatio < 0.3; // less than 30% saturated pixels
+
+      isFingerFrame = brightnessOK && redDominant && notSaturated;
+
+      // Temporal stability: require 5 consecutive frames
+      if (isFingerFrame) {
+        fingerFrameCountRef.current++;
+      } else {
+        fingerFrameCountRef.current = 0;
+      }
+
+      // Stable detection: need 5 consecutive positive frames
+      const fingerStable = fingerFrameCountRef.current >= 5;
+
+      // Hysteresis: once stable, require 5 consecutive negative frames to release
+      if (fingerStable) {
+        fingerStableCountRef.current = Math.min(fingerStableCountRef.current + 1, 10);
+      } else {
+        fingerStableCountRef.current = Math.max(fingerStableCountRef.current - 1, 0);
+      }
+
+      const finalFingerDetected = fingerStableCountRef.current >= 5;
+      setFingerDetected(finalFingerDetected);
+    } else if (cameraMode === "rear" && !demoMode) {
+      // Torch off or not rear: reset and don't detect
+      fingerFrameCountRef.current = 0;
+      fingerStableCountRef.current = 0;
+      setFingerDetected(false);
+    }
 
     if (demoMode) {
       const fs = Math.max(10, Math.min(60, fpsRef.current || 30));
@@ -690,7 +736,7 @@ export default function VitalMonitoringPage() {
     if (cameraOnRef.current) {
       animFrame.current = requestAnimationFrame(processFrame);
     }
-  }, [drawWaveform, cameraMode, demoMode, patient, rosenetReady]);
+  }, [drawWaveform, cameraMode, demoMode, patient, rosenetReady, torchOn]);
 
   useEffect(() => {
     if (cameraOn) {
