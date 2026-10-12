@@ -369,20 +369,20 @@ export default function VitalMonitoringPage() {
     }
 
     const c = document.createElement("canvas");
-    c.width = 128;
+    c.width = 160;
     c.height = 128;
     const ctx = c.getContext("2d");
     if (!ctx) return;
-    if (video) ctx.drawImage(video, 0, 0, 128, 128);
-    const data = ctx.getImageData(0, 0, 128, 128).data;
+    if (video) ctx.drawImage(video, 0, 0, 160, 128);
+    const data = ctx.getImageData(0, 0, 160, 128).data;
 
     let r = 0, g = 0, b = 0, count = 0;
     if (cameraMode === "rear") {
-      // Contact PPG: sample center 100x100 region (finger on lens)
-      const cx0 = 14, cy0 = 14, cx1 = 114, cy1 = 114;
+      // Contact PPG: sample center 150x120 region (finger on lens)
+      const cx0 = 5, cy0 = 4, cx1 = 155, cy1 = 124;
       for (let y = cy0; y < cy1; y++) {
         for (let x = cx0; x < cx1; x++) {
-          const i = (y * 128 + x) * 4;
+          const i = (y * 160 + x) * 4;
           r += data[i];
           g += data[i + 1];
           b += data[i + 2];
@@ -399,10 +399,10 @@ export default function VitalMonitoringPage() {
       if (video && faceROI.isInitialized() && frameCount % 10 === 0) {
         const mpResult = faceROI.detect(video, 640, 480);
         if (mpResult) {
-          // Scale landmark coords to 128x128 canvas and cache ROI regions
-          const scaleX = 128 / 640;
+          // Scale landmark coords to 160x128 canvas and cache ROI regions
+          const scaleX = 160 / 640;
           const scaleY = 128 / 480;
-          // Use face bounding box to define 5 ROI regions on the 128x128 canvas
+          // Use face bounding box to define 5 ROI regions on the 160x128 canvas
           const bx = mpResult.coords.x * scaleX;
           const by = mpResult.coords.y * scaleY;
           const bw = mpResult.coords.w * scaleX;
@@ -426,12 +426,12 @@ export default function VitalMonitoringPage() {
         // Sample from MediaPipe-detected face ROI regions
         for (const region of cachedRoi.roiRegions) {
           const startX = Math.max(0, Math.floor(region.x));
-          const endX = Math.min(128, Math.floor(region.x + region.w));
+          const endX = Math.min(160, Math.floor(region.x + region.w));
           const startY = Math.max(0, Math.floor(region.y));
           const endY = Math.min(128, Math.floor(region.y + region.h));
           for (let y = startY; y < endY; y++) {
             for (let x = startX; x < endX; x++) {
-              const i = (y * 128 + x) * 4;
+              const i = (y * 160 + x) * 4;
               r += data[i];
               g += data[i + 1];
               b += data[i + 2];

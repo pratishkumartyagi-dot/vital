@@ -24,7 +24,7 @@ const methodologyContent: { title: string; subtitle: string; sections: MethodSec
         {"label": "rPPG (Front)", "value": "Camera: front-facing. Face positioned in good lighting. No torch."},
         {"label": "Frame Rate", "value": "Constant 30 fps (fixed in camera constraints: { ideal: 30, min: 30 })"},
         {"label": "Nyquist Criterion", "value": "Cardiac band 0.5-3.5 Hz requires >= 7 fps minimum; 30 fps provides 15x oversampling for HRV frequency analysis"},
-        {"label": "ROI (Contact PPG)", "value": "Center 100x100 pixel region on rear camera lens"},
+        {"label": "ROI (Contact PPG)", "value": "Center 150x120 pixel region on rear camera lens"},
         {"label": "ROI (rPPG)", "value": "5 facial regions via MediaPipe FaceMesh (468 3D landmarks): forehead, left/right cheeks, nose bridge, lower face"},
         {"label": "ROI Update Rate", "value": "MediaPipe face detection every 10 frames, cached for 30 frames (front camera)"},
         {"label": "Color Space", "value": "RGB (660nm red, 550nm green, 450nm blue)"},
