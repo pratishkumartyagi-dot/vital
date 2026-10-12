@@ -403,7 +403,7 @@ export interface PerBeatAcDc {
 export interface SpO2Result {
   spo2: number | null;
   rRatio: number | null;
-  method: "ratio-of-ratios" | "log-ratio";
+  method: "ratio-of-ratios" | "log-ratio" | "rosenet";
   a: number;
   b: number;
   isQuadratic: boolean;

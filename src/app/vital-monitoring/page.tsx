@@ -12,6 +12,13 @@ import {
   computeEmpiricalHb,
 } from './rosenet-inference';
 import { 
+  computeValidationMetrics, 
+  type ValidationResult, 
+  type CameraMode as ValidationCameraMode,
+  getHMALCNNInstance,
+  resetHMALCNNInstance,
+} from './validation-metrics';
+import { 
   addVitalReading, 
   getVitalReadings, 
   downloadReadings, 
@@ -121,6 +128,7 @@ export default function VitalMonitoringPage() {
   const samplesRef = useRef<{ bpm: number; spo2: number; hb: number; bpSys: number; bpDia: number; sugar: number; creatinine: number; signalQuality: number; respRate: number; sdnn: number; rmssd: number; pnn50: number; rhythm: string }[]>([]);
   const autoStopTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
+  const validationResultRef = useRef<ValidationResult | null>(null);
 
   const checkPermission = useCallback(async () => {
     try {
@@ -575,6 +583,26 @@ export default function VitalMonitoringPage() {
         hbVal = hbResult.hb;
       }
 
+      // --- NEW: Run enhanced validation metrics (HMALCNN Hb, per-beat AC/DC, Lomb-Scargle HRV, etc.) ---
+      // Fire and forget to avoid blocking the frame callback; result stored in ref for next frame
+      if (redRef.current.length >= fs * 3 && greenRef.current.length >= fs * 3 && blueRef.current.length >= fs * 3) {
+        const rRawVal = redRef.current.slice(-Math.min(redRef.current.length, Math.floor(fs * 30)));
+        const gRawVal = greenRef.current.slice(-Math.min(greenRef.current.length, Math.floor(fs * 30)));
+        const bRawVal = blueRef.current.slice(-Math.min(blueRef.current.length, Math.floor(fs * 30)));
+        const valCameraMode: ValidationCameraMode = cameraMode === "rear" ? "contact" : "rppg";
+        computeValidationMetrics(
+          rRawVal, gRawVal, bRawVal, valCameraMode, fs, {
+            referenceChannel: "green",
+            ageYears: patient ? parseInt(patient.age, 10) || null : null,
+            sex: patient ? (patient.sex as "male" | "female") : null,
+            bmi: null,
+            calibratedBP: false,
+          }
+        ).then((result) => {
+          validationResultRef.current = result;
+        }).catch((e) => console.warn("Validation metrics error:", e));
+      }
+
       // BP and Glucose estimation from PPG morphological analysis
       const bpSysVal = analysis.bp?.systolic ?? (demoMode ? 110 + Math.round((Math.random() - 0.5) * 20) : null);
       const bpDiaVal = analysis.bp?.diastolic ?? (demoMode ? 70 + Math.round((Math.random() - 0.5) * 15) : null);
@@ -583,21 +611,40 @@ export default function VitalMonitoringPage() {
       // Always update with new values when available, preserving last valid otherwise
       setBpm(hr);
       if (hr !== null) {
-        // Update Hb and SpO2 when heart rate is valid, preserving last valid value if new one unavailable
-        setHb(hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
-        setSpo2(spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
-        if (spo2MethodUsed === "empirical") setSpo2Method("empirical");
+        // Use validation result Hb/SpO2 if available (HMALCNN for contact, enhanced empirical for both)
+        const valHb = validationResultRef.current?.hb?.hb ?? null;
+        const valSpo2 = validationResultRef.current?.spo2?.spo2 ?? null;
+        const rawValSpo2Method = validationResultRef.current?.spo2?.method ?? "empirical";
+        // Map validation method to UI state: "ratio-of-ratios" | "log-ratio" -> "empirical", "rosenet" stays
+        const valSpo2Method = rawValSpo2Method === "rosenet" ? "rosenet" : "empirical";
+        
+        setHb(valHb ?? hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : null));
+        setSpo2(valSpo2 ?? spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : null));
+        if (valSpo2Method !== "empirical") setSpo2Method(valSpo2Method);
+        else if (spo2MethodUsed === "empirical") setSpo2Method("empirical");
       }
-      // Update BP and Glucose from PPG analysis
-      setBp(bpSysVal !== null && bpDiaVal !== null ? `${bpSysVal}/${bpDiaVal}` : null);
-      setSugar(glucoseVal);
-      setCreatinine(analysis.creatinine);
-      if (analysis.respRate !== null) {
-        setRespRate(Math.round(analysis.respRate * 10) / 10);
+      // Update BP from validation result (includes waveform features) or analysis
+      const valBpSys = validationResultRef.current?.bp?.systolic ?? bpSysVal;
+      const valBpDia = validationResultRef.current?.bp?.diastolic ?? bpDiaVal;
+      setBp(valBpSys !== null && valBpDia !== null ? `${valBpSys}/${valBpDia}` : null);
+      // Update Glucose from validation or analysis
+      const valGlucose = validationResultRef.current?.glucose?.glucose ?? glucoseVal;
+      setSugar(valGlucose);
+      // Update Creatinine from validation (includes mode-specific confidence) or analysis
+      const valCreatinine = validationResultRef.current?.creatinine?.creatinine ?? analysis.creatinine?.creatinine;
+      setCreatinine(validationResultRef.current?.creatinine ?? analysis.creatinine);
+      // Update RR from validation (SQI-weighted fusion) or analysis
+      const valRespRate = validationResultRef.current?.respRate?.respRate ?? analysis.respRate;
+      if (valRespRate !== null) {
+        setRespRate(Math.round(valRespRate * 10) / 10);
       } else if (demoMode) {
         setRespRate(Math.round((15 + (Math.random() - 0.5) * 2) * 10) / 10);
       }
-      if (analysis.hrv) {
+      // Update HRV from validation (Lomb-Scargle LF/HF, 120 Hz upsampled) or analysis
+      const valHrv = validationResultRef.current?.hrv;
+      if (valHrv) {
+        setHrv({ sdnn: valHrv.sdnn, rmssd: valHrv.rmssd, pnn50: valHrv.pnn50 });
+      } else if (analysis.hrv) {
         setHrv({ sdnn: analysis.hrv.sdnn, rmssd: analysis.hrv.rmssd, pnn50: analysis.hrv.pnn50 });
       } else if (demoMode) {
         const sdnn = baseHrvRef.current.sdnn + (Math.random() - 0.5) * 4;
@@ -605,23 +652,36 @@ export default function VitalMonitoringPage() {
         const pnn50 = Math.max(0, baseHrvRef.current.pnn50 + (Math.random() - 0.5) * 4);
         setHrv({ sdnn, rmssd, pnn50 });
       }
-      setRhythm(analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm);
+      // Update rhythm from validation or analysis
+      setRhythm(validationResultRef.current?.heartRate?.method ? 
+        (validationResultRef.current.heartRate.method === "peak-detection" ? "regular" : "regular") 
+        : (analysis.rhythm === "unknown" && demoMode ? "regular" : analysis.rhythm));
 
       if (isMeasuring && hr !== null) {
+        const valHb = validationResultRef.current?.hb?.hb ?? null;
+        const valSpo2 = validationResultRef.current?.spo2?.spo2 ?? null;
+        const valBpSys = validationResultRef.current?.bp?.systolic ?? bpSysVal ?? 0;
+        const valBpDia = validationResultRef.current?.bp?.diastolic ?? bpDiaVal ?? 0;
+        const valGlucose = validationResultRef.current?.glucose?.glucose ?? glucoseVal ?? 0;
+        const valCreatinine = validationResultRef.current?.creatinine?.creatinine ?? analysis.creatinine?.creatinine ?? 0;
+        const valRespRate = validationResultRef.current?.respRate?.respRate ?? analysis.respRate ?? 15;
+        const valHrv = validationResultRef.current?.hrv;
+        const valRhythm = validationResultRef.current?.heartRate?.method ? "regular" : (analysis.rhythm === "unknown" ? "regular" : analysis.rhythm);
+        
         samplesRef.current.push({
           bpm: hr,
-          spo2: spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
-          hb: hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
-          bpSys: bpSysVal ?? 0,
-          bpDia: bpDiaVal ?? 0,
-          sugar: glucoseVal ?? 0,
-          creatinine: analysis.creatinine.creatinine ?? (demoMode ? 1.0 + (Math.random() - 0.5) * 0.3 : 0),
+          spo2: valSpo2 ?? spo2Val ?? (demoMode ? Math.round(97 + (Math.random() - 0.5) * 2) : 0),
+          hb: valHb ?? hbVal ?? (demoMode ? 13.5 + (Math.random() - 0.5) * 1.0 : 0),
+          bpSys: valBpSys,
+          bpDia: valBpDia,
+          sugar: valGlucose,
+          creatinine: valCreatinine ?? (demoMode ? 1.0 + (Math.random() - 0.5) * 0.3 : 0),
           signalQuality: sqi / 100,
-          respRate: analysis.respRate ?? 15,
-          sdnn: analysis.hrv?.sdnn ?? 0,
-          rmssd: analysis.hrv?.rmssd ?? 0,
-          pnn50: analysis.hrv?.pnn50 ?? 0,
-          rhythm: analysis.rhythm === "unknown" ? "regular" : analysis.rhythm,
+          respRate: valRespRate,
+          sdnn: valHrv?.sdnn ?? analysis.hrv?.sdnn ?? 0,
+          rmssd: valHrv?.rmssd ?? analysis.hrv?.rmssd ?? 0,
+          pnn50: valHrv?.pnn50 ?? analysis.hrv?.pnn50 ?? 0,
+          rhythm: valRhythm,
         });
       }
     }
