@@ -10,11 +10,13 @@
 │       ├── page.tsx            # Home page
 │       ├── globals.css         # Global styles
   │       ├── vital-monitoring/
-  │       │   └── page.tsx        # Real-time PPG monitoring
-  │       │   └── rosenet-inference.ts  # ROSE-Net TF.js model (SpO2)
-  │       │   └── trppg-pipeline.ts     # TrPPG pipeline (10 stages)
-  │       │   └── ppg-analysis.ts       # Signal processing
+  │       │   └── page.tsx              # Real-time PPG monitoring (front + rear camera)
+  │       │   └── rosenet-inference.ts  # ROSE-Net TF.js model (SpO2 + Hb estimation)
+  │       │   └── mediapipe-face-roi.ts  # MediaPipe FaceMesh ROI detector (Google AI Edge)
+  │       │   └── trppg-pipeline.ts     # TrPPG pipeline (10-stage signal processing)
+  │       │   └── ppg-analysis.ts       # Signal processing (HR, HRV, RR, SQI, BP, glucose, creatinine)
   │       │   └── rrest-resp.ts         # RRest respiratory rate
+  │       │   └── rppg-resp.ts          # rPPG respiratory rate
   │       ├── training/
   │       │   └── page.tsx         # Training dashboard
   │       └── api/
