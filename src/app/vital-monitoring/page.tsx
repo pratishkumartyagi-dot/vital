@@ -108,7 +108,7 @@ export default function VitalMonitoringPage() {
   } | null>(null);
   const [respRate, setRespRate] = useState<number | null>(null);
   const [hrv, setHrv] = useState<{ sdnn: number; rmssd: number; pnn50: number } | null>(null);
-  const [rhythm, setRhythm] = useState<"regular" | "irregular" | "unknown">("unknown");
+  const [rhythm, setRhythm] = useState<"regular" | "variable" | "irregular" | "unknown">("unknown");
   const [fingerDetected, setFingerDetected] = useState(false);
   const valuesRef = useRef<number[]>([]);
   const redRef = useRef<number[]>([]);
