@@ -1,32 +1,42 @@
+import VitalScanApp from "./vital-monitoring/vital-scan-app";
+
 export default function Home() {
   return (
-    <main className="min-h-screen bg-neutral-50 text-neutral-900 flex items-center justify-center">
-      <div className="text-center px-6">
-        <h1 className="text-4xl font-bold mb-4">Vital Scan App</h1>
-        <p className="text-lg text-neutral-600 mb-6">
-          Research-grade PPG signal processing and real-time waveform analysis.
-        </p>
-        <div className="flex gap-4 justify-center">
-          <a
-            href="/vital-monitoring"
-            className="inline-block px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
-          >
-            Launch Vital Scan
-          </a>
-          <a
-            href="/validation"
-            className="inline-block px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-          >
-            Validation
-          </a>
-          <a
-            href="/training"
-            className="inline-block px-6 py-3 bg-neutral-800 text-white rounded-lg hover:bg-neutral-700 transition"
-          >
-            Training Dashboard
-          </a>
+    <div className="min-h-screen bg-neutral-950 text-neutral-50">
+      <header className="sticky top-0 z-10 border-b border-neutral-800 bg-neutral-900/80 backdrop-blur">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4 px-6 py-4">
+          <div>
+            <h1 className="text-xl font-extrabold tracking-tight">Vital Scan App</h1>
+            <p className="text-xs text-neutral-400">
+              Research-grade PPG signal processing and real-time waveform analysis.
+            </p>
+          </div>
+          <nav className="flex flex-wrap gap-2 text-sm">
+            <a
+              href="#vital-scan"
+              className="rounded-lg bg-red-600 px-4 py-2 font-semibold text-white transition hover:bg-red-700"
+            >
+              Vital Scan
+            </a>
+            <a
+              href="/validation"
+              className="rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white transition hover:bg-blue-700"
+            >
+              Validation
+            </a>
+            <a
+              href="/training"
+              className="rounded-lg bg-neutral-800 px-4 py-2 font-semibold text-white transition hover:bg-neutral-700"
+            >
+              Training Dashboard
+            </a>
+          </nav>
         </div>
-      </div>
-    </main>
+      </header>
+
+      <section id="vital-scan" className="mx-auto max-w-5xl">
+        <VitalScanApp />
+      </section>
+    </div>
   );
 }
