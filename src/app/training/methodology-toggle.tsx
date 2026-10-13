@@ -14,7 +14,7 @@ interface MethodSection {
 }
 
 const methodologyContent: { title: string; subtitle: string; sections: MethodSection[] } = {
-  title: "Vital Scan — Methodology Report",
+  title: "Resilient Health — Methodology Report",
   subtitle: "Contact PPG (Rear Camera) & Remote PPG (Front Camera) Vital Signs Estimation",
   sections: [
     {

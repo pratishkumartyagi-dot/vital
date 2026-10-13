@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Vital Scan App",
-  description: "Research-grade PPG vital signs monitor",
+  title: "Resilient Health",
+  description: "Camera-based vital signs monitoring for resilient, continuous care",
 };
 
 export default function RootLayout({

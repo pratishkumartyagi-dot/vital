@@ -1106,7 +1106,7 @@ export default function VitalMonitoringPage() {
   if (!patient) {
     return (
       <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
-        <h1 className="text-4xl font-extrabold mb-2 tracking-tight text-center">PPG Vital Scan</h1>
+        <h1 className="text-4xl font-extrabold mb-2 tracking-tight text-center">Resilient Health</h1>
         <p className="text-base text-neutral-400 mb-6 max-w-lg text-center">
           Enter patient details to begin a 100-second measurement session.
         </p>
@@ -1252,7 +1252,7 @@ export default function VitalMonitoringPage() {
               onClick={submitPatientInfo}
               className="w-full mt-2 px-5 py-2.5 rounded-full text-sm font-semibold bg-red-600 hover:bg-red-700 active:bg-red-800 transition shadow-lg shadow-red-900/30"
             >
-              Launch Vital Scan
+              Start Scan
             </button>
           </div>
         </div>
@@ -1266,7 +1266,7 @@ export default function VitalMonitoringPage() {
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
-      <h1 className="text-4xl font-extrabold mb-4 tracking-tight text-center">Vital Scan</h1>
+      <h1 className="text-4xl font-extrabold mb-4 tracking-tight text-center">Resilient Health</h1>
         <div className="mb-4 px-3 py-2 rounded-full bg-neutral-900 border border-neutral-800 text-xs text-neutral-300">
           <span className="text-neutral-500 mr-2">Patient:</span>
           <span className="font-semibold text-neutral-100">{patient.name}</span>
@@ -1693,7 +1693,7 @@ export default function VitalMonitoringPage() {
                 }}
                 className="mt-4 w-full px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 transition"
               >
-                 Start New Vital Scan
+                 Start New Scan
               </button>
             </div>
           </div>

@@ -4,7 +4,7 @@ import TrainingMethodologyToggle from './methodology-toggle';
 export default function TrainingPage() {
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-50 flex flex-col items-center justify-center px-6 py-12">
-      <h1 className="text-3xl font-bold mb-4 text-red-400">Vital Scan — MCD-rPPG Training Dashboard</h1>
+      <h1 className="text-3xl font-bold mb-4 text-red-400">Resilient Health — MCD-rPPG Training Dashboard</h1>
       <p className="text-base text-neutral-400 mb-8 max-w-lg text-center">
         Train the SCNN_8rois model for remote photoplethysmography using the MCD-rPPG dataset.
       </p>
@@ -83,7 +83,7 @@ python training/run_training.py \\
 
       <div className="mt-6 flex gap-4">
         <Link href="/vital-monitoring" className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm rounded-lg transition">
-           Launch Vital Scan
+           Start Scan
         </Link>
         <Link href="/" className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white text-sm rounded-lg transition">
           Home
