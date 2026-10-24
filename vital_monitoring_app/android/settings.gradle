@@ -1,1 +1,10 @@
+pluginManagement {
+    repositories {
+        maven { url '/root/.m2/repository/' }
+        google()
+        maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+    }
+}
+
 include ':app'
+includeBuild '/opt/flutter/packages/flutter_tools/gradle'

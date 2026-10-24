@@ -89,6 +89,11 @@ class VitalSignController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void enableDemoMode() {
+    if (_isDemoMode) return;
+    _enableDemoMode();
+  }
+
   void _startDemoTimer() {
     _demoTimer?.cancel();
     _demoTimer = Timer.periodic(const Duration(milliseconds: 33), (timer) { // ~30fps
